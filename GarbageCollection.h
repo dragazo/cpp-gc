@@ -45,6 +45,8 @@ private: // -- private types -- //
 		outgoing_t(*const outgoing)(); // offsets of outgoing gc-qualified pointers from obj
 		std::size_t ref_count;         // the reference count for this allocation
 
+		bool marked; // only used for GC::collect() - otherwise undefined
+
 		info *prev; // the std::list iterator contract isn't quite what we want
 		info *next; // so we need to manage a linked list on our own
 
@@ -230,6 +232,11 @@ private: // -- data -- //
 
 private: // -- private interface -- //
 
+	// -----------------------------------------------------------------
+	// functions in this block that start with "__" are not thread safe.
+	// all other functions in this block are thread safe.
+	// -----------------------------------------------------------------
+
 	// registers a gc_info* as a root.
 	// if it's already a root, does nothing.
 	static void root(info *&handle);
@@ -246,11 +253,22 @@ private: // -- private interface -- //
 	// <outgoing> is a function that returns the begin/end range of outgoing gc-qualified pointer offsets from <obj>.
 	static info *create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)());
 
+	// unlinks handle from the gc database.
+	// it is undefined behavior if handle is not currently in the gc database.
+	// the prev/next pointers of handle are not modified by this operation (though others in the gc database are).
+	static void __unlink(info *handle);
+	// invokes the stored deleter for handle's object and deletes the handle itself.
+	// this is meant to be used on a handle after it has been unlinked from the gc database.
+	static void __destroy(info *handle);
+
 	// adds/removes a reference count to/from a garbage-collected object.
 	// <handle> is the address of an object currently under garbage collection.
 	// if <handle> does not refer to a pre-existing gc allocation, calls std::exit(1).
 	static void addref(info *handle);
 	static void delref(info *handle);
+
+	// performs a mark sweep operation from the given handle.
+	static void __mark_sweep(info *handle);
 };
 
 // -------------------- //
