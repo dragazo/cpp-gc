@@ -19,20 +19,21 @@ struct base1 { virtual ~base1() = default; };
 struct base2 { virtual ~base2() = default; };
 struct derived : base1, base2 {};
 
-gc_outgoing_t get_ptr_offsets() { return {std::begin(ptr_offsets), std::end(ptr_offsets)}; }
+GC::outgoing_t get_ptr_offsets() { return {std::begin(ptr_offsets), std::end(ptr_offsets)}; }
 
 constexpr auto oa = offsetof(thingy, a);
 constexpr auto ob = offsetof(thingy, b);
 
 int main()
 {
-
-	gc_ptr<int> i3;
+	GC::ptr<int> i3;
 	{
-		gc_ptr<int> i = make_gc<int>(69);
-		gc_ptr<std::string> str = make_gc<std::string>("hello world!! ayeee lmao :3");
+		GC::ptr<int> i = GC::make<int>(69);
+		GC::ptr<std::string> str = GC::make<std::string>("hello world!! ayeee lmao :3");
 
-		gc_ptr<int> i2 = i;
+		GC::ptr<int> i2 = i;
+
+		GC::ptr<int> i4;
 
 		i2 = i;
 		i3 = i2;
@@ -44,8 +45,8 @@ int main()
 		if (i3 == i2) std::cout << "same obj\n\n";
 		else std::cout << "different obj\n\n";
 
-		std::cout << "val: " << *i << '\n';
-		std::cout << "msg: " << *str << '\n';
+		if (i) std::cout << "val: " << *i << '\n'; else std::cout << "BAD!!\n";
+		if (str) std::cout << "msg: " << *str << '\n'; else std::cout << "BAD!!\n";
 
 		//gc_ptr<int> i2 = i;
 	}
