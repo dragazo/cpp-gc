@@ -20,5 +20,69 @@ When you allocate an object via `GC::make<T>(Args...)` it creates a garbage-coll
 
 Here's the good news: `cpp-gc` is threadsafe, which it accomplishes by locking a mutex for core gc operations (e.g. bumping up/down a reference count, allocation, collect, etc.). However, this also means you can run a `GC::collect()` from another thread and continue to work on whatever you want. So long as you don't trigger a gc operation, you won't be blocked (in general, just don't create or destroy `GC::ptr` objects).
 
+# The Downside
+
+Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the relative address of each garbage-collected pointer in a struct. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your struct and poking around for the right types. Because of this, if you have a struct that contains a `GC::ptr` instance by value, you need to specify that explicitly. So how do you do this?
+
+`GC::outgoing_t` is a typedef for a pair of begin/end iterators into an array of byte offsets in a given object. `GC::outgoing<T>()` is the standardized way by which `cpp-gc` does this. When you call `GC::make<T>()`, it automatically uses `GC::outgoing<T>()` to fetch info on the "outgoing" `GC::ptr` instances from `T`. The default implementation of `GC::outgoing<T>()` returns an empty iterator range, which is sufficient for any type that does not contain a `GC::ptr` by value. If this is not the case, you need to specialize `GC::outgoing<T>()` for your type `T`.
+
+Here's an example:
+
+```cpp
+// a type that contains GC::ptr instances by value
+struct foo
+{
+    GC::ptr<foo> prev;
+    GC::ptr<foo> next;
+};
+// because of this, we need to specialize the GC::outgoing function
+template<>
+GC::outgoing_t GC::outgoing<foo>()
+{
+    static const std::size_t offsets[] = { offsetof(foo, prev), offsetof(foo, next) };
+    return {std::begin(offsets), std::end(offsets)};
+}
+
+/* ... later on in the code ... */
+
+void func()
+{
+    // once GC::outgoing is specialized, we can use GC::ptr and GC::make as usual
+    GC::ptr<foo> ptr = GC::make<foo>();
+}
+```
+
+Here's another example where the internal pointers are private
+
+```cpp
+// a type that contains GC::ptr instances by value
+struct foo
+{
+private:
+    GC::ptr<foo> prev;
+    GC::ptr<foo> next;
+    
+    // we need to use a friend helper function so that it can look at our private data
+    friend GC::outgoing_t foo_outgoing_helper();
+public:
+    // accessors/etc
+};
+GC::outgoing_t foo_outgoing_helper()
+{
+    static const std::size_t offsets[] = { offsetof(foo, prev), offsetof(foo, next) };
+    return {std::begin(offsets), std::end(offsets)};
+}
+// specialize GC::outgoing for foo and use our helper function
+template<> GC::outgoing_t GC::outgoing<foo>() { return foo_outgoing_helper(); }
+
+/* ... later on in the code ... */
+
+void func()
+{
+    // once GC::outgoing is specialized, we can use GC::ptr and GC::make as usual
+    GC::ptr<foo> ptr = GC::make<foo>();
+}
+```
+
 # Examples
 
