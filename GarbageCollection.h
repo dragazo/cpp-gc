@@ -55,7 +55,7 @@ private: // -- private types -- //
 	};
 
 public: // -- public interface -- //
-	template<typename T> struct ptr;
+	
 	// wraps the gc management functions into a self-managed system that requires no thought to use.
 	template<typename T>
 	struct ptr
@@ -127,14 +127,12 @@ public: // -- public interface -- //
 			// we're new - inc ref count
 			if (handle) GC::addref(handle);
 		}
-		ptr(ptr&&) = delete;
 
 		ptr &operator=(const ptr &other)
 		{
 			reset(other.handle);
 			return *this;
 		}
-		ptr &operator=(ptr&&) = delete;
 
 		// equivalent to reset(nullptr)
 		ptr &operator=(std::nullptr_t)
@@ -190,11 +188,25 @@ public: // -- public interface -- //
 	template<typename T, typename ...Args>
 	static ptr<T> make(Args &&...args)
 	{
-		// allocate the object
+		// allocate the object and get a raw pointer to it (avoiding any user-defined conversions)
 		std::unique_ptr<T> obj = std::make_unique<T>(std::forward<Args>(args)...);
+		void *raw = reinterpret_cast<void*>(obj.get());
+
+		// for each outgoing arc from obj
+		for (outgoing_t outs = GC::outgoing<T>(); outs.first != outs.second; ++outs.first)
+		{
+			// get reference to this arc
+			GC::info *&arc = *(GC::info**)((char*)raw + *outs.first);
+
+			// mark this arc as not being a root (because obj owns it by value)
+			GC::unroot(arc);
+		}
 
 		// create a handle for it
-		GC::info *handle = GC::create(obj.release(), [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>);
+		GC::info *handle = GC::create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>);
+
+		// unlink it from the smart pointer (all the dangerous stuff is done)
+		obj.release();
 
 		// return it as a ptr
 		return ptr<T>(handle);

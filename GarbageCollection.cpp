@@ -62,21 +62,34 @@ void GC::addref(info *handle)
 }
 void GC::delref(info *handle)
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	
-	// dec its ref count - if result is now zero, delete it
-	if (--handle->ref_count == 0)
-	{
-		// remove it from the gc database
-		if (handle == first && handle == last) first = last = nullptr;
-		else if (handle == first) (first = first->next)->prev = nullptr;
-		else if (handle == last) (last = last->prev)->next = nullptr;
-		else
-		{
-			handle->prev->next = handle->next;
-			handle->next->prev = handle->prev;
-		}
+	std::size_t ref_count;
 
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+
+		// dec ref count and store result
+		ref_count = --handle->ref_count;
+
+		// if ref count is now zero, remove it from the gc database
+		if (ref_count)
+		{
+			// remove it from the gc database
+			if (handle == first && handle == last) first = last = nullptr;
+			else if (handle == first) (first = first->next)->prev = nullptr;
+			else if (handle == last) (last = last->prev)->next = nullptr;
+			else
+			{
+				handle->prev->next = handle->next;
+				handle->next->prev = handle->prev;
+			}
+		}
+	}
+
+	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
+
+	// if ref count fell to zero, delete the object
+	if (ref_count == 0)
+	{
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
 
 		// call its deleter for the stored object
