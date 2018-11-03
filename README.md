@@ -24,65 +24,96 @@ Here's the good news: `cpp-gc` is threadsafe, which it accomplishes by locking a
 
 Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the relative address of each garbage-collected pointer in a struct. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your struct and poking around for the right types. Because of this, if you have a struct that contains a `GC::ptr` instance by value, you need to specify that explicitly. So how do you do this?
 
-`GC::outgoing_t` is a typedef for a pair of begin/end iterators into an array of byte offsets in a given object. `GC::outgoing<T>()` is the standardized way by which `cpp-gc` does this. When you call `GC::make<T>()`, it automatically uses `GC::outgoing<T>()` to fetch info on the "outgoing" `GC::ptr` instances from `T`. The default implementation of `GC::outgoing<T>()` returns an empty iterator range, which is sufficient for any type that does not contain a `GC::ptr` by value. If this is not the case, you need to specialize `GC::outgoing<T>()` for your type `T`.
+`GC::outgoing_t` is a typedef for a pair of begin/end iterators into an array of byte offsets in a given object. `GC::outgoing<T>` is the standardized way by which `cpp-gc` does this. When you call `GC::make<T>()`, it automatically uses `GC::outgoing<T>::get()` to fetch info on the "outgoing" `GC::ptr` instances from `T`. The default implementation of `GC::outgoing<T>` returns an empty iterator range, which is sufficient for any type that does not contain a `GC::ptr` by value. If this is not the case, you need to specialize `GC::outgoing<T>()` for your type `T`.
 
-Here's an example:
-
-```cpp
-// a type that contains GC::ptr instances by value
-struct foo
-{
-    GC::ptr<foo> prev;
-    GC::ptr<foo> next;
-};
-// because of this, we need to specialize the GC::outgoing function
-template<>
-GC::outgoing_t GC::outgoing<foo>()
-{
-    static const std::size_t offsets[] = { offsetof(foo, prev), offsetof(foo, next) };
-    return {std::begin(offsets), std::end(offsets)};
-}
-
-/* ... later on in the code ... */
-
-void func()
-{
-    // once GC::outgoing is specialized, we can use GC::ptr and GC::make as usual
-    GC::ptr<foo> ptr = GC::make<foo>();
-}
-```
-
-Here's another example where the internal pointers are private
-
-```cpp
-// a type that contains GC::ptr instances by value
-struct foo
-{
-private:
-    GC::ptr<foo> prev;
-    GC::ptr<foo> next;
-    
-    // we need to use a friend helper function so that it can look at our private data
-    friend GC::outgoing_t foo_outgoing_helper();
-public:
-    // accessors/etc
-};
-GC::outgoing_t foo_outgoing_helper()
-{
-    static const std::size_t offsets[] = { offsetof(foo, prev), offsetof(foo, next) };
-    return {std::begin(offsets), std::end(offsets)};
-}
-// specialize GC::outgoing for foo and use our helper function
-template<> GC::outgoing_t GC::outgoing<foo>() { return foo_outgoing_helper(); }
-
-/* ... later on in the code ... */
-
-void func()
-{
-    // once GC::outgoing is specialized, we can use GC::ptr and GC::make as usual
-    GC::ptr<foo> ptr = GC::make<foo>();
-}
-```
+This will be demonstrated in the examples below:
 
 # Examples
+
+For our example, we'll make a doubly-linked list that supports garbage collection. We'll begin by defining our node type `ListNode`.
+
+```cpp
+struct ListNode
+{
+    GC::ptr<ListNode> prev;
+    GC::ptr<ListNode> next;
+    
+    // show a message that says we called ctor
+    ListNode() { std::cerr << "i'm alive!!\n"; }
+    
+    // show a message that says we called dtor
+    ~ListNode() { std::cerr << "i died!!\n"; }
+};
+```
+
+Because this contains `GC::ptr` objects by value, we need to specialize `GC::outgoing` for our type.
+
+```cpp
+template<>
+struct GC::outgoing<ListNode>
+{
+    static GC::outgoing_t get()
+    {
+        static const std::size_t offsets[] = {offsetof(ListNode, prev), offsetof(ListNode, next)};
+        return {std::begin(offsets), std::end(offsets)};
+    }
+};
+```
+
+That's all the setup we need - from here on it's smooth sailing. Let's construct the doubly-linked list.
+
+```cpp
+// creates a linked list that has a cycle
+void foo()
+{
+    // create the first node
+    GC::ptr<ListNode> root = GC::make<ListNode>();
+
+    // we'll make 10 links in the chain
+    GC::ptr<ListNode> *prev = &root;
+    for (int i = 0; i < 10; ++i)
+    {
+        (*prev)->next = GC::make<ListNode>();
+        (*prev)->next->prev = *prev;
+
+        prev = &(*prev)->next;
+    }
+}
+```
+
+If you run this, you'll find none of the objects are deallocated. This is because we created a bunch of cycles due to making a *doubly*-linked list. As stated above, `cpp-gc` cleans this up via `GC::collect()`. Let's do that now:
+
+```cpp
+// the function that called foo()
+void bar()
+{
+    // we need to call foo()
+    foo();
+    
+    std::cerr << "\n\ncalling collect():\n\n";
+    
+    // but you know what, just to be safe, let's clean up any objects it left lying around unused
+    GC::collect();
+}
+```
+
+As soon as `GC::collect()` is executed, all the cycles will be dealt with and you should get a lot of messages from destructors. It's that easy. And, as already explained above, you don't really need to run `GC::collect()` very often - only if you really need to.
+
+But you know what? `cpp-gc` is far more powerful than that. In fact, it's completely thread safe, so you might find it more performant to write the above function another way:
+
+```cpp
+// the function that called foo()
+void async_bar()
+{
+    // we need to call foo()
+    foo();
+    
+    std::cerr << "\n\ncalling collect():\n\n";
+    
+    // run GC::collect in another thread while we work on other stuff
+    std::thread(GC::collect).detach();
+    
+    // ... do other stuff - anything not involving gc operations will not block ... //
+}
+```
 
