@@ -48,7 +48,7 @@ private: // -- private types -- //
 
 		bool marked; // only used for GC::collect() - otherwise undefined
 
-		std::atomic_flag destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
+		bool destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
 
 		info *prev; // the std::list iterator contract isn't quite what we want
 		info *next; // so we need to manage a linked list on our own
@@ -83,11 +83,14 @@ public: // -- public interface -- //
 			// we only need to do anything if we refer to different gc allocations
 			if (handle != _handle)
 			{
+				std::lock_guard<std::mutex> lock(GC::mutex);
+
 				// drop our object
-				if (handle) GC::delref(std::exchange(handle, _handle));
+				if (handle) GC::__delref(handle);
 
 				// take on other's object
-				if (handle) GC::addref(handle);
+				handle = _handle;
+				if (handle) GC::__addref(handle);
 			}
 		}
 
@@ -95,7 +98,7 @@ public: // -- public interface -- //
 		struct no_rooting_t {};
 		explicit ptr(no_rooting_t) : handle(nullptr) {}
 		// meant to be used after the no_rooting_t ctor - SETS HANDLE AND ROOTS INTERNAL HANDLE
-		void _init(GC::info *_handle)
+		void __init(GC::info *_handle)
 		{
 			handle = _handle;
 			GC::__root(handle);
@@ -212,7 +215,7 @@ public: // -- public interface -- //
 			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
 
 			// initialize ptr with handle
-			res._init(handle);
+			res.__init(handle);
 
 			// unlink obj from the smart pointer (all the dangerous stuff is done)
 			obj.release();
@@ -278,6 +281,7 @@ private: // -- private interface -- //
 	// if <handle> does not refer to a pre-existing gc allocation, calls std::exit(1).
 	static void __addref(info *handle);
 	static void addref(info *handle);
+	static void __delref(info *handle);
 	static void delref(info *handle);
 
 	// performs a mark sweep operation from the given handle.
