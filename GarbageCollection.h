@@ -237,10 +237,10 @@ public: // -- public interface -- //
 
 			// initialize ptr with handle
 			res.__init(handle);
-
-			// unlink obj from the smart pointer (all the dangerous stuff is done)
-			obj.release();
 		}
+
+		// unlink obj from the smart pointer (all the dangerous stuff is done)
+		obj.release();
 
 		// return the created ptr
 		return res;
