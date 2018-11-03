@@ -20,15 +20,15 @@ class GC
 {
 public: // -- outgoing arcs -- //
 
-	// the type used to represent the outgoing garbage-collected pointers from an object.
-	// this is a pair of begin/end iterators to an array of byte offsets for said gc pointers in the object.
-	// only GC::ptr counts as a gc pointer - including any other type is undefined behavior.
-	// it is undefined behavior for a type to have a gc pointer that is not represented in this range.
+	// the type used to represent the outgoing GC::ptr instances from a given object.
+	// this is a pair of begin/end iterators to an array of byte offsets for said GC::ptr instances in the object.
 	typedef std::pair<const std::size_t*, const std::size_t*> outgoing_t;
 
-	// standardized way of getting gc_outgoing_t values for the ptr wrapper class.
-	// default implementation is sufficient for any type that does not contain a gc qualified pointer.
-	// if this is not the case, you must specialize this template function to work for your type.
+	// standardized way of getting GC::outgoing_t values for any type T.
+	// this default implementation is sufficient for any type that does not contain a GC::ptr by value.
+	// if this is not the case, you must specialize this template to work for your type prior to using any gc utilities.
+	// it is undefined behavior for a type to hold a GC::ptr by value that is not represented in this range.
+	// it is undefined behavior for any type other than GC::ptr to be represented in this range.
 	template<typename T>
 	struct outgoing { static outgoing_t get() { return {nullptr, nullptr}; } };
 
@@ -42,7 +42,7 @@ private: // -- private types -- //
 		void *const obj;             // pointer to the managed object
 		void(*const deleter)(void*); // a deleter function to eventually delete obj
 
-		outgoing_t(*const outgoing)(); // offsets of outgoing gc-qualified pointers from obj
+		outgoing_t(*const outgoing)(); // offsets of outgoing GC::ptr from obj
 		std::size_t ref_count;         // the reference count for this allocation
 
 		bool marked; // only used for GC::collect() - otherwise undefined
@@ -58,7 +58,7 @@ private: // -- private types -- //
 
 public: // -- public interface -- //
 	
-	// wraps the gc management functions into a self-managed system that requires no thought to use.
+	// a self-managed garbage-collected pointer
 	template<typename T>
 	struct ptr
 	{
@@ -72,6 +72,8 @@ public: // -- public interface -- //
 
 	private: // -- helpers -- //
 
+		// changes what handle we should use, properly unlinking ourselves from the old one and linking to the new one.
+		// the new handle must come from a pre-existing ptr object of the same type.
 		void reset(GC::info *_handle = nullptr)
 		{
 			// we only need to do anything if we refer to different gc allocations
@@ -86,11 +88,11 @@ public: // -- public interface -- //
 			}
 		}
 
-		// constructs a new ptr that manages the specified handle.
-		// the handle must be either null (creates an empty ptr) or refer to a valid gc_info object.
-		// the handle must have been allocated via gc_create().
+		// constructs a new ptr that manages the specified handle from here on.
+		// the handle must either be null (creates an empty ptr) or refer to a valid GC::info object.
+		// the handle must have been allocated via GC::create().
 		// the handle must not be modified in any way or passed to any gc functions before or after this call.
-		// the handle must not have already been given to a different ptr's constructor.
+		// the handle must not have already been given to a different ptr for management.
 		// the handle's referenced object must refer to a valid object of type T.
 		explicit ptr(GC::info *_handle) : handle(_handle)
 		{
@@ -118,47 +120,34 @@ public: // -- public interface -- //
 			GC::unroot(handle);
 		}
 
-		ptr(const ptr &other)
+		ptr(const ptr &other) : handle(other.handle)
 		{
 			// register handle as a root
 			GC::root(handle);
-
-			// we'll point at the same object
-			handle = other.handle;
 
 			// we're new - inc ref count
 			if (handle) GC::addref(handle);
 		}
 
-		ptr &operator=(const ptr &other)
-		{
-			reset(other.handle);
-			return *this;
-		}
+		ptr &operator=(const ptr &other) { reset(other.handle);	return *this; }
 
-		// equivalent to reset(nullptr)
-		ptr &operator=(std::nullptr_t)
-		{
-			reset(nullptr);
-			return *this;
-		}
+		ptr &operator=(std::nullptr_t) { reset(nullptr); return *this; }
 
 	public: // -- obj access -- //
 
 		T &operator*() const { return *(T*)handle->obj; }
 		T *operator->() const { return (T*)handle->obj; }
 
-		// returns the current number of gc-qualified pointers referencing the same object as this instance.
+		// returns the number of references to the current object.
 		// if this object is not pointing at any object, returns 0.
 		std::size_t use_count() const { return handle ? handle->ref_count : 0; }
 
-		// gets a pointer to the pointed-to managed object.
+		// gets a pointer to the managed object.
 		// if this ptr does not point at a managed object, returns null.
-		// DO NOT DELETE THIS
 		T *get() const { return handle ? (T*)handle->obj : nullptr; }
 
-		// reutrns true iff this ptr points to a managed object (non-null)
-		explicit operator bool() const { return get() != nullptr; }
+		// returns true iff this ptr points to a managed object (non-null)
+		explicit operator bool() const { return handle != nullptr; }
 
 	public: // -- comparison -- //
 
@@ -184,7 +173,7 @@ public: // -- public interface -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
-	// specialization of outgoing for ptr<T> (i.e. ptr<ptr<T>> needs to know ptr<T> "contains" a gc pointer - namely itself)
+	// specialization of outgoing for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>)
 	template<typename T>
 	struct outgoing<ptr<T>>
 	{
@@ -196,12 +185,11 @@ public: // -- public interface -- //
 	};
 
 	// creates a new dynamic instance of T that is bound to a ptr.
-	// this is the preferred method of creating ptr instances and minimizes error.
-	// throws any exception resulting from T's constructor but does not leak resources.
+	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
 	template<typename T, typename ...Args>
 	static ptr<T> make(Args &&...args)
 	{
-		// allocate the object and get a raw pointer to it (avoiding any user-defined conversions)
+		// allocate the object and get a raw pointer to it
 		std::unique_ptr<T> obj = std::make_unique<T>(std::forward<Args>(args)...);
 		void *raw = reinterpret_cast<void*>(obj.get());
 
