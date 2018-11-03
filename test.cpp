@@ -2,37 +2,36 @@
 #include <string>
 
 #include "GarbageCollection.h"
-/*
-struct fancy
+
+struct Person
 {
-	GC::ptr<fancy> ptr;
+	std::string name;
+	int age;
+
+	GC::ptr<Person> best_friend;
+};
+template<> struct GC::outgoing<Person>
+{
+	static GC::outgoing_t get()
+	{
+		const std::size_t offs[] = {offsetof(Person, best_friend)};
+		return {std::begin(offs), std::end(offs)};
+	}
 };
 
-GC::outgoing_t fancy_outgoing()
-{
-	std::cerr << "custom outgoing\n";
-
-	static const std::size_t offsets[] = {offsetof(fancy, ptr)};
-	return {std::begin(offsets), std::end(offsets)};
-}
-template<> GC::outgoing_t GC::outgoing<fancy>() { return fancy_outgoing(); }
-*/
 int main()
 {
 	{
-		GC::ptr<GC::ptr<GC::ptr<GC::ptr<std::string>>>> ptr;
-		{
-			ptr = GC::make<GC::ptr<GC::ptr<GC::ptr<std::string>>>>();
-			//*ptr = GC::make<std::string>("hello, world!");
+		GC::ptr<Person> sally = GC::make<Person>();
+		sally->name = "Sally Sallison";
+		sally->age = 16;
 
+		GC::ptr<Person> veronica = GC::make<Person>();
+		veronica->name = "Veronica Vallian";
+		veronica->age = 15;
 
-
-			//std::cout << **ptr << '\n';
-
-			GC::collect();
-
-			std::cerr << "\n\nexiting block\n\n";
-		}
+		sally->best_friend = veronica;
+		veronica->best_friend = sally;
 	}
 	std::cerr << "\n\nrunning collect:\n\n";
 
