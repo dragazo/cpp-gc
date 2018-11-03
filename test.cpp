@@ -15,7 +15,7 @@ template<> struct GC::outgoing<Person>
 {
 	static GC::outgoing_t get()
 	{
-		const std::size_t offs[] = {offsetof(Person, best_friend)};
+		static const std::size_t offs[] = {offsetof(Person, best_friend)};
 		return {std::begin(offs), std::end(offs)};
 	}
 };
