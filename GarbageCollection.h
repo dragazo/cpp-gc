@@ -83,14 +83,21 @@ public: // -- public interface -- //
 			// we only need to do anything if we refer to different gc allocations
 			if (handle != _handle)
 			{
-				std::lock_guard<std::mutex> lock(GC::mutex);
+				bool call_handle_del_list = handle != nullptr;
 
-				// drop our object
-				if (handle) GC::__delref(handle);
+				{
+					std::lock_guard<std::mutex> lock(GC::mutex);
 
-				// take on other's object
-				handle = _handle;
-				if (handle) GC::__addref(handle);
+					// drop our object
+					if (handle) GC::__delref(handle);
+
+					// take on other's object
+					handle = _handle;
+					if (handle) GC::__addref(handle);
+				}
+
+				// after a call to __delref we must call handle_del_list()
+				if (call_handle_del_list) GC::handle_del_list();
 			}
 		}
 
@@ -115,20 +122,34 @@ public: // -- public interface -- //
 
 		~ptr()
 		{
-			// if we have a handle, dec reference count
-			if (handle) GC::delref(std::exchange(handle, nullptr));
+			bool call_handle_del_list = handle != nullptr;
 
-			// unregister handle as a root
-			GC::unroot(handle);
+			{
+				std::lock_guard<std::mutex> lock(GC::mutex);
+
+				// if we have a handle, dec reference count
+				if (handle) GC::__delref(handle);
+
+				// set it to null just to be safe
+				handle = nullptr;
+
+				// unregister handle as a root
+				GC::__unroot(handle);
+			}
+
+			// after a call to __delref we must call handle_del_list()
+			if (call_handle_del_list) GC::handle_del_list();
 		}
 
 		ptr(const ptr &other) : handle(other.handle)
 		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
 			// register handle as a root
-			GC::root(handle);
+			GC::__root(handle);
 
 			// we're new - inc ref count
-			if (handle) GC::addref(handle);
+			if (handle) GC::__addref(handle);
 		}
 
 		ptr &operator=(const ptr &other) { reset(other.handle);	return *this; }
@@ -235,9 +256,11 @@ private: // -- data -- //
 	static std::mutex mutex; // used to support thread-safety of gc operations
 
 	static info *first; // pointer to the first gc allocation
-	static info *last; // pointer to the last gc allocation (not the same as the end iterator)
+	static info *last;  // pointer to the last gc allocation (not the same as the end iterator)
 
 	static std::unordered_set<info**> roots; // a database of all gc root handles - (references - do not delete)
+
+	static std::unordered_set<info*> del_list; // list of handles that are scheduled for deletion (from __delref async calls)
 
 	GC() = delete; // not instantiatable
 
@@ -281,8 +304,13 @@ private: // -- private interface -- //
 	// if <handle> does not refer to a pre-existing gc allocation, calls std::exit(1).
 	static void __addref(info *handle);
 	static void addref(info *handle);
-	static void __delref(info *handle);
 	static void delref(info *handle);
+
+	// a non-threadsafe variant of delref().
+	// instead of destroying the object immediately when the ref count reaches zero, adds it to del_list.
+	// YOU MUST CALL handle_del_list() AFTER THIS (and after unlocking the mutex).
+	static void __delref(info *handle);
+	static void handle_del_list();
 
 	// performs a mark sweep operation from the given handle.
 	static void __mark_sweep(info *handle);

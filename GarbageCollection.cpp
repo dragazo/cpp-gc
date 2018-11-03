@@ -23,6 +23,8 @@ GC::info *GC::last = nullptr;
 
 std::unordered_set<GC::info**> GC::roots;
 
+std::unordered_set<GC::info*> GC::del_list;
+
 // --------------- //
 
 // -- interface -- //
@@ -86,32 +88,6 @@ void GC::addref(info *handle)
 	std::lock_guard<std::mutex> lock(mutex);
 	++handle->ref_count;
 }
-void GC::__delref(info *handle)
-{
-	// dec ref count and store result
-	std::size_t ref_count = --handle->ref_count;
-
-	// if ref count is now zero, we should destroy it
-	if (ref_count == 0)
-	{
-		// if it's already scheduled for destruction, stop
-		if (handle->destroying) return;
-		handle->destroying = true;
-
-		// unlink it from the gc database
-		__unlink(handle);
-	}
-
-	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
-
-	// if ref count fell to zero, delete the object
-	if (ref_count == 0)
-	{
-		std::cerr << "\ngc deleting " << handle->obj << '\n';
-
-		__destroy(handle);
-	}
-}
 void GC::delref(info *handle)
 {
 	std::size_t ref_count;
@@ -138,6 +114,42 @@ void GC::delref(info *handle)
 
 	// if ref count fell to zero, delete the object
 	if (ref_count == 0)
+	{
+		std::cerr << "\ngc deleting " << handle->obj << '\n';
+
+		__destroy(handle);
+	}
+}
+
+void GC::__delref(info *handle)
+{
+	// dec ref count - if ref count is now zero, we should destroy it
+	if (--handle->ref_count == 0)
+	{
+		// if it's already scheduled for destruction, stop
+		if (handle->destroying) return;
+		handle->destroying = true;
+
+		// unlink it from the gc database
+		__unlink(handle);
+
+		// add to del_list (can't delete it now cause we might be locked)
+		del_list.insert(handle);
+	}
+}
+void GC::handle_del_list()
+{
+	// make del_list a local object
+	decltype(del_list) del_list_cpy;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		del_list_cpy = std::move(del_list);
+	}
+
+	// -- make sure we're not locked at this point - could block -- //
+
+	// destroy each entry
+	for (info *handle : del_list_cpy)
 	{
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
 
