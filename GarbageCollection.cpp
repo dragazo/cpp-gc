@@ -10,6 +10,21 @@
 
 #include "GarbageCollection.h"
 
+// -------------- //
+
+// -- settings -- //
+
+// -------------- //
+
+// if nonzero, displays a message on cerr that an object was added to gc database (+ its address)
+#define GC_SHOW_CREATMSG 0
+
+// if nonzero, displays a message on cerr that an object was deleted (+ its address)
+#define GC_SHOW_DELMSG 0
+
+// if nonzero, displays info messages on cerr during GC::collect()
+#define GC_COLLECT_MSG 0
+
 // ---------- //
 
 // -- data -- //
@@ -53,6 +68,10 @@ GC::info *GC::__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)()
 	// put it in the database
 	if (last) last = last->next = entry;
 	else first = last = entry;
+
+	#if GC_SHOW_CREATMSG
+	std::cerr << "gc created " << obj << '\n';
+	#endif
 
 	// return the gc alloc entry
 	return entry;
@@ -115,7 +134,9 @@ void GC::delref(info *handle)
 	// if ref count fell to zero, delete the object
 	if (ref_count == 0)
 	{
+		#if GC_SHOW_DELMSG
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
+		#endif
 
 		__destroy(handle);
 	}
@@ -151,7 +172,9 @@ void GC::handle_del_list()
 	// destroy each entry
 	for (info *handle : del_list_cpy)
 	{
+		#if GC_SHOW_DELMSG
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
+		#endif
 
 		__destroy(handle);
 	}
@@ -181,18 +204,22 @@ void GC::__mark_sweep(info *handle)
 
 void GC::collect()
 {
-	std::cerr << "roots: " << roots.size() << '\n';
+	#if GC_COLLECT_MSG
+	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
+	#endif
 
-	std::vector<info*> del_list; // the list of handles to delete
-	
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+
+		#if GC_COLLECT_MSG
+		std::cerr << "collecting - current roots: " << roots.size() << '\n';
+		#endif
 
 		// for each item in the gc database
 		for (info *i = first; i; i = i->next)
 		{
 			// clear its marked flag
-			first->marked = false;
+			i->marked = false;
 		}
 
 		// for each root
@@ -212,22 +239,24 @@ void GC::collect()
 
 				// unlink it and add it to the delete list
 				__unlink(i);
-				del_list.push_back(i);
+				del_list.insert(i);
 
 				// inc reference count so delref() won't result in another delete attempt
 				++i->ref_count;
+
+				#if GC_COLLECT_MSG
+				++collect_count; // inc collect count
+				#endif
 			}
 		}
 	}
 
 	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
 
-	// for each entry in the delete list
-	for (info *i : del_list)
-	{
-		std::cerr << "\ngc deleting " << i->obj << '\n';
+	#if GC_COLLECT_MSG
+	std::cerr << "collecting - deleting: " << collect_count << '\n';
+	#endif
 
-		// destroy it
-		__destroy(i);
-	}
+	// handle the del list
+	handle_del_list();
 }
