@@ -2,7 +2,7 @@
 #include <string>
 
 #include "GarbageCollection.h"
-
+/*
 struct fancy
 {
 	GC::ptr<fancy> ptr;
@@ -16,14 +16,24 @@ GC::outgoing_t fancy_outgoing()
 	return {std::begin(offsets), std::end(offsets)};
 }
 template<> GC::outgoing_t GC::outgoing<fancy>() { return fancy_outgoing(); }
-
+*/
 int main()
 {
 	{
-		GC::ptr<fancy> ptr = GC::make<fancy>();
-		ptr->ptr = ptr;
+		GC::ptr<GC::ptr<GC::ptr<GC::ptr<std::string>>>> ptr;
+		{
+			ptr = GC::make<GC::ptr<GC::ptr<GC::ptr<std::string>>>>();
+			//*ptr = GC::make<std::string>("hello, world!");
+
+
+
+			//std::cout << **ptr << '\n';
+
+			GC::collect();
+
+			std::cerr << "\n\nexiting block\n\n";
+		}
 	}
-	
 	std::cerr << "\n\nrunning collect:\n\n";
 
 	GC::collect();

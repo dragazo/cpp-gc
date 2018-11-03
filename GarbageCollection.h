@@ -30,7 +30,7 @@ public: // -- outgoing arcs -- //
 	// default implementation is sufficient for any type that does not contain a gc qualified pointer.
 	// if this is not the case, you must specialize this template function to work for your type.
 	template<typename T>
-	static outgoing_t outgoing() { return {nullptr, nullptr}; }
+	struct outgoing { static outgoing_t get() { return {nullptr, nullptr}; } };
 
 private: // -- private types -- //
 
@@ -184,6 +184,17 @@ public: // -- public interface -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
+	// specialization of outgoing for ptr<T> (i.e. ptr<ptr<T>> needs to know ptr<T> "contains" a gc pointer - namely itself)
+	template<typename T>
+	struct outgoing<ptr<T>>
+	{
+		static outgoing_t get()
+		{
+			static const std::size_t outs[] = {0};
+			return {std::begin(outs), std::end(outs)};
+		}
+	};
+
 	// creates a new dynamic instance of T that is bound to a ptr.
 	// this is the preferred method of creating ptr instances and minimizes error.
 	// throws any exception resulting from T's constructor but does not leak resources.
@@ -195,7 +206,7 @@ public: // -- public interface -- //
 		void *raw = reinterpret_cast<void*>(obj.get());
 
 		// for each outgoing arc from obj
-		for (outgoing_t outs = GC::outgoing<T>(); outs.first != outs.second; ++outs.first)
+		for (outgoing_t outs = GC::outgoing<T>::get(); outs.first != outs.second; ++outs.first)
 		{
 			// get reference to this arc
 			GC::info *&arc = *(GC::info**)((char*)raw + *outs.first);
@@ -205,7 +216,7 @@ public: // -- public interface -- //
 		}
 
 		// create a handle for it
-		GC::info *handle = GC::create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>);
+		GC::info *handle = GC::create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
 
 		// unlink it from the smart pointer (all the dangerous stuff is done)
 		obj.release();

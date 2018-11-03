@@ -121,13 +121,15 @@ void GC::__mark_sweep(info *handle)
 		// get the outgoing arc
 		info *&arc = *(info**)((char*)handle->obj + *outs.first);
 
-		// if it hasn't been marked, recurse to it
-		if (!arc->marked) __mark_sweep(arc);
+		// if it hasn't been marked, recurse to it (only if non-null)
+		if (arc && !arc->marked) __mark_sweep(arc);
 	}
 }
 
 void GC::collect()
 {
+	std::cerr << "roots: " << roots.size() << '\n';
+
 	std::vector<info*> del_list; // the list of handles to delete
 	
 	{
@@ -143,8 +145,8 @@ void GC::collect()
 		// for each root
 		for (info **i : roots)
 		{
-			// perform a mark sweep from this root
-			__mark_sweep(*i);
+			// perform a mark sweep from this root (if it points to something)
+			if (*i) __mark_sweep(*i);
 		}
 
 		// for each item in the gc database
