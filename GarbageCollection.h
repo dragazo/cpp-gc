@@ -9,6 +9,7 @@
 #include <list>
 #include <type_traits>
 #include <unordered_set>
+#include <atomic>
 
 // ------------------------ //
 
@@ -47,6 +48,8 @@ private: // -- private types -- //
 
 		bool marked; // only used for GC::collect() - otherwise undefined
 
+		std::atomic_flag destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
+
 		info *prev; // the std::list iterator contract isn't quite what we want
 		info *next; // so we need to manage a linked list on our own
 
@@ -81,10 +84,9 @@ public: // -- public interface -- //
 			if (handle != _handle)
 			{
 				// drop our object
-				if (handle) GC::delref(handle);
+				if (handle) GC::delref(std::exchange(handle, _handle));
 
 				// take on other's object
-				handle = _handle;
 				if (handle) GC::addref(handle);
 			}
 		}

@@ -96,8 +96,15 @@ void GC::delref(info *handle)
 		// dec ref count and store result
 		ref_count = --handle->ref_count;
 
-		// if ref count is now zero, remove it from the gc database
-		if (ref_count == 0) __unlink(handle);
+		// if ref count is now zero, we should destroy it
+		if (ref_count == 0)
+		{
+			// if it's already scheduled for destruction, stop
+			if (handle->destroying.test_and_set()) return;
+
+			// unlink it from the gc database
+			__unlink(handle);
+		}
 	}
 
 	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
@@ -143,7 +150,7 @@ void GC::collect()
 		std::lock_guard<std::mutex> lock(mutex);
 
 		// for each item in the gc database
-		for (info *i = first; i != nullptr; i = i->next)
+		for (info *i = first; i; i = i->next)
 		{
 			// clear its marked flag
 			first->marked = false;
@@ -157,14 +164,17 @@ void GC::collect()
 		}
 
 		// for each item in the gc database
-		for (info *i = first; i != nullptr; i = i->next)
+		for (info *i = first; i; i = i->next)
 		{
-			// if it hasn't been marked
-			if (!i->marked)
+			// if it hasn't been marked and isn't currently being deleted
+			if (!i->marked && !i->destroying.test_and_set())
 			{
 				// unlink it and add it to the delete list
 				__unlink(i);
 				del_list.push_back(i);
+
+				// inc reference count so delref() won't result in another delete attempt
+				++i->ref_count;
 			}
 		}
 	}
@@ -175,9 +185,6 @@ void GC::collect()
 	for (info *i : del_list)
 	{
 		std::cerr << "\ngc deleting " << i->obj << '\n';
-
-		// inc reference count so GC::ptr dtor won't result in another delete attempt
-		++i->ref_count;
 
 		// destroy it
 		__destroy(i);
