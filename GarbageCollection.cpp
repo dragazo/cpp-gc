@@ -29,21 +29,22 @@ std::unordered_set<GC::info**> GC::roots;
 
 // --------------- //
 
+void GC::__root(info *&handle) { roots.insert(&handle); }
 void GC::root(info *&handle)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	roots.insert(&handle);
 }
+
+void GC::__unroot(info *&handle) { roots.erase(&handle); }
 void GC::unroot(info *&handle)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	roots.erase(&handle);
 }
 
-GC::info *GC::create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
+GC::info *GC::__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	
 	// create a gc entry for it
 	info *entry = new info(obj, deleter, outgoing, 1, last, nullptr);
 
@@ -53,6 +54,11 @@ GC::info *GC::create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
 
 	// return the gc alloc entry
 	return entry;
+}
+GC::info *GC::create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return __create(obj, deleter, outgoing);	
 }
 
 void GC::__unlink(info *handle)
@@ -74,6 +80,7 @@ void GC::__destroy(info *handle)
 	delete handle;
 }
 
+void GC::__addref(info *handle) { ++handle->ref_count; }
 void GC::addref(info *handle)
 {
 	std::lock_guard<std::mutex> lock(mutex);

@@ -73,9 +73,10 @@ public: // -- public interface -- //
 	private: // -- helpers -- //
 
 		// changes what handle we should use, properly unlinking ourselves from the old one and linking to the new one.
-		// the new handle must come from a pre-existing ptr object of the same type.
 		void reset(GC::info *_handle = nullptr)
 		{
+			static_assert(offsetof(ptr, handle) == 0, "compiler violated C-style pointer-to-first-field equivalence");
+
 			// we only need to do anything if we refer to different gc allocations
 			if (handle != _handle)
 			{
@@ -88,18 +89,14 @@ public: // -- public interface -- //
 			}
 		}
 
-		// constructs a new ptr that manages the specified handle from here on.
-		// the handle must either be null (creates an empty ptr) or refer to a valid GC::info object.
-		// the handle must have been allocated via GC::create().
-		// the handle must not be modified in any way or passed to any gc functions before or after this call.
-		// the handle must not have already been given to a different ptr for management.
-		// the handle's referenced object must refer to a valid object of type T.
-		explicit ptr(GC::info *_handle) : handle(_handle)
+		// creates an empty ptr but DOES NOT ROOT THE INTERNAL HANDLE
+		struct no_rooting_t {};
+		explicit ptr(no_rooting_t) : handle(nullptr) {}
+		// meant to be used after the no_rooting_t ctor - SETS HANDLE AND ROOTS INTERNAL HANDLE
+		void _init(GC::info *_handle)
 		{
-			static_assert(offsetof(ptr, handle) == 0, "compiler violated C-style pointer-to-first-field equivalence");
-
-			// register handle as a root
-			GC::root(handle);
+			handle = _handle;
+			GC::__root(handle);
 		}
 
 	public: // -- ctor / dtor / asgn -- //
@@ -193,24 +190,34 @@ public: // -- public interface -- //
 		std::unique_ptr<T> obj = std::make_unique<T>(std::forward<Args>(args)...);
 		void *raw = reinterpret_cast<void*>(obj.get());
 
-		// for each outgoing arc from obj
-		for (outgoing_t outs = GC::outgoing<T>::get(); outs.first != outs.second; ++outs.first)
-		{
-			// get reference to this arc
-			GC::info *&arc = *(GC::info**)((char*)raw + *outs.first);
+		// create a ptr ahead of time (make sure to use the no_rooting_t ctor)
+		ptr<T> res(ptr<T>::no_rooting_t{});
 
-			// mark this arc as not being a root (because obj owns it by value)
-			GC::unroot(arc);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+
+			// for each outgoing arc from obj
+			for (outgoing_t outs = GC::outgoing<T>::get(); outs.first != outs.second; ++outs.first)
+			{
+				// get reference to this arc
+				GC::info *&arc = *(GC::info**)((char*)raw + *outs.first);
+
+				// mark this arc as not being a root (because obj owns it by value)
+				GC::__unroot(arc);
+			}
+
+			// create a handle for it
+			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
+
+			// initialize ptr with handle
+			res._init(handle);
+
+			// unlink obj from the smart pointer (all the dangerous stuff is done)
+			obj.release();
 		}
 
-		// create a handle for it
-		GC::info *handle = GC::create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
-
-		// unlink it from the smart pointer (all the dangerous stuff is done)
-		obj.release();
-
-		// return it as a ptr
-		return ptr<T>(handle);
+		// return the created ptr
+		return res;
 	}
 
 	// triggers a full garbage collection pass.
@@ -238,9 +245,12 @@ private: // -- private interface -- //
 
 	// registers a gc_info* as a root.
 	// if it's already a root, does nothing.
+	static void __root(info *&handle);
 	static void root(info *&handle);
+
 	// unregisters a gc_info* as a root.
 	// if it's not currently a root, does nothing.
+	static void __unroot(info *&handle);
 	static void unroot(info *&handle);
 
 	// adds a pre-existing (non-garbage-collected) object to the garbage-collection database.
@@ -250,6 +260,7 @@ private: // -- private interface -- //
 	// <obj> is the address of the actual object that was allocated dynamically that should now be managed.
 	// <deleter> is a function that will be used to deallocate <obj>.
 	// <outgoing> is a function that returns the begin/end range of outgoing gc-qualified pointer offsets from <obj>.
+	static info *__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)());
 	static info *create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)());
 
 	// unlinks handle from the gc database.
@@ -263,6 +274,7 @@ private: // -- private interface -- //
 	// adds/removes a reference count to/from a garbage-collected object.
 	// <handle> is the address of an object currently under garbage collection.
 	// if <handle> does not refer to a pre-existing gc allocation, calls std::exit(1).
+	static void __addref(info *handle);
 	static void addref(info *handle);
 	static void delref(info *handle);
 

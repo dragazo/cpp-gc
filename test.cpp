@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "GarbageCollection.h"
 
@@ -21,6 +22,30 @@ template<> struct GC::outgoing<Person>
 
 int main()
 {
+	{
+		std::thread t1([]()
+		{
+			while (true)
+			{
+				GC::ptr<Person> p = GC::make<Person>();
+				p->name = "sally";
+				p->age = 17;
+
+				std::cerr << p->name << " - " << p->age << '\n';
+			}
+		});
+		std::thread t2([]()
+		{
+			while (true)
+			{
+				GC::collect();
+			}
+		});
+
+		t1.join();
+		t2.join();
+	}
+
 	{
 		GC::ptr<Person> sally = GC::make<Person>();
 		sally->name = "Sally Sallison";
