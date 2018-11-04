@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <chrono>
 
 #include "GarbageCollection.h"
 
@@ -26,10 +27,10 @@ struct ListNode
 	GC::ptr<ListNode> next;
 
 	// show a message that says we called ctor
-	ListNode() { std::cerr << "i'm alive!!\n"; }
+	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(10)); }
 
 	// show a message that says we called dtor
-	~ListNode() { std::cerr << "i died!!\n"; }
+	~ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(10)); }
 };
 template<>
 struct GC::outgoing<ListNode>
@@ -44,7 +45,8 @@ struct GC::outgoing<ListNode>
 void foo()
 {
 	// create the first node
-	GC::ptr<ListNode> root = GC::make<ListNode>();
+	GC::ptr<ListNode> root;
+	root = GC::make<ListNode>();
 
 	
 	// we'll make 10 links in the chain
@@ -61,6 +63,9 @@ void foo()
 	root->prev = *prev;
 	(*prev)->next = root;
 	
+
+	//root->next = root;
+	//root->prev = root;
 }
 // the function that called foo()
 void async_bar()
@@ -91,48 +96,6 @@ int main()
 		//t3.join();
 		t4.join();
 	}
-	std::cin.get();
-
-	{
-		std::thread t1([]()
-		{
-			while (true)
-			{
-				GC::ptr<Person> p = GC::make<Person>();
-				p->name = "sally";
-				p->age = 17;
-
-				std::cerr << p->name << " - " << p->age << '\n';
-			}
-		});
-		std::thread t2([]()
-		{
-			while (true)
-			{
-				GC::collect();
-			}
-		});
-
-		t1.join();
-		t2.join();
-	}
-
-	{
-		GC::ptr<Person> sally = GC::make<Person>();
-		sally->name = "Sally Sallison";
-		sally->age = 16;
-
-		GC::ptr<Person> veronica = GC::make<Person>();
-		veronica->name = "Veronica Vallian";
-		veronica->age = 15;
-
-		sally->best_friend = veronica;
-		veronica->best_friend = sally;
-	}
-	std::cerr << "\n\nrunning collect:\n\n";
-
-	GC::collect();
-
 	std::cin.get();
 	return 0;
 }

@@ -47,18 +47,7 @@ std::unordered_set<GC::info*> GC::del_list;
 // --------------- //
 
 void GC::__root(info *&handle) { roots.insert(&handle); }
-void GC::root(info *&handle)
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	roots.insert(&handle);
-}
-
 void GC::__unroot(info *&handle) { roots.erase(&handle); }
-void GC::unroot(info *&handle)
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	roots.erase(&handle);
-}
 
 GC::info *GC::__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
 {
@@ -76,11 +65,6 @@ GC::info *GC::__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)()
 	// return the gc alloc entry
 	return entry;
 }
-GC::info *GC::create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return __create(obj, deleter, outgoing);	
-}
 
 void GC::__unlink(info *handle)
 {
@@ -97,66 +81,31 @@ void GC::__unlink(info *handle)
 }
 void GC::__destroy(info *handle)
 {
+	#if GC_SHOW_DELMSG
+	std::cerr << "\ngc deleting " << handle->obj << '\n';
+	#endif
+
 	handle->deleter(handle->obj);
 	delete handle;
 }
 
 void GC::__addref(info *handle) { ++handle->ref_count; }
-void GC::addref(info *handle)
+
+bool GC::__delref(info *handle)
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	++handle->ref_count;
-}
-void GC::delref(info *handle)
-{
-	std::size_t ref_count;
-
+	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
+	if (--handle->ref_count == 0 && !handle->destroying)
 	{
-		std::lock_guard<std::mutex> lock(mutex);
-
-		// dec ref count and store result
-		ref_count = --handle->ref_count;
-
-		// if ref count is now zero, we should destroy it
-		if (ref_count == 0)
-		{
-			// if it's already scheduled for destruction, stop
-			if (handle->destroying) return;
-			handle->destroying = true;
-
-			// unlink it from the gc database
-			__unlink(handle);
-		}
-	}
-
-	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
-
-	// if ref count fell to zero, delete the object
-	if (ref_count == 0)
-	{
-		#if GC_SHOW_DELMSG
-		std::cerr << "\ngc deleting " << handle->obj << '\n';
-		#endif
-
-		__destroy(handle);
-	}
-}
-
-void GC::__delref(info *handle)
-{
-	// dec ref count - if ref count is now zero, we should destroy it
-	if (--handle->ref_count == 0)
-	{
-		// if it's already scheduled for destruction, stop
-		if (handle->destroying) return;
 		handle->destroying = true;
 
-		// unlink it from the gc database
+		// unlink it and add it to delete list
 		__unlink(handle);
-
-		// add to del_list (can't delete it now cause we might be locked)
 		del_list.insert(handle);
+
+		return true;
 	}
+
+	return false;
 }
 void GC::handle_del_list()
 {
@@ -165,19 +114,13 @@ void GC::handle_del_list()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		del_list_cpy = std::move(del_list);
+		del_list.clear(); // move assign doesn't guarantee del_list will be empty
 	}
 
 	// -- make sure we're not locked at this point - could block -- //
 
 	// destroy each entry
-	for (info *handle : del_list_cpy)
-	{
-		#if GC_SHOW_DELMSG
-		std::cerr << "\ngc deleting " << handle->obj << '\n';
-		#endif
-
-		__destroy(handle);
-	}
+	for (info *handle : del_list_cpy) __destroy(handle);
 }
 
 // ---------------- //
@@ -249,13 +192,13 @@ void GC::collect()
 				#endif
 			}
 		}
+
+		#if GC_COLLECT_MSG
+		std::cerr << "collecting - deleting: " << collect_count << '\n';
+		#endif
 	}
 
 	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
-
-	#if GC_COLLECT_MSG
-	std::cerr << "collecting - deleting: " << collect_count << '\n';
-	#endif
 
 	// handle the del list
 	handle_del_list();

@@ -59,6 +59,9 @@ private: // -- private types -- //
 		{}
 	};
 
+	// used to select a GC::ptr constructor that does not perform a GC::root operation
+	struct no_rooting_t {};
+
 public: // -- public interface -- //
 	
 	// a self-managed garbage-collected pointer
@@ -76,6 +79,7 @@ public: // -- public interface -- //
 	private: // -- helpers -- //
 
 		// changes what handle we should use, properly unlinking ourselves from the old one and linking to the new one.
+		// the new handle must come from a pre-existing ptr object of the same type.
 		void reset(GC::info *_handle = nullptr)
 		{
 			static_assert(offsetof(ptr, handle) == 0, "compiler violated C-style pointer-to-first-field equivalence");
@@ -83,13 +87,13 @@ public: // -- public interface -- //
 			// we only need to do anything if we refer to different gc allocations
 			if (handle != _handle)
 			{
-				bool call_handle_del_list = handle != nullptr;
+				bool call_handle_del_list = false;
 
 				{
 					std::lock_guard<std::mutex> lock(GC::mutex);
 
 					// drop our object
-					if (handle) GC::__delref(handle);
+					if (handle) call_handle_del_list = GC::__delref(handle);
 
 					// take on other's object
 					handle = _handle;
@@ -102,13 +106,12 @@ public: // -- public interface -- //
 		}
 
 		// creates an empty ptr but DOES NOT ROOT THE INTERNAL HANDLE
-		struct no_rooting_t {};
-		explicit ptr(no_rooting_t) : handle(nullptr) {}
-		// meant to be used after the no_rooting_t ctor - SETS HANDLE AND ROOTS INTERNAL HANDLE
+		explicit ptr(GC::no_rooting_t) : handle(nullptr) {}
+		// meant to be used after the no_rooting_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE
 		void __init(GC::info *_handle)
 		{
-			handle = _handle;
 			GC::__root(handle);
+			handle = _handle;
 		}
 
 	public: // -- ctor / dtor / asgn -- //
@@ -116,19 +119,21 @@ public: // -- public interface -- //
 		// creates an empty ptr (null)
 		ptr() : handle(nullptr)
 		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
 			// register handle as a root
-			GC::root(handle);
+			GC::__root(handle);
 		}
 
 		~ptr()
 		{
-			bool call_handle_del_list = handle != nullptr;
+			bool call_handle_del_list = false;
 
 			{
 				std::lock_guard<std::mutex> lock(GC::mutex);
 
 				// if we have a handle, dec reference count
-				if (handle) GC::__delref(handle);
+				if (handle) call_handle_del_list = GC::__delref(handle);
 
 				// set it to null just to be safe
 				handle = nullptr;
@@ -138,7 +143,7 @@ public: // -- public interface -- //
 			}
 
 			// after a call to __delref we must call handle_del_list()
-			if (call_handle_del_list) GC::handle_del_list();
+			if (call_handle_del_list) { std::cerr << "------------------------ BAD STUFF!!!\n"; GC::handle_del_list(); }
 		}
 
 		ptr(const ptr &other) : handle(other.handle)
@@ -217,7 +222,7 @@ public: // -- public interface -- //
 		void *raw = reinterpret_cast<void*>(obj.get());
 
 		// create a ptr ahead of time (make sure to use the no_rooting_t ctor)
-		ptr<T> res(ptr<T>::no_rooting_t{});
+		ptr<T> res(GC::no_rooting_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -271,15 +276,10 @@ private: // -- private interface -- //
 	// all other functions in this block are thread safe.
 	// -----------------------------------------------------------------
 
-	// registers a gc_info* as a root.
-	// if it's already a root, does nothing.
+	// registers/unregisters a gc_info* as a root.
+	// safe to root if already rooted. safe to unroot if not rooted.
 	static void __root(info *&handle);
-	static void root(info *&handle);
-
-	// unregisters a gc_info* as a root.
-	// if it's not currently a root, does nothing.
 	static void __unroot(info *&handle);
-	static void unroot(info *&handle);
 
 	// adds a pre-existing (non-garbage-collected) object to the garbage-collection database.
 	// returns a handle that must be used to control the gc allocation - DO NOT LOSE THIS - DO NOT MODIFY THIS IN ANY WAY.
@@ -289,7 +289,6 @@ private: // -- private interface -- //
 	// <deleter> is a function that will be used to deallocate <obj>.
 	// <outgoing> is a function that returns the begin/end range of outgoing gc-qualified pointer offsets from <obj>.
 	static info *__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)());
-	static info *create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)());
 
 	// unlinks handle from the gc database.
 	// it is undefined behavior if handle is not currently in the gc database.
@@ -299,17 +298,14 @@ private: // -- private interface -- //
 	// this is meant to be used on a handle after it has been unlinked from the gc database.
 	static void __destroy(info *handle);
 
-	// adds/removes a reference count to/from a garbage-collected object.
-	// <handle> is the address of an object currently under garbage collection.
-	// if <handle> does not refer to a pre-existing gc allocation, calls std::exit(1).
+	// adds a reference count to a garbage-collected object.
 	static void __addref(info *handle);
-	static void addref(info *handle);
-	static void delref(info *handle);
 
-	// a non-threadsafe variant of delref().
+	// removes a reference count from a garbage-collected object.
 	// instead of destroying the object immediately when the ref count reaches zero, adds it to del_list.
-	// YOU MUST CALL handle_del_list() AFTER THIS (and after unlocking the mutex).
-	static void __delref(info *handle);
+	// returns true iff the object was scheduled for destruction in del_list.
+	static bool __delref(info *handle);
+	// handles actual deletion of any objects scheduled for deletion if del_list.
 	static void handle_del_list();
 
 	// performs a mark sweep operation from the given handle.
