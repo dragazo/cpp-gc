@@ -23,7 +23,7 @@
 #define GC_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define GC_COLLECT_MSG 1
+#define GC_COLLECT_MSG 0
 
 // ---------- //
 
@@ -79,18 +79,8 @@ void GC::__unlink(info *handle)
 		handle->next->prev = handle->prev;
 	}
 }
-void GC::__destroy(info *handle)
-{
-	#if GC_SHOW_DELMSG
-	std::cerr << "\ngc deleting " << handle->obj << '\n';
-	#endif
-
-	handle->deleter(handle->obj);
-	delete handle;
-}
 
 void GC::__addref(info *handle) { ++handle->ref_count; }
-
 bool GC::__delref(info *handle)
 {
 	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
@@ -107,6 +97,7 @@ bool GC::__delref(info *handle)
 
 	return false;
 }
+
 void GC::handle_del_list()
 {
 	// make del_list a local object
@@ -120,7 +111,21 @@ void GC::handle_del_list()
 	// -- make sure we're not locked at this point - could block -- //
 
 	// destroy each entry
-	for (info *handle : del_list_cpy) __destroy(handle);
+	for (info *handle : del_list_cpy)
+	{
+		#if GC_SHOW_DELMSG
+		std::cerr << "\ngc deleting " << handle->obj << '\n';
+		#endif
+
+		handle->deleter(handle->obj);
+	}
+
+	// delete the handles
+	// this is done after calling all deleters so that the deletion func can access the handles safely
+	for (info *handle : del_list_cpy)
+	{
+		delete handle;
+	}
 }
 
 // ---------------- //
@@ -173,8 +178,11 @@ void GC::collect()
 		}
 
 		// for each item in the gc database
-		for (info *i = first; i; i = i->next)
+		for (info *i = first, *_next; i; i = _next)
 		{
+			// record next node
+			_next = i->next;
+
 			// if it hasn't been marked and isn't currently being deleted
 			if (!i->marked && !i->destroying)
 			{
@@ -184,12 +192,24 @@ void GC::collect()
 				__unlink(i);
 				del_list.insert(i);
 
-				// inc reference count so delref() won't result in another delete attempt
-				++i->ref_count;
-
 				#if GC_COLLECT_MSG
-				++collect_count; // inc collect count
+				++collect_count;
 				#endif
+			}
+		}
+
+		// for each item remaining in the gc database
+		for (info *i = first; i; i = i->next)
+		{
+			// for each outgoing arc from this item
+			for (outgoing_t outs = i->outgoing(); outs.first != outs.second; ++outs.first)
+			{
+				// get the outgoing arc
+				info *&arc = *(info**)((char*)i->obj + *outs.first);
+
+				// if this arc points to an item we're deleting, null it
+				// this ensures we don't have dangling pointers to the soon-to-be-deleted info object
+				if (del_list.find(arc) != del_list.end()) arc = nullptr;
 			}
 		}
 

@@ -143,7 +143,7 @@ public: // -- public interface -- //
 			}
 
 			// after a call to __delref we must call handle_del_list()
-			if (call_handle_del_list) { std::cerr << "------------------------ BAD STUFF!!!\n"; GC::handle_del_list(); }
+			if (call_handle_del_list) GC::handle_del_list();
 		}
 
 		ptr(const ptr &other) : handle(other.handle)
@@ -225,7 +225,13 @@ public: // -- public interface -- //
 		ptr<T> res(GC::no_rooting_t{});
 
 		{
-			std::lock_guard<std::mutex> lock(mutex);
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
+			// create a handle for it
+			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
+
+			// initialize ptr with handle
+			res.__init(handle);
 
 			// for each outgoing arc from obj
 			for (outgoing_t outs = GC::outgoing<T>::get(); outs.first != outs.second; ++outs.first)
@@ -236,12 +242,6 @@ public: // -- public interface -- //
 				// mark this arc as not being a root (because obj owns it by value)
 				GC::__unroot(arc);
 			}
-
-			// create a handle for it
-			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
-
-			// initialize ptr with handle
-			res.__init(handle);
 		}
 
 		// unlink obj from the smart pointer (all the dangerous stuff is done)
@@ -292,19 +292,15 @@ private: // -- private interface -- //
 
 	// unlinks handle from the gc database.
 	// it is undefined behavior if handle is not currently in the gc database.
-	// the prev/next pointers of handle are not modified by this operation (though others in the gc database are).
 	static void __unlink(info *handle);
-	// invokes the stored deleter for handle's object and deletes the handle itself.
-	// this is meant to be used on a handle after it has been unlinked from the gc database.
-	static void __destroy(info *handle);
 
 	// adds a reference count to a garbage-collected object.
 	static void __addref(info *handle);
-
 	// removes a reference count from a garbage-collected object.
 	// instead of destroying the object immediately when the ref count reaches zero, adds it to del_list.
 	// returns true iff the object was scheduled for destruction in del_list.
 	static bool __delref(info *handle);
+
 	// handles actual deletion of any objects scheduled for deletion if del_list.
 	static void handle_del_list();
 

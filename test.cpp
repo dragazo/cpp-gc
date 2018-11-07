@@ -5,6 +5,8 @@
 
 #include "GarbageCollection.h"
 
+std::mutex mut;
+
 struct Person
 {
 	std::string name;
@@ -44,26 +46,44 @@ struct GC::outgoing<ListNode>
 // creates a linked list that has a cycle
 void foo()
 {
+	//for(int i = 0; i < 300; ++i)
+	{
+		GC::ptr<ListNode> a, b;
+
+		a = GC::make<ListNode>();
+		b = GC::make<ListNode>();
+
+		a->next = b;
+		b->next = a;
+	}
+
+	/*
 	// create the first node
 	GC::ptr<ListNode> root;
 	root = GC::make<ListNode>();
 
-	
-	// we'll make 10 links in the chain
 	GC::ptr<ListNode> *prev = &root;
-	for (int i = 0; i < 10; ++i)
 	{
-		(*prev)->next = GC::make<ListNode>();
-		(*prev)->next->prev = *prev;
+		
 
-		prev = &(*prev)->next;
+		// we'll make 10 links in the chain
+		
+		for (int i = 0; i < 10; ++i)
+		{
+
+			auto tmp = GC::make<ListNode>();
+			(*prev)->next = tmp;
+			(*prev)->next->prev = *prev;
+
+			prev = &(*prev)->next;
+		}
+
 	}
-
+	
 	// then we'll merege the ends into a cycle
 	root->prev = *prev;
 	(*prev)->next = root;
-	
-
+	*/
 	//root->next = root;
 	//root->prev = root;
 }
@@ -88,7 +108,7 @@ int main()
 		std::thread t1([]() { while (1) foo(); });
 		//std::thread t2([]() { while (1) foo(); });
 		//std::thread t3([]() { while (1) foo(); });
-		std::thread t4([]() { while (1) GC::collect(); });
+		std::thread t4([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });
 
 
 		t1.join();
