@@ -198,21 +198,6 @@ void GC::collect()
 			}
 		}
 
-		// for each item remaining in the gc database
-		for (info *i = first; i; i = i->next)
-		{
-			// for each outgoing arc from this item
-			for (outgoing_t outs = i->outgoing(); outs.first != outs.second; ++outs.first)
-			{
-				// get the outgoing arc
-				info *&arc = *(info**)((char*)i->obj + *outs.first);
-
-				// if this arc points to an item we're deleting, null it
-				// this ensures we don't have dangling pointers to the soon-to-be-deleted info object
-				if (del_list.find(arc) != del_list.end()) arc = nullptr;
-			}
-		}
-
 		#if GC_COLLECT_MSG
 		std::cerr << "collecting - deleting: " << collect_count << '\n';
 		#endif
