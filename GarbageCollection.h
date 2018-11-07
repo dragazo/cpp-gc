@@ -37,14 +37,14 @@ private: // -- private types -- //
 
 	// represents a single garbage-collected object's allocation info.
 	// this is used internally by the garbage collector's logic - DO NOT MANUALLY MODIFY THIS.
-	// ANY POINTER OF THIS TYPE MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
+	// ANY POINTER OF THIS TYPE UNDER GC MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
 	struct info
 	{
-		void *const obj;             // pointer to the managed object
-		void(*const deleter)(void*); // a deleter function to eventually delete obj
-
+		void *const obj;               // pointer to the managed object
+		void(*const deleter)(void*);   // a deleter function to eventually delete obj
 		outgoing_t(*const outgoing)(); // offsets of outgoing GC::ptr from obj
-		std::size_t ref_count;         // the reference count for this allocation
+
+		std::size_t ref_count; // the reference count for this allocation
 
 		bool marked; // only used for GC::collect() - otherwise undefined
 
@@ -135,7 +135,7 @@ public: // -- public interface -- //
 				// if we have a handle, dec reference count
 				if (handle) call_handle_del_list = GC::__delref(handle);
 
-				// set it to null just to be safe
+				// set handle to null - we must always point to a valid object or null
 				handle = nullptr;
 
 				// unregister handle as a root
@@ -179,22 +179,22 @@ public: // -- public interface -- //
 
 	public: // -- comparison -- //
 
-		friend bool operator==(const ptr &a, const ptr &b) { return a.get() == b.get(); }
-		friend bool operator!=(const ptr &a, const ptr &b) { return a.get() != b.get(); }
+		friend bool operator==(const ptr &a, const ptr &b) { return a.handle == b.handle; }
+		friend bool operator!=(const ptr &a, const ptr &b) { return a.handle != b.handle; }
 		friend bool operator<(const ptr &a, const ptr &b) { return a.get() < b.get(); }
 		friend bool operator<=(const ptr &a, const ptr &b) { return a.get() <= b.get(); }
 		friend bool operator>(const ptr &a, const ptr &b) { return a.get() > b.get(); }
 		friend bool operator>=(const ptr &a, const ptr &b) { return a.get() >= b.get(); }
 
-		friend bool operator==(const ptr &a, std::nullptr_t b) { return a.get() == b; }
-		friend bool operator!=(const ptr &a, std::nullptr_t b) { return a.get() != b; }
+		friend bool operator==(const ptr &a, std::nullptr_t b) { return a.handle == b; }
+		friend bool operator!=(const ptr &a, std::nullptr_t b) { return a.handle != b; }
 		friend bool operator<(const ptr &a, std::nullptr_t b) { return a.get() < b; }
 		friend bool operator<=(const ptr &a, std::nullptr_t b) { return a.get() <= b; }
 		friend bool operator>(const ptr &a, std::nullptr_t b) { return a.get() > b; }
 		friend bool operator>=(const ptr &a, std::nullptr_t b) { return a.get() >= b; }
 
-		friend bool operator==(std::nullptr_t a, const ptr &b) { return a == b.get(); }
-		friend bool operator!=(std::nullptr_t a, const ptr &b) { return a != b.get(); }
+		friend bool operator==(std::nullptr_t a, const ptr &b) { return a == b.handle; }
+		friend bool operator!=(std::nullptr_t a, const ptr &b) { return a != b.handle; }
 		friend bool operator<(std::nullptr_t a, const ptr &b) { return a < b.get(); }
 		friend bool operator<=(std::nullptr_t a, const ptr &b) { return a <= b.get(); }
 		friend bool operator>(std::nullptr_t a, const ptr &b) { return a > b.get(); }
@@ -285,6 +285,7 @@ private: // -- private interface -- //
 	// returns a handle that must be used to control the gc allocation - DO NOT LOSE THIS - DO NOT MODIFY THIS IN ANY WAY.
 	// the aliased object begins with a reference count of 1 - YOU SHOULD NOT CALL ADDREF ~BECAUSE~ OF CREATE.
 	// it is undefined behavior to call this function on an object that already exists in the gc database.
+	// returns a non-null pointer. if the memory allocation fails, throws an exception but does not leak resources.
 	// <obj> is the address of the actual object that was allocated dynamically that should now be managed.
 	// <deleter> is a function that will be used to deallocate <obj>.
 	// <outgoing> is a function that returns the begin/end range of outgoing gc-qualified pointer offsets from <obj>.

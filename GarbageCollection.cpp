@@ -52,7 +52,7 @@ void GC::__unroot(info *&handle) { roots.erase(&handle); }
 GC::info *GC::__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
 {
 	// create a gc entry for it
-	info *entry = new info(obj, deleter, outgoing, 1, last, nullptr);
+	info *entry = std::make_unique<info>(obj, deleter, outgoing, 1, last, nullptr).release();
 
 	// put it in the database
 	if (last) last = last->next = entry;
