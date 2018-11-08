@@ -23,7 +23,7 @@
 #define GC_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define GC_COLLECT_MSG 0
+#define GC_COLLECT_MSG 1
 
 // ---------- //
 
@@ -49,10 +49,10 @@ std::unordered_set<GC::info*> GC::del_list;
 void GC::__root(info *&handle) { roots.insert(&handle); }
 void GC::__unroot(info *&handle) { roots.erase(&handle); }
 
-GC::info *GC::__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)())
+GC::info *GC::__create(void *obj, void(*deleter)(void*), void(*router)(void *, router_fn))
 {
 	// create a gc entry for it
-	info *entry = std::make_unique<info>(obj, deleter, outgoing, 1, last, nullptr).release();
+	info *entry = std::make_unique<info>(obj, deleter, router, 1, last, nullptr).release();
 
 	// put it in the database
 	if (last) last = last->next = entry;
@@ -140,14 +140,14 @@ void GC::__mark_sweep(info *handle)
 	handle->marked = true;
 
 	// for each outgoing arc
-	for (outgoing_t outs = handle->outgoing(); outs.first != outs.second; ++outs.first)
+	handle->router(handle->obj, [](void *ptr)
 	{
 		// get the outgoing arc
-		info *&arc = *(info**)((char*)handle->obj + *outs.first);
+		info *&arc = *(info**)ptr;
 
 		// if it hasn't been marked, recurse to it (only if non-null)
 		if (arc && !arc->marked) __mark_sweep(arc);
-	}
+	});
 }
 
 void GC::collect()

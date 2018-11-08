@@ -21,17 +21,10 @@ class GC
 {
 public: // -- outgoing arcs -- //
 
-	// the type used to represent the outgoing GC::ptr instances from a given object.
-	// this is a pair of begin/end iterators to an array of byte offsets for said GC::ptr instances in the object.
-	typedef std::pair<const std::size_t*, const std::size_t*> outgoing_t;
+	typedef void(*router_fn)(void *ptr);
 
-	// standardized way of getting GC::outgoing_t values for any type T.
-	// this default implementation is sufficient for any type that does not contain a GC::ptr by value.
-	// if this is not the case, you must specialize this template to work for your type prior to using any gc utilities.
-	// it is undefined behavior for a type to hold a GC::ptr by value that is not represented in this range.
-	// it is undefined behavior for any type other than GC::ptr to be represented in this range.
 	template<typename T>
-	struct outgoing { static outgoing_t get() { return {nullptr, nullptr}; } };
+	struct router { static void route(void *obj, router_fn func) {} };
 
 private: // -- private types -- //
 
@@ -40,9 +33,10 @@ private: // -- private types -- //
 	// ANY POINTER OF THIS TYPE UNDER GC MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
 	struct info
 	{
-		void *const obj;               // pointer to the managed object
-		void(*const deleter)(void*);   // a deleter function to eventually delete obj
-		outgoing_t(*const outgoing)(); // offsets of outgoing GC::ptr from obj
+		void *const obj;             // pointer to the managed object
+		void(*const deleter)(void*); // a deleter function to eventually delete obj
+
+		void(*const router)(void*, router_fn); // router function to use for this object
 
 		std::size_t ref_count; // the reference count for this allocation
 
@@ -54,8 +48,8 @@ private: // -- private types -- //
 		info *next; // so we need to manage a linked list on our own
 
 		// populates info
-		info(void *_obj, void(*_deleter)(void*), outgoing_t(*_outgoing)(), std::size_t _ref_count, info *_prev, info *_next)
-			: obj(_obj), deleter(_deleter), outgoing(_outgoing), ref_count(_ref_count), prev(_prev), next(_next)
+		info(void *_obj, void(*_deleter)(void*), void(*_router)(void*, router_fn), std::size_t _ref_count, info *_prev, info *_next)
+			: obj(_obj), deleter(_deleter), router(_router), ref_count(_ref_count), prev(_prev), next(_next)
 		{}
 	};
 
@@ -201,17 +195,13 @@ public: // -- public interface -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
-	// specialization of outgoing for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>)
+	// specialization of router for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>)
 	template<typename T>
-	struct outgoing<ptr<T>>
+	struct router<ptr<T>>
 	{
-		static outgoing_t get()
-		{
-			static const std::size_t outs[] = {0};
-			return {std::begin(outs), std::end(outs)};
-		}
+		static void route(void *obj, router_fn func) { func(obj); }
 	};
-
+	
 	// creates a new dynamic instance of T that is bound to a ptr.
 	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
 	template<typename T, typename ...Args>
@@ -228,20 +218,20 @@ public: // -- public interface -- //
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
 			// create a handle for it
-			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, GC::outgoing<T>::get);
+			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, router<T>::route);
 
 			// initialize ptr with handle
 			res.__init(handle);
 
 			// for each outgoing arc from obj
-			for (outgoing_t outs = GC::outgoing<T>::get(); outs.first != outs.second; ++outs.first)
+			handle->router(handle->obj, [](void *ptr)
 			{
-				// get reference to this arc
-				GC::info *&arc = *(GC::info**)((char*)raw + *outs.first);
+				// get the outgoing arc
+				info *&arc = *(info**)ptr;
 
 				// mark this arc as not being a root (because obj owns it by value)
 				GC::__unroot(arc);
-			}
+			});
 		}
 
 		// unlink obj from the smart pointer (all the dangerous stuff is done)
@@ -289,7 +279,7 @@ private: // -- private interface -- //
 	// <obj> is the address of the actual object that was allocated dynamically that should now be managed.
 	// <deleter> is a function that will be used to deallocate <obj>.
 	// <outgoing> is a function that returns the begin/end range of outgoing gc-qualified pointer offsets from <obj>.
-	static info *__create(void *obj, void(*deleter)(void*), outgoing_t(*outgoing)());
+	static info *__create(void *obj, void(*deleter)(void*), void(*router)(void*, router_fn));
 
 	// unlinks handle from the gc database.
 	// it is undefined behavior if handle is not currently in the gc database.
