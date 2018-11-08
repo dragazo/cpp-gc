@@ -23,7 +23,7 @@
 #define GC_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define GC_COLLECT_MSG 1
+#define GC_COLLECT_MSG 0
 
 // ---------- //
 

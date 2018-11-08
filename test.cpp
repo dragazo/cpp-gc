@@ -5,10 +5,33 @@
 
 #include "GarbageCollection.h"
 
+struct ptr_set
+{
+	GC::ptr<int> a, b, c, d, e, f, g, h;
+};
+template<> struct GC::router<ptr_set>
+{
+	static void route(void *obj, router_fn func)
+	{
+		ptr_set &set = *(ptr_set*)obj;
+
+		GC::route(set.a, func);
+		GC::route(set.b, func);
+		GC::route(set.c, func);
+		GC::route(set.d, func);
+		GC::route(set.e, func);
+		GC::route(set.f, func);
+		GC::route(set.g, func);
+		GC::route(set.h, func);
+	}
+};
+
 struct ListNode
 {
 	GC::ptr<ListNode> prev;
 	GC::ptr<ListNode> next;
+
+	ptr_set set;
 
 	// show a message that says we called ctor
 	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(2)); }
@@ -16,15 +39,16 @@ struct ListNode
 	// show a message that says we called dtor
 	~ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(2)); }
 };
-template<>
-struct GC::router<ListNode>
+template<> struct GC::router<ListNode>
 {
 	static void route(void *obj, router_fn func)
 	{
 		ListNode &node = *(ListNode*)obj;
 
-		func(&node.prev);
-		func(&node.next);
+		GC::route(node.prev, func);
+		GC::route(node.next, func);
+
+		GC::route(node.set, func);
 	}
 };
 

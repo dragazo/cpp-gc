@@ -21,10 +21,19 @@ class GC
 {
 public: // -- outgoing arcs -- //
 
+	// type of the function pointer passed to a router function.
 	typedef void(*router_fn)(void *ptr);
 
+	// for each GC::ptr instance owned DIRECTLY OR INDIRECTLY by <obj>, routes its ADDRESS (i.e. GC::ptr *) into <func> EXACTLY ONCE.
+	// <obj> shall be safely-convertible to T* via reinterpret cast.
+	// it is undefined behavior to use any gc utilities (directly or indirectly) during this function's invocation.
+	// this default implementation is sufficient for any type that does not contain GC::ptr by value (directly or indirectly).
 	template<typename T>
 	struct router { static void route(void *obj, router_fn func) {} };
+
+	// convenience function - equivalent to router<T>::route(&obj, func) where T is deduced from the obj argument.
+	template<typename T>
+	static void route(T &obj, router_fn func) { router<T>::route(&obj, func); }
 
 private: // -- private types -- //
 
@@ -101,7 +110,7 @@ public: // -- public interface -- //
 
 		// creates an empty ptr but DOES NOT ROOT THE INTERNAL HANDLE
 		explicit ptr(GC::no_rooting_t) : handle(nullptr) {}
-		// meant to be used after the no_rooting_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE
+		// must be used after the no_rooting_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE
 		void __init(GC::info *_handle)
 		{
 			GC::__root(handle);
