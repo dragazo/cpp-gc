@@ -27,20 +27,6 @@ public: // -- outgoing arcs -- //
 	// type used for router event actions. USERS SHOULD NOT USE THIS DIRECTLY.
 	typedef void(*router_fn)(info*&);
 
-	/*
-	struct router_fn
-	{
-	private: // -- data -- //
-
-		// the stored function to invoke. USERS SHOULD NOT USE THIS DIRECTLY.
-		void(*const func)(info*&);
-
-		router_fn(void(*_func)(info*&)) : func(_func) {}
-
-		friend class GC;
-	};
-	*/
-
 	// for all data elements "elem" OWNED by obj that either ARE or OWN (directly or indirectly) a GC::ptr value, calls GC::route(elem, func) exactly once.
 	// obj must be the SOLE owner of elem, and elem must be the SOLE owner of its (direct or indirect) GC::ptr values.
 	// obj shall be safely-convertibly to T* via reinterpret cast.
@@ -91,9 +77,7 @@ public: // -- public interface -- //
 	{
 	private: // -- data -- //
 
-		// the handle to use for gc management functions.
-		// THIS MUST BE THE FIRST MEMBER VARIABLE IN THE OBJECT (uses C-style pointer to first field equivalence).
-		GC::info *handle;
+		GC::info *handle; // the handle to use for gc management functions.
 
 		friend class GC;
 
@@ -103,8 +87,6 @@ public: // -- public interface -- //
 		// the new handle must come from a pre-existing ptr object of the same type.
 		void reset(GC::info *_handle = nullptr)
 		{
-			static_assert(offsetof(ptr, handle) == 0, "compiler violated C-style pointer-to-first-field equivalence");
-
 			// we only need to do anything if we refer to different gc allocations
 			if (handle != _handle)
 			{

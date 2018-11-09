@@ -56,7 +56,7 @@ template<> struct GC::router<ListNode>
 void foo()
 {
 	{
-		GC::collect();
+		//GC::collect();
 
 		// create the first node
 		GC::ptr<ListNode> root = GC::make<ListNode>();
@@ -75,8 +75,8 @@ void foo()
 		root->prev = *prev;
 		(*prev)->next = root;
 
-		GC::collect();
-		std::cerr << "\n\n";
+		//GC::collect();
+		//std::cerr << "\n\n";
 	}
 }
 
@@ -84,10 +84,10 @@ int main()
 {
 	{
 		std::thread t1([]() { while (1) foo(); });
-		//std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });
+		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });
 		
 		t1.join();
-		//t2.join();
+		t2.join();
 	}
 
 	std::cin.get();
