@@ -40,6 +40,14 @@ std::unordered_set<GC::info**> GC::roots;
 
 std::unordered_set<GC::info*> GC::del_list;
 
+GC::strategy GC::strat = GC::strategy::timed;
+
+// -------------------------------------------------
+
+GC::sleep_time_t GC::sleep_time = std::chrono::minutes(1);
+
+std::thread GC::auto_collect_thread(GC::__auto_collect_thread_func);
+
 // --------------- //
 
 // -- interface -- //
@@ -204,4 +212,60 @@ void GC::collect()
 
 	// handle the del list
 	handle_del_list();
+}
+
+// --------------------- //
+
+// -- auto collection -- //
+
+// --------------------- //
+
+GC::strategy GC::get_strategy()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return strat;
+}
+void GC::set_strategy(strategy new_strategy)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	strat = new_strategy;
+}
+
+GC::sleep_time_t GC::get_sleep_time()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return sleep_time;
+}
+void GC::set_sleep_time(sleep_time_t new_sleep_time)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	sleep_time = new_sleep_time;
+}
+
+void GC::__auto_collect_thread_func()
+{
+	// try the operation
+	try
+	{
+		// we'll run forever
+		while (true)
+		{
+			// sleep the sleep time
+			std::this_thread::sleep_for(get_sleep_time());
+
+			// if we're using sleep strategy
+			if ((int)get_strategy() & (int)strategy::timed)
+			{
+				// run a collect pass
+				collect();
+			}
+		}
+	}
+	// if we ever hit an error, something terrible happened
+	catch (...)
+	{
+		// print error message and terminate with a nonzero code
+		std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
+		std::exit(1);
+	}
 }

@@ -82,6 +82,8 @@ void foo()
 
 int main()
 {
+	GC::set_strategy(GC::strategy::manual);
+
 	{
 		std::thread t1([]() { while (1) foo(); });
 		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });

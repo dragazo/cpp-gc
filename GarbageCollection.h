@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <atomic>
 #include <thread>
+#include <chrono>
 
 // ------------------------ //
 
@@ -252,6 +253,31 @@ public: // -- public interface -- //
 	// objects that are in use will not be moved (i.e. pointers will still be valid).
 	static void collect();
 
+public: // -- auto collection -- //
+
+	// represents the type of automatic garbage collection to perform.
+	enum class strategy
+	{
+		manual = 0, // no automatic garbage collection
+
+		timed = 1, // garbage collect on a timed basis
+	};
+
+	// type to use for measuring timed strategy sleep times.
+	typedef std::chrono::milliseconds sleep_time_t;
+
+	// gets the current automatic garbage collection strategy
+	static strategy get_strategy();
+	// sets the automatic garbage collection strategy we should use from now on.
+	// note: this only applies to cycle resolution; non-cyclic references are always handled immediately.
+	static void set_strategy(strategy new_strategy);
+
+	// gets the current timed strategy sleep time.
+	static sleep_time_t get_sleep_time();
+	// sets the sleep time for timed automatic garbage collection strategy.
+	// note: only used if the timed strategy flag is set.
+	static void set_sleep_time(sleep_time_t new_sleep_time);
+
 private: // -- data -- //
 
 	static std::mutex mutex; // used to support thread-safety of gc operations
@@ -262,6 +288,16 @@ private: // -- data -- //
 	static std::unordered_set<info**> roots; // a database of all gc root handles - (references - do not delete)
 
 	static std::unordered_set<info*> del_list; // list of handles that are scheduled for deletion (from __delref async calls)
+
+	// -----------------------------------------------
+
+	static strategy strat; // the auto collect tactics currently in place
+
+	static sleep_time_t sleep_time; // the amount of time to sleep after an automatic timed collection cycle
+
+	static std::thread auto_collect_thread; // thread that does the automatic collection work
+
+private: // -- misc -- //
 
 	GC() = delete; // not instantiatable
 
@@ -303,6 +339,12 @@ private: // -- private interface -- //
 
 	// performs a mark sweep operation from the given handle.
 	static void __mark_sweep(info *handle);
+
+private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
+
+	// this is the function that will be run by auto_collect_thread.
+	// never under any circumstance should you ever call this.
+	static void __auto_collect_thread_func();
 };
 
 // -------------------- //
