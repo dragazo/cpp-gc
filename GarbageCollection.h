@@ -330,9 +330,9 @@ private: // -- private interface -- //
 // -------------------- //
 
 // if T is a polymorphic type, returns a pointer to the most-derived object pointed by <ptr>; otherwise, returns <ptr>.
-template<typename T, std::enable_if_t<std::is_polymorphic_v<T>, int> = 0>
+template<typename T, std::enable_if_t<std::is_polymorphic<T>::value, int> = 0>
 void *get_polymorphic_root(T *ptr) { return dynamic_cast<void*>(ptr); }
-template<typename T, std::enable_if_t<!std::is_polymorphic_v<T>, int> = 0>
+template<typename T, std::enable_if_t<!std::is_polymorphic<T>::value, int> = 0>
 void *get_polymorphic_root(T *ptr) { return ptr; }
 
 // outputs the stored pointer to the stream - equivalent to ostr << ptr.get()
