@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <unordered_set>
 #include <atomic>
+#include <thread>
 
 // ------------------------ //
 
@@ -19,13 +20,30 @@
 
 class GC
 {
+private: struct info; // forward decl
+
 public: // -- outgoing arcs -- //
 
-	// type of the function pointer passed to a router function.
-	typedef void(*router_fn)(void *ptr);
+	// type used for router event actions. USERS SHOULD NOT USE THIS DIRECTLY.
+	typedef void(*router_fn)(info*&);
 
-	// for each GC::ptr instance owned DIRECTLY OR INDIRECTLY by <obj>, routes its ADDRESS (i.e. GC::ptr *) into <func> EXACTLY ONCE.
-	// <obj> shall be safely-convertible to T* via reinterpret cast.
+	/*
+	struct router_fn
+	{
+	private: // -- data -- //
+
+		// the stored function to invoke. USERS SHOULD NOT USE THIS DIRECTLY.
+		void(*const func)(info*&);
+
+		router_fn(void(*_func)(info*&)) : func(_func) {}
+
+		friend class GC;
+	};
+	*/
+
+	// for all data elements "elem" OWNED by obj that either ARE or OWN (directly or indirectly) a GC::ptr value, calls GC::route(elem, func) exactly once.
+	// obj must be the SOLE owner of elem, and elem must be the SOLE owner of its (direct or indirect) GC::ptr values.
+	// obj shall be safely-convertibly to T* via reinterpret cast.
 	// it is undefined behavior to use any gc utilities (directly or indirectly) during this function's invocation.
 	// this default implementation is sufficient for any type that does not contain GC::ptr by value (directly or indirectly).
 	template<typename T>
@@ -208,7 +226,7 @@ public: // -- public interface -- //
 	template<typename T>
 	struct router<ptr<T>>
 	{
-		static void route(void *obj, router_fn func) { func(obj); }
+		static void route(void *obj, router_fn func) { func(((ptr<T>*)obj)->handle); }
 	};
 	
 	// creates a new dynamic instance of T that is bound to a ptr.
@@ -233,11 +251,8 @@ public: // -- public interface -- //
 			res.__init(handle);
 
 			// for each outgoing arc from obj
-			handle->router(handle->obj, [](void *ptr)
+			handle->router(handle->obj, [](info *&arc)
 			{
-				// get the outgoing arc
-				info *&arc = *(info**)ptr;
-
 				// mark this arc as not being a root (because obj owns it by value)
 				GC::__unroot(arc);
 			});

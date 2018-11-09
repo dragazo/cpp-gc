@@ -23,7 +23,7 @@
 #define GC_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define GC_COLLECT_MSG 0
+#define GC_COLLECT_MSG 1
 
 // ---------- //
 
@@ -140,11 +140,8 @@ void GC::__mark_sweep(info *handle)
 	handle->marked = true;
 
 	// for each outgoing arc
-	handle->router(handle->obj, [](void *ptr)
+	handle->router(handle->obj, [](info *&arc)
 	{
-		// get the outgoing arc
-		info *&arc = *(info**)ptr;
-
 		// if it hasn't been marked, recurse to it (only if non-null)
 		if (arc && !arc->marked) __mark_sweep(arc);
 	});
