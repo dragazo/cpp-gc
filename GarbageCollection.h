@@ -30,17 +30,24 @@ public: // -- outgoing arcs -- //
 
 	// for all data elements "elem" OWNED by obj that either ARE or OWN (directly or indirectly) a GC::ptr value, calls GC::route(elem, func) exactly once.
 	// obj must be the SOLE owner of elem, and elem must be the SOLE owner of its (direct or indirect) GC::ptr values.
-	// obj shall be safely-convertibly to T* via reinterpret cast.
 	// it is undefined behavior to use any gc utilities (directly or indirectly) during this function's invocation.
 	// this default implementation is sufficient for any type that does not contain GC::ptr by value (directly or indirectly).
 	template<typename T>
-	struct router { static void route(void *obj, router_fn func) {} };
+	struct router { static void route(T &obj, router_fn func) {} };
 
-	// convenience function - equivalent to router<T>::route(&obj, func) where T is deduced from the obj argument.
+	// convenience function - equivalent to router<T>::route() where T is deduced from the obj argument.
 	template<typename T>
-	static void route(T &obj, router_fn func) { router<T>::route(&obj, func); }
+	static void route(T &obj, router_fn func) { router<T>::route(obj, func); }
 
 private: // -- private types -- //
+
+	// the raw version of router<T> that uses void* instead of T& (we have to do this for generality).
+	// equivalent to router<T>::route() where obj is cast to T* and dereferenced.
+	template<typename T>
+	struct __router
+	{
+		static void __route(void *obj, router_fn func) { return router<T>::route(*(T*)obj, func); }
+	};
 
 	// represents a single garbage-collected object's allocation info.
 	// this is used internally by the garbage collector's logic - DO NOT MANUALLY MODIFY THIS.
@@ -205,11 +212,12 @@ public: // -- public interface -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
-	// specialization of router for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>)
+	// specialization of router for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>).
+	// this is required, as all GC::route() calls must eventually decay to calling ptr<T> routers.
 	template<typename T>
 	struct router<ptr<T>>
 	{
-		static void route(void *obj, router_fn func) { func(((ptr<T>*)obj)->handle); }
+		static void route(ptr<T> &obj, router_fn func) { func(obj.handle); }
 	};
 	
 	// creates a new dynamic instance of T that is bound to a ptr.
@@ -228,7 +236,7 @@ public: // -- public interface -- //
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
 			// create a handle for it
-			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, router<T>::route);
+			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, __router<T>::__route);
 
 			// initialize ptr with handle
 			res.__init(handle);

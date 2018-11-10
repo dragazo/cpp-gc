@@ -11,10 +11,8 @@ struct ptr_set
 };
 template<> struct GC::router<ptr_set>
 {
-	static void route(void *obj, router_fn func)
+	static void route(ptr_set &set, router_fn func)
 	{
-		ptr_set &set = *(ptr_set*)obj;
-
 		GC::route(set.a, func);
 		GC::route(set.b, func);
 		GC::route(set.c, func);
@@ -41,10 +39,8 @@ struct ListNode
 };
 template<> struct GC::router<ListNode>
 {
-	static void route(void *obj, router_fn func)
+	static void route(ListNode &node, router_fn func)
 	{
-		ListNode &node = *(ListNode*)obj;
-
 		GC::route(node.prev, func);
 		GC::route(node.next, func);
 
@@ -57,7 +53,7 @@ void foo()
 {
 	{
 		//GC::collect();
-
+		
 		// create the first node
 		GC::ptr<ListNode> root = GC::make<ListNode>();
 
@@ -83,6 +79,8 @@ void foo()
 int main()
 {
 	GC::set_strategy(GC::strategy::manual);
+
+	GC::make<int>();
 
 	{
 		std::thread t1([]() { while (1) foo(); });
