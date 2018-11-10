@@ -239,6 +239,9 @@ public: // -- public interface -- //
 				// mark this arc as not being a root (because obj owns it by value)
 				GC::__unroot(arc);
 			});
+
+			// begin timed collect
+			__start_timed_collect();
 		}
 
 		// unlink obj from the smart pointer (all the dangerous stuff is done)
@@ -287,15 +290,13 @@ private: // -- data -- //
 
 	static std::unordered_set<info**> roots; // a database of all gc root handles - (references - do not delete)
 
-	static std::unordered_set<info*> del_list; // list of handles that are scheduled for deletion (from __delref async calls)
+	static std::vector<info*> del_list; // list of handles that are scheduled for deletion (from __delref async calls)
 
 	// -----------------------------------------------
 
 	static strategy strat; // the auto collect tactics currently in place
 
 	static sleep_time_t sleep_time; // the amount of time to sleep after an automatic timed collection cycle
-
-	static std::thread auto_collect_thread; // thread that does the automatic collection work
 
 private: // -- misc -- //
 
@@ -340,11 +341,14 @@ private: // -- private interface -- //
 	// performs a mark sweep operation from the given handle.
 	static void __mark_sweep(info *handle);
 
+	// the first invocation of this function begins a new thread to perform timed garbage collection.
+	// all subsequent invocations do nothing.
+	static void __start_timed_collect();
+
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 
-	// this is the function that will be run by auto_collect_thread.
-	// never under any circumstance should you ever call this.
-	static void __auto_collect_thread_func();
+	// the function to be executed by the timed collector thread. DO NOT CALL THIS.
+	static void __timed_collect_func();
 };
 
 // -------------------- //

@@ -38,15 +38,13 @@ GC::info *GC::last = nullptr;
 
 std::unordered_set<GC::info**> GC::roots;
 
-std::unordered_set<GC::info*> GC::del_list;
+std::vector<GC::info*> GC::del_list;
+
+// ---------------------------------------
 
 GC::strategy GC::strat = GC::strategy::timed;
 
-// -------------------------------------------------
-
 GC::sleep_time_t GC::sleep_time = std::chrono::minutes(1);
-
-std::thread GC::auto_collect_thread(GC::__auto_collect_thread_func);
 
 // --------------- //
 
@@ -57,7 +55,7 @@ std::thread GC::auto_collect_thread(GC::__auto_collect_thread_func);
 void GC::__root(info *&handle) { roots.insert(&handle); }
 void GC::__unroot(info *&handle) { roots.erase(&handle); }
 
-GC::info *GC::__create(void *obj, void(*deleter)(void*), void(*router)(void *, router_fn))
+GC::info *GC::__create(void *obj, void(*deleter)(void*), void(*router)(void*, router_fn))
 {
 	// create a gc entry for it
 	info *entry = std::make_unique<info>(obj, deleter, router, 1, last, nullptr).release();
@@ -98,7 +96,7 @@ bool GC::__delref(info *handle)
 
 		// unlink it and add it to delete list
 		__unlink(handle);
-		del_list.insert(handle);
+		del_list.push_back(handle);
 
 		return true;
 	}
@@ -195,7 +193,7 @@ void GC::collect()
 
 				// unlink it and add it to the delete list
 				__unlink(i);
-				del_list.insert(i);
+				del_list.push_back(i);
 
 				#if GC_COLLECT_MSG
 				++collect_count;
@@ -242,7 +240,18 @@ void GC::set_sleep_time(sleep_time_t new_sleep_time)
 	sleep_time = new_sleep_time;
 }
 
-void GC::__auto_collect_thread_func()
+void GC::__start_timed_collect()
+{
+	// pointer to the thread
+	static std::thread *thread = nullptr;
+
+	// if it's null, create it
+	if (!thread) thread = new std::thread(__timed_collect_func);
+}
+
+// ---------------------------------------------------
+
+void GC::__timed_collect_func()
 {
 	// try the operation
 	try
