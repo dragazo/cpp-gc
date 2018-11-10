@@ -2,31 +2,41 @@
 
 One big complaint I've seen from C++ newbies is that the language doesn't have automatic garbage collection *(though I'd argue that's actually a feature)*. Of course, there's always [`std::unique_ptr`](https://en.cppreference.com/w/cpp/memory/unique_ptr) for *(arguably)* most cases. There's even [`std::shared_ptr`](https://en.cppreference.com/w/cpp/memory/shared_ptr) if you need shared-access to managed resources. However, even `std::shared_ptr` fails to handle referential cycles. You could always refactor your entire data structure to use [`std::weak_ptr`](https://en.cppreference.com/w/cpp/memory/weak_ptr), but at that point you're doing all the work manually anyway. I wonder if all this is leading up to a solution?
 
-`cpp-gc` is a **self-managed**, **thread-safe** garbage collection library written in **standard C++**.
+`cpp-gc` is a **self-managed**, **thread-safe** garbage collection library written in **standard C++14**.
 
 With `cpp-gc` in place, all you'd need to do to fix the above example is change all your `std::shared_ptr<T>` to `GC::ptr<T>`. The rest of the logic will take care of itself automatically *(with one exception - see below)*.
 
 ## How it Works
 
 `cpp-gc` is designed to be **streamlined and minimalistic**. Very few things are visible to the user. The most important things to know are:
-* `GC` - static class containing types and functions that help you **manage your memory conveniently**.
-* `GC::ptr<T>` - the shining star of `cpp-gc` - represents an **autonomous garbage-collected pointer**.
-* `GC::make<T>(Args...)` - this is how you create an instance of `GC::ptr<T>` - it's used exactly like `std::make_shared`.
-* `GC::collect()` - triggers a full garbage collection pass *(see below)*.
+* `GC` - Static class containing types and functions that help you **manage your memory conveniently**.
+* `GC::ptr<T>` - The shining star of `cpp-gc` - represents an **autonomous garbage-collected pointer**.
+* `GC::make<T>(Args...)` - This is how you create an instance of `GC::ptr<T>` - it's used exactly like `std::make_shared`.
+* `GC::collect()` - Triggers a full garbage collection pass *(see below)*.
 
-When you allocate an object via `GC::make<T>(Args...)` it creates a garbage-collected object with a reference count of 1. Just like `std::shared_ptr`, it will automatically manage the reference count and delete the object **immediately** when the reference count hits zero. What does this mean? Well this means if `std::shared_ptr` worked for you before, it'll work for you now exactly the same *(though a tiny bit slower due to having extra things to manage)* and you'll never need to call `GC::collect()` at all. So why does `GC::collect()` exist?
+When you allocate an object via `GC::make<T>(Args...)` it creates a new garbage-collected object with a reference count of 1. Just like `std::shared_ptr`, it will automatically manage the reference count and delete the object **immediately** when the reference count hits zero. What does this mean? Well this means if `std::shared_ptr` worked for you before, it'll work for you now exactly the same *(though a bit slower due to having extra things to manage)*.
 
-`GC::collect()` triggers a full garbage collection pass, which accounts for cycles using the typical mark-and-sweep algorithm. This is rather slow compared to the other method `cpp-gc` uses to manage non-cyclic references, but is required if you do in fact have cycles. So when should you call it? Whenever you want really, that's why it's a separate function after all. In fact, because of the reference-counting described above you might not ever need to call it. To simulate what other languages like Java and C# do, you could make a background thread whose only job is to call `GC::collect()` every couple of minutes (or whatever logic you want). It's really up to you, but just remember it's required to deallocate cyclical references.
+`GC::collect()` triggers a full garbage collection pass, which accounts for cycles using the typical mark-and-sweep algorithm. This is rather slow compared to the other method `cpp-gc` uses to manage non-cyclic references, but is required if you do in fact have cycles. So when should you call it? Probably never. I'll explain:
 
-Here's the good news: `cpp-gc` is threadsafe, which it accomplishes by locking a mutex for core gc operations (e.g. bumping up/down a reference count, allocation, collect, etc.). However, this also means you can run a `GC::collect()` from another thread and continue to work on whatever you want. So long as you don't trigger a gc operation, you won't be blocked (in general, just don't create/destroy/assign `GC::ptr` objects).
+## GC Strategy ##
+
+`cpp-gc` has several "strategy" settings for automatically deciding when to perform a full garbage collect pass. This is controlled by a bitfield enum called `GC::strategy`. The default strategy is time-based garbage collection, which *(by default)* will call `GC::collect()` once per minute in a background thread.
+
+Here's a list of strategy helpers:
+* `GC::get_strategy()` / `GC::set_strategy()` - Gets or sets the current strategy. Mutiple strategy options can be bitwise-or'd together and all included options will be used.
+* `GC::get_sleep_time()` / `GC::set_sleep_time()` - Gets or sets the amount of time to wait after the completion of one timed collect and the start of the next. This is ignored if the timed collect strategy flag is not set.
+
+Typically, if you want to use custom settings, you should set these options up as soon as possible on program start and not modify them again.
 
 ## Limitations and Requirements
 
-Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from a struct. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your struct and poking around for the right types. Because of this, if you have a struct that contains a `GC::ptr` instance by value, you need to specify that explicitly. So how do you do this?
+Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from a struct. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your struct and poking around for the right types. Because of this, if you have a struct that owns a `GC::ptr` instance, you need to specify that explicitly. So how do you do this?
 
-`GC::outgoing_t` is a typedef for a pair of begin/end iterators into an array of byte offsets in a given object. `GC::outgoing<T>` is the standardized way by which `cpp-gc` does this. When you call `GC::make<T>()`, it automatically uses `GC::outgoing<T>::get()` to fetch info on the "outgoing" `GC::ptr` instances from `T`. The default implementation of `GC::outgoing<T>` returns an empty iterator range, which is sufficient for any type that does not contain a `GC::ptr` by value. If this is not the case, you need to specialize `GC::outgoing<T>()` for your type `T`.
+When `cpp-gc` wants to poll your object for `GC::ptr` instances, it calls `GC::router<T>::route()`, passing the object in question and a function object. What you need to do is call `GC::route()` with every data element you own that either is or may itself own a `GC::ptr` instance.
 
-This will be demonstrated in the examples below:
+The default implementation of `GC::router<T>::route()` is sufficient for any type that does not own (directly or indirectly) a `GC::ptr` instance.
+
+This will be demonstrated in our examples:
 
 ## Examples
 
@@ -46,16 +56,19 @@ struct ListNode
 };
 ```
 
-Because this contains `GC::ptr` objects by value, we need to specialize `GC::outgoing` for our type.
+Because this type owns `GC::ptr` instances, we need to specialize `GC::router` for our type.
 
 ```cpp
-template<>
-struct GC::outgoing<ListNode>
+template<> struct GC::router<ListNode>
 {
-    static GC::outgoing_t get()
+    static void route(void *obj, router_fn func)
     {
-        static const std::size_t offsets[] = {offsetof(ListNode, prev), offsetof(ListNode, next)};
-        return {std::begin(offsets), std::end(offsets)};
+        // get our object
+        ListNode &node = *(ListNode*)obj;
+        
+        // call GC::route() for each of our GC::ptr values
+        GC::route(node.prev, func);
+        GC::route(node.next, func);
     }
 };
 ```
@@ -97,25 +110,7 @@ void bar()
 }
 ```
 
-As soon as `GC::collect()` is executed, all the cycles will be dealt with and you should get a lot of messages from destructors. It's that easy. And, as already explained above, you don't really need to run `GC::collect()` very often - only if you really need to.
-
-But you know what? `cpp-gc` is far more powerful than that. In fact, it's completely thread safe, so you might find it more performant to write the above function another way:
-
-```cpp
-// the function that called foo()
-void async_bar()
-{
-    // we need to call foo()
-    foo();
-    
-    std::cerr << "\n\ncalling collect():\n\n";
-    
-    // run GC::collect in another thread while we work on other stuff
-    std::thread(GC::collect).detach();
-    
-    // ... do other stuff - anything not involving gc operations will not block ... //
-}
-```
+As soon as `GC::collect()` is executed, all the cycles will be dealt with and you should get a lot of messages from destructors. It's that easy. But remember, the default auto-collect strategy is time based. You typically won't ever need to call `GC::collect()` explicitly.
 
 ## Best Practices
 
