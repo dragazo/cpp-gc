@@ -42,9 +42,9 @@ std::vector<GC::info*> GC::del_list;
 
 // ---------------------------------------
 
-GC::strategy GC::strat = GC::strategy::timed;
+std::atomic<GC::strategies> GC::_strategy = GC::strategies::timed;
 
-GC::sleep_time_t GC::sleep_time = std::chrono::minutes(1);
+std::atomic<GC::sleep_time_t> GC::_sleep_time = std::chrono::milliseconds(60000);
 
 // --------------- //
 
@@ -59,7 +59,7 @@ GC::info *GC::__create(void *obj, void(*deleter)(void*), void(*router)(void*, ro
 {
 	// create a gc entry for it
 	info *entry = std::make_unique<info>(obj, deleter, router, 1, last, nullptr).release();
-
+	
 	// put it in the database
 	if (last) last = last->next = entry;
 	else first = last = entry;
@@ -218,27 +218,11 @@ void GC::collect()
 
 // --------------------- //
 
-GC::strategy GC::get_strategy()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return strat;
-}
-void GC::set_strategy(strategy new_strategy)
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	strat = new_strategy;
-}
+GC::strategies GC::strategy() { return _strategy; }
+void GC::strategy(strategies new_strategy) { _strategy = new_strategy; }
 
-GC::sleep_time_t GC::get_sleep_time()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return sleep_time;
-}
-void GC::set_sleep_time(sleep_time_t new_sleep_time)
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	sleep_time = new_sleep_time;
-}
+GC::sleep_time_t GC::sleep_time() { return _sleep_time; }
+void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time = new_sleep_time; }
 
 void GC::__start_timed_collect()
 {
@@ -260,10 +244,10 @@ void GC::__timed_collect_func()
 		while (true)
 		{
 			// sleep the sleep time
-			std::this_thread::sleep_for(get_sleep_time());
+			std::this_thread::sleep_for(sleep_time());
 
 			// if we're using sleep strategy
-			if ((int)get_strategy() & (int)strategy::timed)
+			if ((int)strategy() & (int)strategies::timed)
 			{
 				// run a collect pass
 				collect();

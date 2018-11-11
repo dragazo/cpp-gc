@@ -78,8 +78,8 @@ void foo()
 
 int main()
 {
-	GC::set_strategy(GC::strategy::manual);
-
+	GC::strategy(GC::strategies::manual);
+	
 	GC::make<int>();
 
 	{

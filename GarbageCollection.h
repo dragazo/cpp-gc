@@ -54,10 +54,10 @@ private: // -- private types -- //
 	// ANY POINTER OF THIS TYPE UNDER GC MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
 	struct info
 	{
-		void *const obj;             // pointer to the managed object
-		void(*const deleter)(void*); // a deleter function to eventually delete obj
+		void *const obj; // pointer to the managed object
 
-		void(*const router)(void*, router_fn); // router function to use for this object
+		void(*const deleter)(void*);           // a deleter function to eventually delete obj
+		void(*const router)(void*, router_fn); // a router function to use for this object
 
 		std::size_t ref_count; // the reference count for this allocation
 
@@ -179,7 +179,11 @@ public: // -- public interface -- //
 
 		// returns the number of references to the current object.
 		// if this object is not pointing at any object, returns 0.
-		std::size_t use_count() const { return handle ? handle->ref_count : 0; }
+		std::size_t use_count() const
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+			return handle ? handle->ref_count : 0;
+		}
 
 		// gets a pointer to the managed object.
 		// if this ptr does not point at a managed object, returns null.
@@ -267,27 +271,28 @@ public: // -- public interface -- //
 public: // -- auto collection -- //
 
 	// represents the type of automatic garbage collection to perform.
-	enum class strategy
+	enum class strategies
 	{
 		manual = 0, // no automatic garbage collection
 
 		timed = 1, // garbage collect on a timed basis
 	};
 
+	friend strategies operator|(strategies a, strategies b) { return (strategies)((int)a | (int)b); }
+	friend strategies operator&(strategies a, strategies b) { return (strategies)((int)a & (int)b); }
+
 	// type to use for measuring timed strategy sleep times.
 	typedef std::chrono::milliseconds sleep_time_t;
 
-	// gets the current automatic garbage collection strategy
-	static strategy get_strategy();
-	// sets the automatic garbage collection strategy we should use from now on.
-	// note: this only applies to cycle resolution; non-cyclic references are always handled immediately.
-	static void set_strategy(strategy new_strategy);
+	// gets/sets the current automatic garbage collection strategy.
+	// note: this only applies to cycle resolution - non-cyclic references are always handled immediately.
+	static strategies strategy();
+	static void strategy(strategies new_strategy);
 
-	// gets the current timed strategy sleep time.
-	static sleep_time_t get_sleep_time();
-	// sets the sleep time for timed automatic garbage collection strategy.
+	// gets/sets the sleep time for timed automatic garbage collection strategy.
 	// note: only used if the timed strategy flag is set.
-	static void set_sleep_time(sleep_time_t new_sleep_time);
+	static sleep_time_t sleep_time();
+	static void sleep_time(sleep_time_t new_sleep_time);
 
 private: // -- data -- //
 
@@ -302,9 +307,9 @@ private: // -- data -- //
 
 	// -----------------------------------------------
 
-	static strategy strat; // the auto collect tactics currently in place
+	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
 
-	static sleep_time_t sleep_time; // the amount of time to sleep after an automatic timed collection cycle
+	static std::atomic<sleep_time_t> _sleep_time; // the amount of time to sleep after an automatic timed collection cycle
 
 private: // -- misc -- //
 
@@ -313,8 +318,9 @@ private: // -- misc -- //
 private: // -- private interface -- //
 
 	// -----------------------------------------------------------------
-	// functions in this block that start with "__" are not thread safe.
-	// all other functions in this block are thread safe.
+	// from here on out, function names follow these conventions:
+	// starts with "__" = GC::mutex must be locked prior to invocation.
+	// otherwise = GC::mutex must not be locked prior to invocation.
 	// -----------------------------------------------------------------
 
 	// registers/unregisters a gc_info* as a root.
