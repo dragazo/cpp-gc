@@ -57,7 +57,7 @@ private: // -- private types -- //
 	template<typename T>
 	struct __router
 	{
-		static void __route(void *obj, router_fn func) { return router<T>::route(*(T*)obj, func); }
+		static void __route(void *obj, router_fn func) { router<T>::route(*(T*)obj, func); }
 	};
 
 	// represents a single garbage-collected object's allocation info.
@@ -326,6 +326,12 @@ private: // -- misc -- //
 
 	GC() = delete; // not instantiatable
 
+	// if T is a polymorphic type, returns a pointer to the most-derived object pointed by <ptr>; otherwise, returns <ptr>.
+	template<typename T, std::enable_if_t<std::is_polymorphic<T>::value, int> = 0>
+	void *get_polymorphic_root(T *ptr) { return dynamic_cast<void*>(ptr); }
+	template<typename T, std::enable_if_t<!std::is_polymorphic<T>::value, int> = 0>
+	void *get_polymorphic_root(T *ptr) { return ptr; }
+
 private: // -- private interface -- //
 
 	// -----------------------------------------------------------------
@@ -381,12 +387,6 @@ private: // -- functions you should never ever call ever. did i mention YOU SHOU
 // -- misc functions -- //
 
 // -------------------- //
-
-// if T is a polymorphic type, returns a pointer to the most-derived object pointed by <ptr>; otherwise, returns <ptr>.
-template<typename T, std::enable_if_t<std::is_polymorphic<T>::value, int> = 0>
-void *get_polymorphic_root(T *ptr) { return dynamic_cast<void*>(ptr); }
-template<typename T, std::enable_if_t<!std::is_polymorphic<T>::value, int> = 0>
-void *get_polymorphic_root(T *ptr) { return ptr; }
 
 // outputs the stored pointer to the stream - equivalent to ostr << ptr.get()
 template<typename T, typename U, typename V>

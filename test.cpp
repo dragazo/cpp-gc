@@ -106,22 +106,6 @@ int main()
 	p->ptr = GC::make<wrap<int>>();
 	p->ptr->ptr = GC::make<int>();
 
-	// -- absolute hackery -- //
-	/*
-	typedef typename get_arg_type<GC::router_fn>::type hax_gc_info_hehehe;
-	GC::router_fn hax_dangerous_fn = [](hax_gc_info_hehehe arc)
-	{
-		// omai wa mou shindeiru
-		arc->ref_count = 0;
-		arc->deleter(arc->obj);
-		std::cerr << "WHY GOD!?!?\n";
-		std::cin.get();
-		std::exit(4);
-	};
-	GC::route(p, hax_dangerous_fn);
-	*/
-	// FOR THE LOVE OF GOD THIS COMPILES - FLEX TAPE NOW
-
 	ListNode n;
 
 	{
