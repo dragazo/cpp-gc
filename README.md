@@ -32,7 +32,7 @@ Typically, if you want to use custom settings, you should set these options up a
 
 Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from a struct. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your struct and poking around for the right types. Because of this, if you have a struct that owns a `GC::ptr` instance, you need to specify that explicitly. So how do you do this?
 
-When `cpp-gc` wants to poll your object for `GC::ptr` instances, it calls `GC::router<T>::route()`, passing the object in question and a function object. What you need to do is call `GC::route()` with every data element you own that either is or may itself own a `GC::ptr` instance.
+When `cpp-gc` wants to poll your object for `GC::ptr` instances, it calls `GC::router<T>::route()`, passing the object in question and a function object. What you need to do is call `GC::route()` with every data element you own that either is or may itself own a `GC::ptr` instance. Think of this as your object's reachability: i.e. everything you route to is reachable, and anything you leave out is unreachable.
 
 The default implementation of `GC::router<T>::route()` is sufficient for any type that does not own (directly or indirectly) a `GC::ptr` instance.
 
@@ -61,11 +61,8 @@ Because this type owns `GC::ptr` instances, we need to specialize `GC::router` f
 ```cpp
 template<> struct GC::router<ListNode>
 {
-    static void route(void *obj, router_fn func)
+    static void route(ListNode &node, router_fn func)
     {
-        // get our object
-        ListNode &node = *(ListNode*)obj;
-        
         // call GC::route() for each of our GC::ptr values
         GC::route(node.prev, func);
         GC::route(node.next, func);
@@ -94,7 +91,7 @@ void foo()
 }
 ```
 
-If you run this, you'll find none of the objects are deallocated. This is because we created a bunch of cycles due to making a *doubly*-linked list. As stated above, `cpp-gc` cleans this up via `GC::collect()`. Let's do that now:
+If you run this, you'll find none of the objects are deallocated immediately. This is because we created a bunch of cycles due to making a *doubly*-linked list. As stated above, `cpp-gc` cleans this up via `GC::collect()`. Let's do that now:
 
 ```cpp
 // the function that called foo()
@@ -105,7 +102,8 @@ void bar()
     
     std::cerr << "\n\ncalling collect():\n\n";
     
-    // but you know what, just to be safe, let's clean up any objects it left lying around unused
+    // the default collect settings will clean this up automatically after a while
+    // but let's say we need this to happen immediately for some reason...
     GC::collect();
 }
 ```
@@ -114,4 +112,8 @@ As soon as `GC::collect()` is executed, all the cycles will be dealt with and yo
 
 ## Best Practices
 
-A big problem I see people make is - after learning of the existence of smart pointers - thinking they should never use normal pointers ever again. This simply isn't the case. Smart pointers should be used to manage the object, but normal pointers are perfectly fine *(in fact, better)* for passing a non-owning reference to the object. For shared-resource-managing pointers, a copy when passing to a function would require an unnecessary atomic increment and later decrement, which due to being atomic is rather slow. This is also the case with `cpp-gc`. If you need to pass a reference to an object managed by `GC::ptr<T>` to a function in a non-owning manner, you're much better-off passing a raw pointer obtained via `GC::ptr<T>::get()`.
+Here we'll go through a couple of tips for getting the maximum performance out of `cpp-gc`:
+
+1. Don't call `GC::collect()` explicitly. If you start calling `GC::collect()` explicitly, there's a pretty good chance you could be calling it in rapid succession. This will do little more than cripple your performance. The only time you should ever call it explicitly is if you for some reason **need** the objects to be destroyed immediately *(which is unlikely)*.
+
+1. When possible, use raw pointers. Let's say you have a `GC::ptr<std::vector<int>>` that you need to pass to a function. Does the function really need to **own** the value or does it just need access to it? In the vast majority of cases, you'll find you only need access to the object. In these cases, you're much better off performance-wise to have the function take a raw pointer instead. This also has the effect of being less restrictive (i.e. you don't need to pass the object as a specific type of smart pointer). *(this same rule applies to other smart pointers like std::shared_ptr as well)*.
