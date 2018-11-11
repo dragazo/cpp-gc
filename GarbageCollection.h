@@ -26,7 +26,18 @@ private: struct info; // forward decl
 public: // -- outgoing arcs -- //
 
 	// type used for router event actions. USERS SHOULD NOT USE THIS DIRECTLY.
-	typedef void(*router_fn)(info*&);
+	struct router_fn
+	{
+	private: // -- contents hidden for security -- //
+
+		void(*const func)(info*&); // raw function pointer to call
+
+		router_fn(void(*_func)(info*&)) : func(_func) {}
+
+		void operator()(info *&arg) { func(arg); }
+
+		friend class GC;
+	};
 
 	// for all data elements "elem" OWNED by obj that either ARE or OWN (directly or indirectly) a GC::ptr value, calls GC::route(elem, func) exactly once.
 	// obj must be the SOLE owner of elem, and elem must be the SOLE owner of its (direct or indirect) GC::ptr values.
@@ -246,7 +257,7 @@ public: // -- public interface -- //
 			res.__init(handle);
 
 			// for each outgoing arc from obj
-			handle->router(handle->obj, [](info *&arc)
+			handle->router(handle->obj, +[](info *&arc)
 			{
 				// mark this arc as not being a root (because obj owns it by value)
 				GC::__unroot(arc);
