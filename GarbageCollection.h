@@ -168,7 +168,7 @@ public: // -- public interface -- //
 			if (call_handle_del_list) GC::handle_del_list();
 		}
 
-		// constructs a new gc pointer from a pre-existing one. allows non-const to const conversions.
+		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
 		ptr(const ptr &other) : handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
@@ -176,7 +176,7 @@ public: // -- public interface -- //
 			GC::__root(handle); // register handle as a root
 			if (handle) GC::__addref(handle); // we're new - inc ref count
 		}
-		template<typename J, std::enable_if_t<std::is_same<T, const J>::value ,int> = 0>
+		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
 		ptr(const ptr<J> &other) : handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
@@ -185,9 +185,9 @@ public: // -- public interface -- //
 			if (handle) GC::__addref(handle); // we're new - inc ref count
 		}
 
-		// assigns a pre-existing gc pointer a new object. allows non-const to const conversions.
+		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
 		ptr &operator=(const ptr &other) { reset(other.handle);	return *this; }
-		template<typename J, std::enable_if_t<std::is_same<T, const J>::value, int> = 0>
+		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
 		ptr &operator=(const ptr<J> &other) { reset(other.handle); return *this; }
 
 		ptr &operator=(std::nullptr_t) { reset(nullptr); return *this; }

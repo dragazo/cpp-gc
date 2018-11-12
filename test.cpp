@@ -90,10 +90,14 @@ struct GC::router<wrap<T>>
 	}
 };
 
-template<typename T>
-struct get_arg_type {};
-template<typename R, typename A>
-struct get_arg_type<R(*)(A)> { typedef A type; };
+struct base
+{
+	int b_int;
+};
+struct derived : base
+{
+	float d_float;
+};
 
 int main()
 {
@@ -116,6 +120,15 @@ int main()
 	p->ptr->ptr = GC::make<int>();
 
 	ListNode n;
+
+	GC::ptr<derived> dp = GC::make<derived>();
+	GC::ptr<base> bp = GC::make<base>();
+
+	GC::ptr<base> dp_as_b = dp;
+	//GC::ptr<derived> wrong_dp = bp;
+
+	dp_as_b = dp;
+	//dp_as_b = 67;
 
 	/**
 	{
