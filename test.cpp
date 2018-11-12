@@ -95,12 +95,21 @@ struct get_arg_type {};
 template<typename R, typename A>
 struct get_arg_type<R(*)(A)> { typedef A type; };
 
-
 int main()
 {
 	GC::strategy(GC::strategies::manual);
-	
-	GC::make<int>();
+
+	GC::ptr<int> ip = GC::make<int>(46);
+	GC::ptr<int> ip_self = ip;
+	std::cerr << "      int val:  " << *ip << '\n';
+
+	GC::ptr<const int> const_ip = GC::make<const int>(47);
+	std::cerr << "const int val:  " << *const_ip << '\n';
+
+	GC::ptr<const int> const_2 = ip;
+	GC::ptr<const int> const_self = const_2;
+	//GC::ptr<int> non_const_ref = const_2;
+	std::cerr << "const int cast: " << *const_2 << '\n';
 
 	GC::ptr<wrap<wrap<int>>> p = GC::make<wrap<wrap<int>>>();
 	p->ptr = GC::make<wrap<int>>();
@@ -108,6 +117,7 @@ int main()
 
 	ListNode n;
 
+	/**
 	{
 		std::thread t1([]() { while (1) foo(); });
 		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });
@@ -115,6 +125,7 @@ int main()
 		t1.join();
 		t2.join();
 	}
+	/**/
 
 	std::cin.get();
 	return 0;

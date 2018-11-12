@@ -168,18 +168,27 @@ public: // -- public interface -- //
 			if (call_handle_del_list) GC::handle_del_list();
 		}
 
+		// constructs a new gc pointer from a pre-existing one. allows non-const to const conversions.
 		ptr(const ptr &other) : handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
-			// register handle as a root
-			GC::__root(handle);
+			GC::__root(handle); // register handle as a root
+			if (handle) GC::__addref(handle); // we're new - inc ref count
+		}
+		template<typename J, std::enable_if_t<std::is_same<T, const J>::value ,int> = 0>
+		ptr(const ptr<J> &other) : handle(other.handle)
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
 
-			// we're new - inc ref count
-			if (handle) GC::__addref(handle);
+			GC::__root(handle); // register handle as a root
+			if (handle) GC::__addref(handle); // we're new - inc ref count
 		}
 
+		// assigns a pre-existing gc pointer a new object. allows non-const to const conversions.
 		ptr &operator=(const ptr &other) { reset(other.handle);	return *this; }
+		template<typename J, std::enable_if_t<std::is_same<T, const J>::value, int> = 0>
+		ptr &operator=(const ptr<J> &other) { reset(other.handle); return *this; }
 
 		ptr &operator=(std::nullptr_t) { reset(nullptr); return *this; }
 
@@ -242,7 +251,7 @@ public: // -- public interface -- //
 	{
 		// allocate the object and get a raw pointer to it
 		std::unique_ptr<T> obj = std::make_unique<T>(std::forward<Args>(args)...);
-		void *raw = reinterpret_cast<void*>(obj.get());
+		void *raw = const_cast<void*>(reinterpret_cast<const void*>(obj.get()));
 
 		// create a ptr ahead of time (make sure to use the no_rooting_t ctor)
 		ptr<T> res(GC::no_rooting_t{});
