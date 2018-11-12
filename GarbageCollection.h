@@ -53,7 +53,7 @@ public: // -- outgoing arcs -- //
 private: // -- private types -- //
 
 	// the raw version of router<T> that uses void* instead of T& (we have to do this for generality).
-	// equivalent to router<T>::route() where obj is cast to T* and dereferenced.
+	// equivalent to router<T>::route() where obj is reinterpret cast to T* and dereferenced.
 	template<typename T>
 	struct __router
 	{
@@ -96,6 +96,8 @@ public: // -- public interface -- //
 	{
 	private: // -- data -- //
 
+		T *obj; // pointer to the object (not the same as handle->obj because of type conversions)
+
 		GC::info *handle; // the handle to use for gc management functions.
 
 		friend class GC;
@@ -103,10 +105,15 @@ public: // -- public interface -- //
 	private: // -- helpers -- //
 
 		// changes what handle we should use, properly unlinking ourselves from the old one and linking to the new one.
-		// the new handle must come from a pre-existing ptr object of the same type.
-		void reset(GC::info *_handle = nullptr)
+		// the new handle must come from a pre-existing ptr object of a compatible type (i.e. static or dynamic cast).
+		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
+		// if _handle (and _obj) is null, the resulting state is empty.
+		void reset(T *_obj, GC::info *_handle)
 		{
-			// we only need to do anything if we refer to different gc allocations
+			// repoint to the proper object
+			obj = _obj;
+
+			// we only need to do anything else if we refer to different gc allocations
 			if (handle != _handle)
 			{
 				bool call_handle_del_list = false;
@@ -128,18 +135,23 @@ public: // -- public interface -- //
 		}
 
 		// creates an empty ptr but DOES NOT ROOT THE INTERNAL HANDLE
-		explicit ptr(GC::no_rooting_t) : handle(nullptr) {}
-		// must be used after the no_rooting_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE
-		void __init(GC::info *_handle)
+		explicit ptr(GC::no_rooting_t) : obj(nullptr), handle(nullptr) {}
+		// must be used after the no_rooting_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE.
+		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
+		// if _handle (and _obj) is null, creates a valid, but empty ptr.
+		// GC::mutex must be locked prior to invocation.
+		void __init(T *_obj, GC::info *_handle)
 		{
 			GC::__root(handle);
+
+			obj = _obj;
 			handle = _handle;
 		}
 
 	public: // -- ctor / dtor / asgn -- //
 
 		// creates an empty ptr (null)
-		ptr() : handle(nullptr)
+		ptr() : obj(nullptr), handle(nullptr)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
@@ -160,6 +172,9 @@ public: // -- public interface -- //
 				// set handle to null - we must always point to a valid object or null
 				handle = nullptr;
 
+				// set obj to null (better to get nullptr exceptions than segfaults)
+				obj = nullptr;
+
 				// unregister handle as a root
 				GC::__unroot(handle);
 			}
@@ -169,7 +184,7 @@ public: // -- public interface -- //
 		}
 
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
-		ptr(const ptr &other) : handle(other.handle)
+		ptr(const ptr &other) : obj(other.obj), handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
@@ -177,7 +192,7 @@ public: // -- public interface -- //
 			if (handle) GC::__addref(handle); // we're new - inc ref count
 		}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr(const ptr<J> &other) : handle(other.handle)
+		ptr(const ptr<J> &other) : obj(static_cast<T*>(other.obj)), handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
@@ -186,16 +201,16 @@ public: // -- public interface -- //
 		}
 
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
-		ptr &operator=(const ptr &other) { reset(other.handle);	return *this; }
+		ptr &operator=(const ptr &other) { reset(other.obj, other.handle);	return *this; }
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr &operator=(const ptr<J> &other) { reset(other.handle); return *this; }
+		ptr &operator=(const ptr<J> &other) { reset(static_cast<T*>(other.obj), other.handle); return *this; }
 
-		ptr &operator=(std::nullptr_t) { reset(nullptr); return *this; }
+		ptr &operator=(std::nullptr_t) { reset(nullptr, nullptr); return *this; }
 
 	public: // -- obj access -- //
 
-		T &operator*() const { return *(T*)handle->obj; }
-		T *operator->() const { return (T*)handle->obj; }
+		T &operator*() const { return *obj; }
+		T *operator->() const { return obj; }
 
 		// returns the number of references to the current object.
 		// if this object is not pointing at any object, returns 0.
@@ -205,31 +220,30 @@ public: // -- public interface -- //
 			return handle ? handle->ref_count : 0;
 		}
 
-		// gets a pointer to the managed object.
-		// if this ptr does not point at a managed object, returns null.
-		T *get() const { return handle ? (T*)handle->obj : nullptr; }
+		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
+		T *get() const { return obj; }
 
 		// returns true iff this ptr points to a managed object (non-null)
-		explicit operator bool() const { return handle != nullptr; }
+		explicit operator bool() const { return get() != nullptr; }
 
 	public: // -- comparison -- //
 
-		friend bool operator==(const ptr &a, const ptr &b) { return a.handle == b.handle; }
-		friend bool operator!=(const ptr &a, const ptr &b) { return a.handle != b.handle; }
+		friend bool operator==(const ptr &a, const ptr &b) { return a.get() == b.get(); }
+		friend bool operator!=(const ptr &a, const ptr &b) { return a.get() != b.get(); }
 		friend bool operator<(const ptr &a, const ptr &b) { return a.get() < b.get(); }
 		friend bool operator<=(const ptr &a, const ptr &b) { return a.get() <= b.get(); }
 		friend bool operator>(const ptr &a, const ptr &b) { return a.get() > b.get(); }
 		friend bool operator>=(const ptr &a, const ptr &b) { return a.get() >= b.get(); }
 
-		friend bool operator==(const ptr &a, std::nullptr_t b) { return a.handle == b; }
-		friend bool operator!=(const ptr &a, std::nullptr_t b) { return a.handle != b; }
+		friend bool operator==(const ptr &a, std::nullptr_t b) { return a.get() == b; }
+		friend bool operator!=(const ptr &a, std::nullptr_t b) { return a.get() != b; }
 		friend bool operator<(const ptr &a, std::nullptr_t b) { return a.get() < b; }
 		friend bool operator<=(const ptr &a, std::nullptr_t b) { return a.get() <= b; }
 		friend bool operator>(const ptr &a, std::nullptr_t b) { return a.get() > b; }
 		friend bool operator>=(const ptr &a, std::nullptr_t b) { return a.get() >= b; }
 
-		friend bool operator==(std::nullptr_t a, const ptr &b) { return a == b.handle; }
-		friend bool operator!=(std::nullptr_t a, const ptr &b) { return a != b.handle; }
+		friend bool operator==(std::nullptr_t a, const ptr &b) { return a == b.get(); }
+		friend bool operator!=(std::nullptr_t a, const ptr &b) { return a != b.get(); }
 		friend bool operator<(std::nullptr_t a, const ptr &b) { return a < b.get(); }
 		friend bool operator<=(std::nullptr_t a, const ptr &b) { return a <= b.get(); }
 		friend bool operator>(std::nullptr_t a, const ptr &b) { return a > b.get(); }
@@ -263,7 +277,7 @@ public: // -- public interface -- //
 			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, __router<T>::__route);
 
 			// initialize ptr with handle
-			res.__init(handle);
+			res.__init(obj.get(), handle);
 
 			// for each outgoing arc from obj
 			handle->router(handle->obj, +[](info *&arc)

@@ -90,13 +90,17 @@ struct GC::router<wrap<T>>
 	}
 };
 
-struct base
+struct base1
 {
-	int b_int;
+	int a;
 };
-struct derived : base
+struct base2
 {
-	float d_float;
+	int b;
+};
+struct derived : base1, base2
+{
+
 };
 
 int main()
@@ -122,12 +126,23 @@ int main()
 	ListNode n;
 
 	GC::ptr<derived> dp = GC::make<derived>();
-	GC::ptr<base> bp = GC::make<base>();
+	GC::ptr<base1> bp1 = GC::make<base1>();
+	GC::ptr<base2> bp2 = GC::make<base2>();
 
-	GC::ptr<base> dp_as_b = dp;
+	dp->a = 123;
+	dp->b = 456;
+
+	std::cerr << '\n';
+
+	GC::ptr<base1> dp_as_b1 = dp;
+	GC::ptr<base2> dp_as_b2 = dp;
+
+	std::cerr << "a: " << dp_as_b1->a << '\n';
+	std::cerr << "b: " << dp_as_b2->b << '\n';
+
 	//GC::ptr<derived> wrong_dp = bp;
 
-	dp_as_b = dp;
+	//dp_as_b = dp;
 	//dp_as_b = 67;
 
 	/**
