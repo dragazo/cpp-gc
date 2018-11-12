@@ -55,23 +55,16 @@ std::atomic<GC::sleep_time_t> GC::_sleep_time(std::chrono::milliseconds(60000));
 void GC::__root(info *&handle) { roots.insert(&handle); }
 void GC::__unroot(info *&handle) { roots.erase(&handle); }
 
-GC::info *GC::__create(void *obj, void(*deleter)(void*), void(*router)(void*, router_fn))
+void GC::__link(info *handle)
 {
-	// create a gc entry for it
-	info *entry = std::make_unique<info>(obj, deleter, router, 1, last, nullptr).release();
-	
-	// put it in the database
-	if (last) last = last->next = entry;
-	else first = last = entry;
+	// -- put it at the end of the list -- //
 
-	#if GC_SHOW_CREATMSG
-	std::cerr << "gc created " << obj << '\n';
-	#endif
+	handle->prev = last;
+	handle->next = nullptr;
 
-	// return the gc alloc entry
-	return entry;
+	if (last) last = last->next = handle;
+	else first = last = handle;
 }
-
 void GC::__unlink(info *handle)
 {
 	// not using first == last for the first case because in the (illegal) case where

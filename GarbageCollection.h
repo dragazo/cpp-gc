@@ -57,7 +57,7 @@ private: // -- private types -- //
 	template<typename T>
 	struct __router
 	{
-		static void __route(void *obj, router_fn func) { router<T>::route(*(T*)obj, func); }
+		static void __route(void *obj, router_fn func) { router<T>::route(*reinterpret_cast<T*>(obj), func); }
 	};
 
 	// represents a single garbage-collected object's allocation info.
@@ -70,18 +70,17 @@ private: // -- private types -- //
 		void(*const deleter)(void*);           // a deleter function to eventually delete obj
 		void(*const router)(void*, router_fn); // a router function to use for this object
 
-		std::size_t ref_count; // the reference count for this allocation
+		std::size_t ref_count = 1;      // the reference count for this allocation
+		bool        destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
 
 		bool marked; // only used for GC::collect() - otherwise undefined
-
-		bool destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
 
 		info *prev; // the std::list iterator contract isn't quite what we want
 		info *next; // so we need to manage a linked list on our own
 
-		// populates info
-		info(void *_obj, void(*_deleter)(void*), void(*_router)(void*, router_fn), std::size_t _ref_count, info *_prev, info *_next)
-			: obj(_obj), deleter(_deleter), router(_router), ref_count(_ref_count), prev(_prev), next(_next)
+		// populates info - ref count starts at 1
+		info(void *_obj, void(*_deleter)(void*), void(*_router)(void*, router_fn))
+			: obj(_obj), deleter(_deleter), router(_router)
 		{}
 	};
 
@@ -267,17 +266,20 @@ public: // -- public interface -- //
 		std::unique_ptr<T> obj = std::make_unique<T>(std::forward<Args>(args)...);
 		void *raw = const_cast<void*>(reinterpret_cast<const void*>(obj.get()));
 
+		// allocate the info object
+		std::unique_ptr<info> handle = std::make_unique<info>(raw, [](void *ptr) { delete (T*)ptr; }, __router<T>::__route);
+
 		// create a ptr ahead of time (make sure to use the no_rooting_t ctor)
 		ptr<T> res(GC::no_rooting_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
-			// create a handle for it
-			GC::info *handle = GC::__create(raw, [](void *ptr) { delete (T*)ptr; }, __router<T>::__route);
+			// link the info object
+			__link(handle.get());
 
 			// initialize ptr with handle
-			res.__init(obj.get(), handle);
+			res.__init(obj.get(), handle.get());
 
 			// for each outgoing arc from obj
 			handle->router(handle->obj, +[](info *&arc)
@@ -290,8 +292,8 @@ public: // -- public interface -- //
 			__start_timed_collect();
 		}
 
-		// unlink obj from the smart pointer (all the dangerous stuff is done)
 		obj.release();
+		handle.release();
 
 		// return the created ptr
 		return res;
@@ -309,9 +311,10 @@ public: // -- auto collection -- //
 	{
 		manual = 0, // no automatic garbage collection
 
-		timed = 1, // garbage collect on a timed basis
+		timed = 1,     // garbage collect on a timed basis
+		allocfail = 2, // garbage collect each time a call to GC::make has an allocation failure
 	};
-
+	
 	friend strategies operator|(strategies a, strategies b) { return (strategies)((int)a | (int)b); }
 	friend strategies operator&(strategies a, strategies b) { return (strategies)((int)a & (int)b); }
 
@@ -368,16 +371,9 @@ private: // -- private interface -- //
 	static void __root(info *&handle);
 	static void __unroot(info *&handle);
 
-	// adds a pre-existing (non-garbage-collected) object to the garbage-collection database.
-	// returns a handle that must be used to control the gc allocation - DO NOT LOSE THIS - DO NOT MODIFY THIS IN ANY WAY.
-	// the aliased object begins with a reference count of 1 - YOU SHOULD NOT CALL ADDREF ~BECAUSE~ OF CREATE.
-	// it is undefined behavior to call this function on an object that already exists in the gc database.
-	// returns a non-null pointer. if the memory allocation fails, throws an exception but does not leak resources.
-	// <obj> is the address of the actual object that was allocated dynamically that should now be managed.
-	// <deleter> is a function that will be used to deallocate <obj>.
-	// <outgoing> is a function that returns the begin/end range of outgoing gc-qualified pointer offsets from <obj>.
-	static info *__create(void *obj, void(*deleter)(void*), void(*router)(void*, router_fn));
-
+	// links handle into the gc database.
+	// if is undefined behavior if handle is currently in the gc database.
+	static void __link(info *handle);
 	// unlinks handle from the gc database.
 	// it is undefined behavior if handle is not currently in the gc database.
 	static void __unlink(info *handle);
