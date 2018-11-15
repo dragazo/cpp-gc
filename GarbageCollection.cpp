@@ -46,6 +46,42 @@ std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed);
 
 std::atomic<GC::sleep_time_t> GC::_sleep_time(std::chrono::milliseconds(60000));
 
+// ---------- //
+
+// -- misc -- //
+
+// ---------- //
+
+void *GC::aligned_malloc(std::size_t size, std::size_t align)
+{
+	// calling with 0 yields nullptr
+	if (size == 0) return nullptr;
+
+	// allocate enough space for a void*, padding, and the array
+	size += sizeof(void*) + align - 1;
+
+	// grab that much space - if that fails, return null
+	void *raw = std::malloc(size);
+	if (!raw) return nullptr;
+
+	// get the pointer to return (before alignment)
+	void *ret = (char*)raw + sizeof(void*);
+
+	// align the return pointer
+	ret = (char*)ret + (-(std::intptr_t)ret & (align - 1));
+
+	// store the raw pointer before start of ret array
+	*(void**)((char*)ret - sizeof(void*)) = raw;
+
+	// return ret pointer
+	return ret;
+}
+void GC::aligned_free(void *ptr)
+{
+	// free the raw pointer (freeing nullptr does nothing)
+	if (ptr) std::free(*(void**)((char*)ptr - sizeof(void*)));
+}
+
 // --------------- //
 
 // -- interface -- //

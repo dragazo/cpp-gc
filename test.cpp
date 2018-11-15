@@ -2,8 +2,11 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <cstddef>
 
 #include "GarbageCollection.h"
+
+struct alignas(16) sse_t { char d[16]; };
 
 struct ptr_set
 {
@@ -107,6 +110,10 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
+	sse_t t;
+	t.d[4] = '6';
+	std::cerr << "max align: " << alignof(std::max_align_t) << "\n\n";
+
 	GC::ptr<int> ip = GC::make<int>(46);
 	GC::ptr<int> ip_self = ip;
 	std::cerr << "      int val:  " << *ip << '\n';
@@ -145,7 +152,7 @@ int main()
 	//dp_as_b = dp;
 	//dp_as_b = 67;
 
-	/**/
+	/**
 	{
 		std::thread t1([]() { while (1) foo(); });
 		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });

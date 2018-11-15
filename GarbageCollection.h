@@ -12,6 +12,10 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <algorithm>
+#include <exception>
+#include <stdexcept>
+#include <new>
 
 // ------------------------ //
 
@@ -262,12 +266,34 @@ public: // -- public interface -- //
 	template<typename T, typename ...Args>
 	static ptr<T> make(Args &&...args)
 	{
-		// allocate the object and get a raw pointer to it
-		std::unique_ptr<T> obj = std::make_unique<T>(std::forward<Args>(args)...);
-		void *raw = const_cast<void*>(reinterpret_cast<const void*>(obj.get()));
+		// -- create the buffer for both T and its info object -- //
 
-		// allocate the info object
-		std::unique_ptr<info> handle = std::make_unique<info>(raw, [](void *ptr) { delete (T*)ptr; }, __router<T>::__route);
+		// allocate aligned space for T and info
+		void *buf = GC::aligned_malloc(sizeof(T) + sizeof(info), std::max(alignof(T), alignof(info)));
+
+		// if that failed, throw std::bad_alloc
+		if (!buf) throw std::bad_alloc();
+
+		// alias the buffer partitions (pt == buf always)
+		auto  obj = (std::remove_const_t<T>*)buf;
+		info *handle = (info*)((char*)buf + sizeof(T));
+
+		// -- construct the objects -- //
+
+		// try to construct the T object
+		try { new (obj) T(std::forward<Args>(args)...); }
+		// if that fails, deallocate buf and rethrow
+		catch (...) { GC::aligned_free(buf); throw; }
+
+		// construct the info object
+		new (handle) info(obj, [](void *ptr)
+		{
+			// destroy the T object and deallocate the buffer (ptr == buffer)
+			((T*)ptr)->~T();
+			GC::aligned_free(ptr);
+		}, __router<T>::__route);
+
+		// -- do the garbage collection aspects -- //
 
 		// create a ptr ahead of time (make sure to use the no_rooting_t ctor)
 		ptr<T> res(GC::no_rooting_t{});
@@ -276,10 +302,10 @@ public: // -- public interface -- //
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
 			// link the info object
-			__link(handle.get());
+			__link(handle);
 
 			// initialize ptr with handle
-			res.__init(obj.get(), handle.get());
+			res.__init(obj, handle);
 
 			// for each outgoing arc from obj
 			handle->router(handle->obj, +[](info *&arc)
@@ -291,9 +317,6 @@ public: // -- public interface -- //
 			// begin timed collect
 			__start_timed_collect();
 		}
-
-		obj.release();
-		handle.release();
 
 		// return the created ptr
 		return res;
@@ -357,6 +380,16 @@ private: // -- misc -- //
 	void *get_polymorphic_root(T *ptr) { return dynamic_cast<void*>(ptr); }
 	template<typename T, std::enable_if_t<!std::is_polymorphic<T>::value, int> = 0>
 	void *get_polymorphic_root(T *ptr) { return ptr; }
+
+	// allocates space and returns a pointer to at least <size> bytes which is aligned to <align>.
+	// it is undefined behavior if align is not a power of 2.
+	// allocating zero bytes returns null.
+	// on failure, returns null.
+	// must be deallocated via aligned_free().
+	static void *aligned_malloc(std::size_t size, std::size_t align);
+	// deallocates a block of memory allocated by aligned_malloc().
+	// if <ptr> is null, does nothing.
+	static void aligned_free(void *ptr);
 
 private: // -- private interface -- //
 
