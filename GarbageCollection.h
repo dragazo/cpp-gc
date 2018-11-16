@@ -93,7 +93,39 @@ private: // -- private types -- //
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
 	struct no_rooting_t {};
 
-public: // -- public interface -- //
+private: // -- construction / destruction -- //
+
+	// constructs or destructs T in place
+	template<typename T>
+	struct __ctor_dtor
+	{
+		template<typename ...Args>
+		static void ctor(T *pos, Args &&...args) { new (pos) T{std::forward<Args>(args)...}; }
+
+		static void dtor(T *pos) { pos->~T(); }
+		static void __dtor(void *pos) { dtor((T*)pos); }
+	};
+
+	// handles the construction/destruction of C-style arrays in place
+	template<typename T, std::size_t N>
+	struct __ctor_dtor<T[N]>
+	{
+		static void ctor(T(*pos)[N]) { for (std::size_t i = 0; i < N; ++i) __ctor_dtor<T>::ctor(*pos + i); }
+
+		static void dtor(T(*pos)[N]) { for (std::size_t i = 0; i < N; ++i) __ctor_dtor<T>::dtor(*pos + i); }
+		static void __dtor(void *pos) { dtor((T(*)[N])pos); }
+	};
+
+private: // -- extent extensions -- //
+
+	// gets the total extent of a multi-dimensional array. 1 for scalar types.
+	template<typename T>
+	struct __full_extent : std::integral_constant<std::size_t, 1> {};
+
+	template<typename T, std::size_t N>
+	struct __full_extent<T[N]> : std::integral_constant<std::size_t, N * __full_extent<T>::value> {};
+
+public: // -- ptr -- //
 	
 	// a self-managed garbage-collected pointer
 	template<typename T>
@@ -255,6 +287,8 @@ public: // -- public interface -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
+public: // -- core router specializations -- //
+
 	// specialization of router for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>).
 	// this is required, as all GC::route() calls must eventually decay to calling ptr<T> routers.
 	template<typename T>
@@ -262,14 +296,29 @@ public: // -- public interface -- //
 	{
 		static void route(ptr<T> &obj, router_fn func) { func(obj.handle); }
 	};
-	
+
+	// routes a message directed at a C-style array to each element in said array
+	template<typename T, std::size_t N>
+	struct router<T[N]>
+	{
+		static void route(T(&objs)[N], router_fn func) { for (std::size_t i = 0; i < N; ++i) router<T>::route(objs[i], func); }
+	};
+
+public: // -- ptr allocation -- //
+
 	// creates a new dynamic instance of T that is bound to a ptr.
 	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
 	template<typename T, typename ...Args>
 	static ptr<T> make(Args &&...args)
 	{
+		// -- normalize T -- //
+
 		// typedef the non-const type
 		typedef std::remove_const_t<T> NCT;
+
+		// get the element type and the full extent
+		typedef std::remove_const_t<std::remove_all_extents_t<NCT>> ElemT;
+		constexpr std::size_t full_extent = __full_extent<NCT>::value;
 
 		// -- create the buffer for both NCT and its info object -- //
 
@@ -286,16 +335,16 @@ public: // -- public interface -- //
 		// -- construct the objects -- //
 
 		// try to construct the NCT object
-		try { new (obj) NCT(std::forward<Args>(args)...); }
+		try { __ctor_dtor<NCT>::ctor(obj, std::forward<Args>(args)...); }
 		// if that fails, deallocate buf and rethrow
 		catch (...) { GC::aligned_free(buf); throw; }
 
 		// construct the info object
 		new (handle) info(
-			obj,                                    // object to manage
-			[](void *ptr) { ((NCT*)ptr)->~NCT(); }, // dtor function
-			GC::aligned_free,                       // dealloc function
-			__router<NCT>::__route);                // router function
+			obj,                      // object to manage
+			__ctor_dtor<NCT>::__dtor, // dtor function
+			GC::aligned_free,         // dealloc function
+			__router<NCT>::__route);  // router function
 
 		// -- do the garbage collection aspects -- //
 

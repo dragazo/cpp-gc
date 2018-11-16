@@ -35,10 +35,10 @@ struct ListNode
 	ptr_set set;
 
 	// show a message that says we called ctor
-	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(2)); }
+	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(4)); }
 
 	// show a message that says we called dtor
-	~ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(2)); }
+	~ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(4)); }
 };
 template<> struct GC::router<ListNode>
 {
@@ -110,6 +110,24 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
+	{
+		std::cerr << "ptr<ptr<int>[16]>:\n";
+		GC::ptr<GC::ptr<int>[2][2][2]> arr_ptr = GC::make<GC::ptr<int>[2][2][2]>();
+
+		for (int i = 0; i < 2; ++i)
+			for (int j = 0; j < 2; ++j)
+				for (int k = 0; k < 2; ++k)
+					(*arr_ptr)[i][j][k] = GC::make<int>((i + j)*j + i*j*k + k*i + k + 1);
+
+		for (int i = 0; i < 2; ++i)
+			for (int j = 0; j < 2; ++j)
+				for (int k = 0; k < 2; ++k)
+					std::cerr << "elem (" << i << ", " << j << ", " << k << ") = " << *(*arr_ptr)[i][j][k] << '\n';
+
+		GC::collect();
+		std::cerr << "\n\n";
+	}
+
 	sse_t t;
 	t.d[4] = '6';
 	std::cerr << "max align: " << alignof(std::max_align_t) << "\n\n";
@@ -152,7 +170,9 @@ int main()
 	//dp_as_b = dp;
 	//dp_as_b = 67;
 
-	/**/
+
+
+	/**
 	{
 		std::thread t1([]() { while (1) foo(); });
 		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });
