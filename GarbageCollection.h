@@ -71,8 +71,10 @@ private: // -- private types -- //
 	{
 		void *const obj; // pointer to the managed object
 
-		void(*const deleter)(void*);           // a deleter function to eventually delete obj
-		void(*const router)(void*, router_fn); // a router function to use for this object
+		void(*const dtor)(void *_obj);    // a function to destroy obj
+		void(*const dealloc)(void *_obj); // a function to deallocate memory - called after dtor()
+
+		void(*const router)(void *_obj, router_fn); // a router function to use for this object
 
 		std::size_t ref_count = 1;      // the reference count for this allocation
 		bool        destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
@@ -83,8 +85,8 @@ private: // -- private types -- //
 		info *next; // so we need to manage a linked list on our own
 
 		// populates info - ref count starts at 1
-		info(void *_obj, void(*_deleter)(void*), void(*_router)(void*, router_fn))
-			: obj(_obj), deleter(_deleter), router(_router)
+		info(void *_obj, void(*_dtor)(void*), void(*_dealloc)(void*), void(*_router)(void*, router_fn))
+			: obj(_obj), dtor(_dtor), dealloc(_dealloc), router(_router)
 		{}
 	};
 
@@ -266,36 +268,38 @@ public: // -- public interface -- //
 	template<typename T, typename ...Args>
 	static ptr<T> make(Args &&...args)
 	{
-		// -- create the buffer for both T and its info object -- //
+		// typedef the non-const type
+		typedef std::remove_const_t<T> NCT;
 
-		// allocate aligned space for T and info
-		void *buf = GC::aligned_malloc(sizeof(T) + sizeof(info), std::max(alignof(T), alignof(info)));
+		// -- create the buffer for both NCT and its info object -- //
+
+		// allocate aligned space for NCT and info
+		void *buf = GC::aligned_malloc(sizeof(NCT) + sizeof(info), std::max(alignof(NCT), alignof(info)));
 
 		// if that failed, throw std::bad_alloc
 		if (!buf) throw std::bad_alloc();
 
 		// alias the buffer partitions (pt == buf always)
-		auto  obj = (std::remove_const_t<T>*)buf;
-		info *handle = (info*)((char*)buf + sizeof(T));
+		NCT  *obj = (NCT*)buf;
+		info *handle = (info*)((char*)buf + sizeof(NCT));
 
 		// -- construct the objects -- //
 
-		// try to construct the T object
-		try { new (obj) T(std::forward<Args>(args)...); }
+		// try to construct the NCT object
+		try { new (obj) NCT(std::forward<Args>(args)...); }
 		// if that fails, deallocate buf and rethrow
 		catch (...) { GC::aligned_free(buf); throw; }
 
 		// construct the info object
-		new (handle) info(obj, [](void *ptr)
-		{
-			// destroy the T object and deallocate the buffer (ptr == buffer)
-			((T*)ptr)->~T();
-			GC::aligned_free(ptr);
-		}, __router<T>::__route);
+		new (handle) info(
+			obj,                                    // object to manage
+			[](void *ptr) { ((NCT*)ptr)->~NCT(); }, // dtor function
+			GC::aligned_free,                       // dealloc function
+			__router<NCT>::__route);                // router function
 
 		// -- do the garbage collection aspects -- //
 
-		// create a ptr ahead of time (make sure to use the no_rooting_t ctor)
+		// create a ptr ahead of time - uses correct T - (make sure to use the no_rooting_t ctor)
 		ptr<T> res(GC::no_rooting_t{});
 
 		{

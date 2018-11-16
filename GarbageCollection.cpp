@@ -152,14 +152,14 @@ void GC::handle_del_list()
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
 		#endif
 
-		handle->deleter(handle->obj);
+		handle->dtor(handle->obj);
 	}
 
 	// delete the handles
 	// this is done after calling all deleters so that the deletion func can access the handles safely
 	for (info *handle : del_list_cpy)
 	{
-		delete handle;
+		handle->dealloc(handle->obj);
 	}
 }
 
