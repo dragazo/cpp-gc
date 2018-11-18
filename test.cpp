@@ -11,10 +11,13 @@ struct alignas(16) sse_t { char d[16]; };
 struct ptr_set
 {
 	GC::ptr<int> a, b, c, d, e, f, g, h;
+	const int val;
+
+	ptr_set() : val(0) {}
 };
 template<> struct GC::router<ptr_set>
 {
-	static void route(ptr_set &set, router_fn func)
+	static void route(const ptr_set &set, router_fn func)
 	{
 		GC::route(set.a, func);
 		GC::route(set.b, func);
@@ -24,6 +27,8 @@ template<> struct GC::router<ptr_set>
 		GC::route(set.f, func);
 		GC::route(set.g, func);
 		GC::route(set.h, func);
+
+		GC::route(set.val, func);
 	}
 };
 
@@ -32,7 +37,7 @@ struct ListNode
 	GC::ptr<ListNode> prev;
 	GC::ptr<ListNode> next;
 
-	ptr_set set;
+	const ptr_set set;
 
 	// show a message that says we called ctor
 	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(4)); }
@@ -42,7 +47,7 @@ struct ListNode
 };
 template<> struct GC::router<ListNode>
 {
-	static void route(ListNode &node, router_fn func)
+	static void route(const ListNode &node, router_fn func)
 	{
 		GC::route(node.prev, func);
 		GC::route(node.next, func);
@@ -87,7 +92,7 @@ struct wrap
 template<typename T>
 struct GC::router<wrap<T>>
 {
-	static void route(wrap<T> &w, router_fn fn)
+	static void route(const wrap<T> &w, router_fn fn)
 	{
 		GC::route(w.ptr, fn);
 	}
@@ -110,8 +115,13 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
+	GC::ptr<ListNode> vec_ptr = GC::make<ListNode>();
+	GC::collect();
+	std::cerr << "\n\n";
+	std::cin.get();
+
 	{
-		std::cerr << "ptr<ptr<int>[16]>:\n";
+		std::cerr << "ptr<ptr<int>[2][2][2]>:\n";
 		GC::ptr<GC::ptr<int>[2][2][2]> arr_ptr = GC::make<GC::ptr<int>[2][2][2]>();
 
 		for (int i = 0; i < 2; ++i)
@@ -172,7 +182,7 @@ int main()
 
 
 
-	/**/
+	/**
 	{
 		std::thread t1([]() { while (1) foo(); });
 		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });

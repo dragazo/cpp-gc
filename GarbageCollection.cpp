@@ -23,7 +23,7 @@
 #define GC_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define GC_COLLECT_MSG 0
+#define GC_COLLECT_MSG 1
 
 // ---------- //
 
@@ -36,7 +36,7 @@ std::mutex GC::mutex;
 GC::info *GC::first = nullptr;
 GC::info *GC::last = nullptr;
 
-std::unordered_set<GC::info**> GC::roots;
+std::unordered_set<GC::info *const *> GC::roots;
 
 std::vector<GC::info*> GC::del_list;
 
@@ -88,8 +88,8 @@ void GC::aligned_free(void *ptr)
 
 // --------------- //
 
-void GC::__root(info *&handle) { roots.insert(&handle); }
-void GC::__unroot(info *&handle) { roots.erase(&handle); }
+void GC::__root(info *const &handle) { roots.insert(&handle); }
+void GC::__unroot(info *const &handle) { roots.erase(&handle); }
 
 void GC::__link(info *handle)
 {
@@ -175,7 +175,7 @@ void GC::__mark_sweep(info *handle)
 	handle->marked = true;
 
 	// for each outgoing arc
-	handle->router(handle->obj, +[](info *&arc)
+	handle->router(handle->obj, +[](info *const &arc)
 	{
 		// if it hasn't been marked, recurse to it (only if non-null)
 		if (arc && !arc->marked) __mark_sweep(arc);
@@ -203,7 +203,7 @@ void GC::collect()
 		}
 
 		// for each root
-		for (info **i : roots)
+		for (info *const *i : roots)
 		{
 			// perform a mark sweep from this root (if it points to something)
 			if (*i) __mark_sweep(*i);

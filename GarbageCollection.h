@@ -34,11 +34,11 @@ public: // -- outgoing arcs -- //
 	{
 	private: // -- contents hidden for security -- //
 
-		void(*const func)(info*&); // raw function pointer to call
+		void(*const func)(info *const &); // raw function pointer to call
 
-		router_fn(void(*_func)(info*&)) : func(_func) {}
+		router_fn(void(*_func)(info *const &)) : func(_func) {}
 
-		void operator()(info *&arg) { func(arg); }
+		void operator()(info *const &arg) { func(arg); }
 
 		friend class GC;
 	};
@@ -47,12 +47,20 @@ public: // -- outgoing arcs -- //
 	// obj must be the SOLE owner of elem, and elem must be the SOLE owner of its (direct or indirect) GC::ptr values.
 	// it is undefined behavior to use any gc utilities (directly or indirectly) during this function's invocation.
 	// this default implementation is sufficient for any type that does not contain GC::ptr by value (directly or indirectly).
+	// T should be non-const and the function should take const &T.
+	// THIS IS USED FOR ROUTER DEFINITION - YOU SHOULD NOT USE IT DIRECTLY FOR ROUTING (E.G. INSIDE YOUR router<T>::route() DEFINITION).
 	template<typename T>
-	struct router { static void route(T &obj, router_fn func) {} };
+	struct router { static void route(const T &obj, router_fn func) {} };
 
-	// convenience function - equivalent to router<T>::route() where T is deduced from the obj argument.
+	// routes obj into func recursively.
+	// you should use this function for routing in router<T>::route() definitions (rather than direct use of router<T>::route()).
 	template<typename T>
-	static void route(T &obj, router_fn func) { router<T>::route(obj, func); }
+	static void route(const T &obj, router_fn func) { router<std::remove_const_t<T>>::route(obj, func); }
+
+	// routes each element in an iterator range into func recursively.
+	// like route(), this function is safe to use directly - DO NOT USE router<T>::route() DIRECTLY
+	template<typename IterBegin, typename IterEnd>
+	static void route_range(IterBegin begin, IterEnd end, router_fn func) { for (; begin != end; ++begin) GC::route(*begin, func); }
 
 private: // -- private types -- //
 
@@ -294,14 +302,22 @@ public: // -- core router specializations -- //
 	template<typename T>
 	struct router<ptr<T>>
 	{
-		static void route(ptr<T> &obj, router_fn func) { func(obj.handle); }
+		static void route(const ptr<T> &obj, router_fn func) { func(obj.handle); }
 	};
 
 	// routes a message directed at a C-style array to each element in said array
 	template<typename T, std::size_t N>
 	struct router<T[N]>
 	{
-		static void route(T(&objs)[N], router_fn func) { for (std::size_t i = 0; i < N; ++i) router<T>::route(objs[i], func); }
+		static void route(const T(&objs)[N], router_fn func) { for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func); }
+	};
+
+public: // -- stdlib router specializations -- //
+
+	template<typename T>
+	struct router<std::vector<T>>
+	{
+		static void route(const std::vector<T> &vec, router_fn func) { route_range(vec.begin(), vec.end(), func); }
 	};
 
 public: // -- ptr allocation -- //
@@ -361,7 +377,7 @@ public: // -- ptr allocation -- //
 			res.__init(obj, handle);
 
 			// for each outgoing arc from obj
-			handle->router(handle->obj, +[](info *&arc)
+			handle->router(handle->obj, +[](info *const &arc)
 			{
 				// mark this arc as not being a root (because obj owns it by value)
 				GC::__unroot(arc);
@@ -414,7 +430,7 @@ private: // -- data -- //
 	static info *first; // pointer to the first gc allocation
 	static info *last;  // pointer to the last gc allocation (not the same as the end iterator)
 
-	static std::unordered_set<info**> roots; // a database of all gc root handles - (references - do not delete)
+	static std::unordered_set<info *const *> roots; // a database of all gc root handles - (references - do not delete)
 
 	static std::vector<info*> del_list; // list of handles that are scheduled for deletion (from __delref async calls)
 
@@ -454,8 +470,8 @@ private: // -- private interface -- //
 
 	// registers/unregisters a gc_info* as a root.
 	// safe to root if already rooted. safe to unroot if not rooted.
-	static void __root(info *&handle);
-	static void __unroot(info *&handle);
+	static void __root(info *const &handle);
+	static void __unroot(info *const &handle);
 
 	// links handle into the gc database.
 	// if is undefined behavior if handle is currently in the gc database.
