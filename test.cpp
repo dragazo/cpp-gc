@@ -118,7 +118,6 @@ int main()
 	GC::ptr<ListNode> vec_ptr = GC::make<ListNode>();
 	GC::collect();
 	std::cerr << "\n\n";
-	std::cin.get();
 
 	{
 		std::cerr << "ptr<ptr<int>[2][2][2]>:\n";

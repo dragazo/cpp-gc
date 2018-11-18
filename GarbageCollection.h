@@ -39,6 +39,7 @@ public: // -- outgoing arcs -- //
 		router_fn(void(*_func)(info *const &)) : func(_func) {}
 
 		void operator()(info *const &arg) { func(arg); }
+		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
 
 		friend class GC;
 	};
@@ -472,6 +473,10 @@ private: // -- private interface -- //
 	// safe to root if already rooted. safe to unroot if not rooted.
 	static void __root(info *const &handle);
 	static void __unroot(info *const &handle);
+
+	// for safety - ensures we can't pass root/unroot an rvalue
+	static void __root(info *&&handle) = delete;
+	static void __unroot(info *&&handle) = delete;
 
 	// links handle into the gc database.
 	// if is undefined behavior if handle is currently in the gc database.
