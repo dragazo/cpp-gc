@@ -179,9 +179,9 @@ int main()
 	//dp_as_b = dp;
 	//dp_as_b = 67;
 
+	std::cin.get();
 
-
-	/**
+	/**/
 	{
 		std::thread t1([]() { while (1) foo(); });
 		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });

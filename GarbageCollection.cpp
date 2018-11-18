@@ -42,7 +42,7 @@ std::vector<GC::info*> GC::del_list;
 
 // ---------------------------------------
 
-std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed);
+std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
 
 std::atomic<GC::sleep_time_t> GC::_sleep_time(std::chrono::milliseconds(60000));
 

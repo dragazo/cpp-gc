@@ -342,12 +342,20 @@ public: // -- ptr allocation -- //
 		// allocate aligned space for NCT and info
 		void *buf = GC::aligned_malloc(sizeof(NCT) + sizeof(info), std::max(alignof(NCT), alignof(info)));
 
-		// if that failed, throw std::bad_alloc
+		// if that failed but we have allocfail collect mode enabled
+		if (!buf && (int)strategy() & (int)strategies::allocfail)
+		{
+			// collect and retry the allocation
+			GC::collect();
+			buf = GC::aligned_malloc(sizeof(NCT) + sizeof(info), std::max(alignof(NCT), alignof(info)));
+		}
+
+		// if that failed, throw bad alloc
 		if (!buf) throw std::bad_alloc();
 
 		// alias the buffer partitions (pt == buf always)
-		NCT  *obj = (NCT*)buf;
-		info *handle = (info*)((char*)buf + sizeof(NCT));
+		NCT  *obj = reinterpret_cast<NCT*>(buf);
+		info *handle = reinterpret_cast<info*>((char*)buf + sizeof(NCT));
 
 		// -- construct the objects -- //
 
