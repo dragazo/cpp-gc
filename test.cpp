@@ -115,7 +115,15 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
-	GC::ptr<ListNode> vec_ptr = GC::make<ListNode>();
+	GC::ptr<std::vector<GC::ptr<ListNode>>> merp = GC::make<std::vector<GC::ptr<ListNode>>>();
+	merp->push_back(GC::make<ListNode>());
+	merp->push_back(GC::make<ListNode>());
+	merp->emplace_back(GC::make<ListNode>());
+	merp->emplace_back(GC::make<ListNode>());
+	merp->push_back(GC::make<ListNode>());
+	merp->push_back(GC::make<ListNode>());
+	merp->emplace_back(GC::make<ListNode>());
+	merp->emplace_back(GC::make<ListNode>());
 	GC::collect();
 	std::cerr << "\n\n";
 

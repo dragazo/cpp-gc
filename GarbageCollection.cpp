@@ -191,16 +191,29 @@ void GC::collect()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 
-		#if GC_COLLECT_MSG
-		std::cerr << "collecting - current roots: " << roots.size() << '\n';
-		#endif
+		// -- recalculate root claims for each object -- //
 
-		// for each item in the gc database
+		// this can happen because e.g. a ptr<T> was added to a std::vector<ptr<T>> and thus was not unrooted by GC::make() after construction
+
+		#if GC_COLLECT_MSG
+		std::cerr << "collecting - current roots: " << roots.size() << " -> ";
+		#endif
+		
+		// for each object in hte gc database
 		for (info *i = first; i; i = i->next)
 		{
 			// clear its marked flag
 			i->marked = false;
+
+			// claim its children (see above comment)
+			i->router(i->obj, GC::__unroot);
 		}
+
+		// -- mark and sweep -- //
+
+		#if GC_COLLECT_MSG
+		std::cerr << roots.size() << '\n';
+		#endif
 
 		// for each root
 		for (info *const *i : roots)
@@ -208,6 +221,8 @@ void GC::collect()
 			// perform a mark sweep from this root (if it points to something)
 			if (*i) __mark_sweep(*i);
 		}
+
+		// -- clean anything not marked -- //
 
 		// for each item in the gc database
 		for (info *i = first, *_next; i; i = _next)

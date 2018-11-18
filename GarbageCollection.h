@@ -315,10 +315,10 @@ public: // -- core router specializations -- //
 
 public: // -- stdlib router specializations -- //
 
-	template<typename T>
-	struct router<std::vector<T>>
+	template<typename T, typename Allocator>
+	struct router<std::vector<T, Allocator>>
 	{
-		static void route(const std::vector<T> &vec, router_fn func) { route_range(vec.begin(), vec.end(), func); }
+		static void route(const std::vector<T, Allocator> &vec, router_fn func) { route_range(vec.begin(), vec.end(), func); }
 	};
 
 public: // -- ptr allocation -- //
@@ -385,12 +385,8 @@ public: // -- ptr allocation -- //
 			// initialize ptr with handle
 			res.__init(obj, handle);
 
-			// for each outgoing arc from obj
-			handle->router(handle->obj, +[](info *const &arc)
-			{
-				// mark this arc as not being a root (because obj owns it by value)
-				GC::__unroot(arc);
-			});
+			// claim this object's children
+			handle->router(handle->obj, GC::__unroot);
 
 			// begin timed collect
 			__start_timed_collect();
