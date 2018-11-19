@@ -4,18 +4,30 @@
 #include <iostream>
 #include <utility>
 #include <mutex>
-#include <memory>
-#include <vector>
-#include <list>
-#include <type_traits>
-#include <unordered_set>
 #include <atomic>
+#include <new>
+#include <memory>
+#include <type_traits>
 #include <thread>
 #include <chrono>
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
-#include <new>
+
+#include <array>
+#include <vector>
+#include <deque>
+#include <forward_list>
+#include <list>
+
+#include <set>
+#include <map>
+
+#include <unordered_set>
+#include <unordered_map>
+
+#include <stack>
+#include <queue>
 
 // ------------------------ //
 
@@ -313,12 +325,112 @@ public: // -- core router specializations -- //
 		static void route(const T(&objs)[N], router_fn func) { for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func); }
 	};
 
-public: // -- stdlib router specializations -- //
+public: // -- stdlib misc router specializations -- //
+
+	template<typename T1, typename T2>
+	struct router<std::pair<T1, T2>>
+	{
+		static void route(const std::pair<T1, T2> &pair, router_fn func) { GC::route(pair.first, func); GC::route(pair.second, func); }
+	};
+
+public: // -- stdlib container router specializations -- //
+
+	// source https://en.cppreference.com/w/cpp/container
+
+	template<typename T, std::size_t N>
+	struct router<std::array<T, N>>
+	{
+		static void route(const std::array<T, N> &arr, router_fn func) { route_range(arr.begin(), arr.end(), func); }
+	};
 
 	template<typename T, typename Allocator>
 	struct router<std::vector<T, Allocator>>
 	{
 		static void route(const std::vector<T, Allocator> &vec, router_fn func) { route_range(vec.begin(), vec.end(), func); }
+	};
+
+	template<typename T, typename Allocator>
+	struct router<std::deque<T, Allocator>>
+	{
+		static void route(const std::deque<T, Allocator> &deque, router_fn func) { route_range(deque.begin(), deque.end(), func); }
+	};
+
+	template<typename T, typename Allocator>
+	struct router<std::forward_list<T, Allocator>>
+	{
+		static void route(const std::forward_list<T, Allocator> &list, router_fn func) { route_range(list.begin(), list.end(), func); }
+	};
+
+	template<typename T, typename Allocator>
+	struct router<std::list<T, Allocator>>
+	{
+		static void route(const std::list<T, Allocator> &list, router_fn func) { route_range(list.begin(), list.end(), func); }
+	};
+	
+	template<typename Key, typename Compare, typename Allocator>
+	struct router<std::set<Key, Compare, Allocator>>
+	{
+		static void route(const std::set<Key, Compare, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+	};
+
+	template<typename Key, typename Compare, typename Allocator>
+	struct router<std::multiset<Key, Compare, Allocator>>
+	{
+		static void route(const std::multiset<Key, Compare, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+	};
+
+	template<typename Key, typename T, typename Compare, typename Allocator>
+	struct router<std::map<Key, T, Compare, Allocator>>
+	{
+		static void route(const std::map<Key, T, Compare, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+	};
+
+	template<typename Key, typename T, typename Compare, typename Allocator>
+	struct router<std::multimap<Key, T, Compare, Allocator>>
+	{
+		static void route(const std::multimap<Key, T, Compare, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+	};
+
+	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
+	struct router<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
+	{
+		static void route(const std::unordered_set<Key, Hash, KeyEqual, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+	};
+
+	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
+	struct router<std::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
+	{
+		static void route(const std::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+	};
+
+	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
+	struct router<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
+	{
+		static void route(const std::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+	};
+
+	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
+	struct router<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
+	{
+		static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+	};
+
+	template<typename T, typename Container>
+	struct router<std::stack<T, Container>>
+	{
+		// intentionally blank - we can't iterate through a stack
+	};
+
+	template<typename T, typename Container>
+	struct router<std::queue<T, Container>>
+	{
+		// intentionally blank - we can't iterate through a queue
+	};
+
+	template<typename T, typename Container, typename Compare>
+	struct router<std::priority_queue<T, Container, Compare>>
+	{
+		// intentionally blank - we can't iterate through a priority queue
 	};
 
 public: // -- ptr allocation -- //
@@ -517,6 +629,12 @@ private: // -- functions you should never ever call ever. did i mention YOU SHOU
 // -- misc functions -- //
 
 // -------------------- //
+
+template<typename T>
+struct std::hash<GC::ptr<T>>
+{
+	std::size_t operator()(const GC::ptr<T> &p) const { return std::hash<T*>()(p.get()); }
+};
 
 // outputs the stored pointer to the stream - equivalent to ostr << ptr.get()
 template<typename T, typename U, typename V>

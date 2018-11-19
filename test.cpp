@@ -115,15 +115,21 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
-	GC::ptr<std::vector<GC::ptr<ListNode>>> merp = GC::make<std::vector<GC::ptr<ListNode>>>();
-	merp->push_back(GC::make<ListNode>());
+	GC::ptr<std::unordered_multimap<int, GC::ptr<ListNode>>> merp = GC::make<std::unordered_multimap<int, GC::ptr<ListNode>>>();
+	
+	merp->emplace(1, GC::make<ListNode>());
+	merp->emplace(2, GC::make<ListNode>());
+	merp->emplace(3, GC::make<ListNode>());
+	merp->emplace(4, GC::make<ListNode>());
+
+	/*merp->push_back(GC::make<ListNode>());
 	merp->push_back(GC::make<ListNode>());
 	merp->emplace_back(GC::make<ListNode>());
 	merp->emplace_back(GC::make<ListNode>());
 	merp->push_back(GC::make<ListNode>());
 	merp->push_back(GC::make<ListNode>());
 	merp->emplace_back(GC::make<ListNode>());
-	merp->emplace_back(GC::make<ListNode>());
+	merp->emplace_back(GC::make<ListNode>());*/
 	GC::collect();
 	std::cerr << "\n\n";
 
