@@ -13,6 +13,8 @@ struct ptr_set
 	GC::ptr<int> a, b, c, d, e, f, g, h;
 	const int val;
 
+	std::unique_ptr<int> thingy;
+
 	ptr_set() : val(0) {}
 };
 template<> struct GC::router<ptr_set>
@@ -29,6 +31,8 @@ template<> struct GC::router<ptr_set>
 		GC::route(set.h, func);
 
 		GC::route(set.val, func);
+
+		GC::route(set.thingy, func);
 	}
 };
 

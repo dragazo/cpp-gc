@@ -344,6 +344,12 @@ public: // -- stdlib misc router specializations -- //
 		static void route(const std::pair<T1, T2> &pair, router_fn func) { GC::route(pair.first, func); GC::route(pair.second, func); }
 	};
 
+	template<typename T, typename Deleter>
+	struct router<std::unique_ptr<T, Deleter>>
+	{
+		static void route(const std::unique_ptr<T, Deleter> &obj, router_fn func) { if (obj) GC::route(*obj, func); }
+	};
+
 public: // -- stdlib container router specializations -- //
 
 	// source https://en.cppreference.com/w/cpp/container

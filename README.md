@@ -88,6 +88,7 @@ The following section summarizes built-in specializations of `GC::router`:
 The following types have well-formed `GC::router` specializations pre-defined for your convenience. As mentioned in the above section, you should not route to one of these types and also to its contents, as this would result in routing to the same object twice, which is undefined bahavior.
 
 * `T[N]`
+* `std::unique_ptr<T, Deleter>`
 * `std::pair<T1, T2>`
 * `std::array<T, N>`
 * `std::vector<T, Allocator>`
