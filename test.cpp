@@ -15,6 +15,8 @@ struct ptr_set
 
 	std::unique_ptr<int> thingy;
 
+	std::tuple<int, int, int, long, long, int, GC::ptr<int>, int> tuple_thing;
+
 	ptr_set() : val(0) {}
 };
 template<> struct GC::router<ptr_set>
@@ -33,6 +35,8 @@ template<> struct GC::router<ptr_set>
 		GC::route(set.val, func);
 
 		GC::route(set.thingy, func);
+
+		GC::route(set.tuple_thing, func);
 	}
 };
 

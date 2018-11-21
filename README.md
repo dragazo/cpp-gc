@@ -90,6 +90,7 @@ The following types have well-formed `GC::router` specializations pre-defined fo
 * `T[N]`
 * `std::unique_ptr<T, Deleter>`
 * `std::pair<T1, T2>`
+* `std::tuple<Types...>`
 * `std::array<T, N>`
 * `std::vector<T, Allocator>`
 * `std::deque<T, Allocator>`

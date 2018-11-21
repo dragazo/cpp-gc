@@ -6,13 +6,15 @@
 #include <mutex>
 #include <atomic>
 #include <new>
-#include <memory>
 #include <type_traits>
 #include <thread>
 #include <chrono>
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
+
+#include <memory>
+#include <tuple>
 
 #include <array>
 #include <vector>
@@ -145,6 +147,26 @@ private: // -- extent extensions -- //
 
 	template<typename T, std::size_t N>
 	struct __full_extent<T[N]> : std::integral_constant<std::size_t, N * __full_extent<T>::value> {};
+
+private: // -- tuple routing -- //
+
+	// recursively routes to all elements of a tuple with ordinal indicies [0, Len)
+	template<std::size_t Len, typename ...Types>
+	struct __tuple_router
+	{
+		static void __route(const std::tuple<Types...> &tuple, router_fn func)
+		{
+			GC::route(std::get<Len - 1>(tuple), func);
+			__tuple_router<Len - 1, Types...>::__route(tuple, func);
+		}
+	};
+
+	// base case - does nothing
+	template<typename ...Types>
+	struct __tuple_router<0, Types...>
+	{
+		static void __route(const std::tuple<Types...> &tuple, router_fn func) {}
+	};
 
 public: // -- ptr -- //
 	
@@ -348,6 +370,12 @@ public: // -- stdlib misc router specializations -- //
 	struct router<std::unique_ptr<T, Deleter>>
 	{
 		static void route(const std::unique_ptr<T, Deleter> &obj, router_fn func) { if (obj) GC::route(*obj, func); }
+	};
+
+	template<typename ...Types>
+	struct router<std::tuple<Types...>>
+	{
+		static void route(const std::tuple<Types...> &tuple, router_fn func) { __tuple_router<sizeof...(Types), Types...>::__route(tuple, func); }
 	};
 
 public: // -- stdlib container router specializations -- //
