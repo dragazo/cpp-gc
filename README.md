@@ -1,6 +1,6 @@
 # cpp-gc
 
-One big complaint I've seen from C++ newbies is that the language doesn't have automatic garbage collection *(though I'd argue that's actually a feature)*. Of course, there's always [`std::unique_ptr`](https://en.cppreference.com/w/cpp/memory/unique_ptr) for *(arguably)* most cases. There's even [`std::shared_ptr`](https://en.cppreference.com/w/cpp/memory/shared_ptr) if you need shared-access to managed resources. However, even `std::shared_ptr` fails to handle referential cycles. You could always refactor your entire data structure to use [`std::weak_ptr`](https://en.cppreference.com/w/cpp/memory/weak_ptr), but at that point you're doing all the work manually anyway. I wonder if all this is leading up to a solution?
+One big complaint I've seen from C++ initiates is that the language doesn't have automatic garbage collection. Although on most days I'd argue that's actually a feature, let's face it: sometimes it's just inconvenient. I mean sure, there are standard C++ utilities to help out, but as soon as cycles are involved even the mighty `std::shared_ptr` ceases to function. You could always refactor your entire data structure to use `std::weak_ptr`, but for anything as or more complicated than a baked potato that means doing all the work manually anyway.
 
 `cpp-gc` is a **self-managed**, **thread-safe** garbage collection library written in **standard C++14**.
 
@@ -20,23 +20,91 @@ When you allocate an object via `GC::make<T>(Args...)` it creates a new garbage-
 
 ## GC Strategy ##
 
-`cpp-gc` has several "strategy" settings for automatically deciding when to perform a full garbage collect pass. This is controlled by a bitfield enum called `GC::strategy`. The default strategy is time-based garbage collection, which *(by default)* will call `GC::collect()` once per minute in a background thread.
+`cpp-gc` has several "strategy" options for automatically deciding when to perform a full garbage collect pass. This is controlled by a bitfield enum called `GC::strategies`.
 
-Here's a list of strategy helpers:
-* `GC::get_strategy()` / `GC::set_strategy()` - Gets or sets the current strategy. Mutiple strategy options can be bitwise-or'd together and all included options will be used.
-* `GC::get_sleep_time()` / `GC::set_sleep_time()` - Gets or sets the amount of time to wait after the completion of one timed collect and the start of the next. This is ignored if the timed collect strategy flag is not set.
+The available strategy options are:
+* `manual` - No automatic collection (except non-cyclic dependencies, which are always handled automatically and immediately).
+* `timed` - Collect from a background thread on a regular basis.
+* `allocfail` - Collect every time a call to `GC::make<T>(Args...)` fails to allocate space.
 
-Typically, if you want to use custom settings, you should set these options up as soon as possible on program start and not modify them again.
+`GC::strategy()` allows you to read/write the strategy to use.
+
+`GC::sleep_time()` allows you to change the sleep time duration for timed collection.
+
+The default strategy is `timed | allocfail`, with the time set to 60 seconds.
+
+Typically, if you want to use non-default settings, you should set them up as soon as possible on program start and not modify them again.
 
 ## Limitations and Requirements
 
-Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from a struct. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your struct and poking around for the right types. Because of this, if you have a struct that owns a `GC::ptr` instance, you need to specify that explicitly. So how do you do this?
+Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from an object. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your objects and poking around for the right types. Because of this, if you have a struct that owns a `GC::ptr` instance, you need to specify that explicitly. So how do you do this?
 
-When `cpp-gc` wants to poll your object for `GC::ptr` instances, it calls `GC::router<T>::route()`, passing the object in question and a function object. What you need to do is call `GC::route()` with every data element you own that either is or may itself own a `GC::ptr` instance. Think of this as your object's reachability: i.e. everything you route to is reachable, and anything you leave out is unreachable.
+`cpp-gc` declares a template struct called `router` with the following form:
 
-The default implementation of `GC::router<T>::route()` is sufficient for any type that does not own (directly or indirectly) a `GC::ptr` instance.
+```cpp
+template<typename T>
+struct router
+{
+    static void route(const T &obj, router_fn func) {}
+};
+```
 
-This will be demonstrated in our examples:
+This is the means by which `cpp-gc` polls your object for outgoing arcs. Here's a short example of how it works - consider the following type definition and its correct `cpp-gc` router specialization:
+
+```cpp
+struct MyType
+{
+    GC::ptr<int>    foo;
+    GC::ptr<double> bar;
+};
+template<> struct GC::router<MyType>
+{
+    // when we want to route to MyType
+    static void route(const MyType &obj, GC::router_fn func)
+    {
+        // also route to its children
+        GC::route(obj.foo, func);
+        GC::route(obj.bar, func);
+    }
+};
+```
+
+So here's what's happening: `cpp-gc` will send a message *(the router_fn object)* to your type. Your type will route that to all its children. Recursively, this will eventually reach leaf types, which have no children. Because object ownership cannot be cyclic, this will never degrade into an infinite loop.
+
+To be absolutely explicit: you "own" any object for which you alone control the lifetime. No one else is allowed to destroy said "owned" object while you still "own" it. Taking on new objects to own or releasing objects you already own (possibly to someone else) is still possible, but you're responsible for the correctness of such actions via your specialization of `router<T>::route()`.
+
+Thus, you would route to the contents of a `std::vector<T>` or to the pointed-to object of `std::unique_ptr<T>`, but not to the pointed-to object of `T*` unless you know that you own it (in the same way that `std::unique_ptr<T>` owns its pointed-to object). Although the same rules apply, you should probably never route to the pointed-to object of `std::shared_ptr<T>` or `GC::ptr<T>`, as these imply you're not the sole owner of the pointed-to object. You can still route to these objects (and must in the case of `GC::ptr<T>`), just not to what they point to.
+
+Additionally, it is undefined behavior to route to the same object twice. Because of this, you should not route to some object and also to something inside it - e.g. you can route to a `std::vector<T>` or to each of its elements, but you should never do both.
+
+The default implementation does nothing, which is ok if `T` does not own any `GC::ptr` instances directly or indirectly, but otherwise you need to specialize it for your type.
+
+This is extremely-important to get correct, as anything you don't route to is considered not to be a part of your object, which could result in premature deallocation of resources. So take extra care to make sure this is correct.
+
+The following section summarizes built-in specializations of `GC::router`:
+
+## Built-in Router Specializations
+
+The following types have well-formed `GC::router` specializations pre-defined for your convenience. As mentioned in the above section, you should not route to one of these types and also to its contents, as this would result in routing to the same object twice, which is undefined bahavior.
+
+* `T[N]`
+* `std::pair<T1, T2>`
+* `std::array<T, N>`
+* `std::vector<T, Allocator>`
+* `std::deque<T, Allocator>`
+* `std::forward_list<T, Allocator>`
+* `std::list<T, Allocator>`
+* `std::set<Key, Compare, Allocator>`
+* `std::multiset<Key, Compare, Allocator>`
+* `std::map<Key, T, Compare, Allocator>`
+* `std::multimap<Key, T, Compare, Allocator>`
+* `std::unordered_set<Key, Hash, KeyEqual, Allocator>`
+* `std::unordered_multiset<Key, Hash, KeyEqual, Allocator>`
+* `std::unordered_map<Key, T, Hash, KeyEqual, Allocator>`
+* `std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>`
+* `std::stack<T, Container>`
+* `std::queue<T, Container>`
+* `std::priority_queue<T, Container, Compare>`
 
 ## Examples
 
