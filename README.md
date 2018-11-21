@@ -6,6 +6,15 @@ One big complaint I've seen from C++ initiates is that the language doesn't have
 
 With `cpp-gc` in place, all you'd need to do to fix the above example is change all your `std::shared_ptr<T>` to `GC::ptr<T>`. The rest of the logic will take care of itself automatically *(with one exception - see below)*.
 
+Contents:
+
+* [How It Works](#how-it-works)
+* [GC Strategy](#gc-strategy)
+* [Router Functions](#router-functions)
+* [Built-in Router Functions](#built-in-router-functions)
+* [Examples](#examples)
+* [Best Practices](#best-practices)
+
 ## How it Works
 
 `cpp-gc` is designed to be **streamlined and minimalistic**. Very few things are visible to the user. The most important things to know are:
@@ -35,9 +44,15 @@ The default strategy is `timed | allocfail`, with the time set to 60 seconds.
 
 Typically, if you want to use non-default settings, you should set them up as soon as possible on program start and not modify them again.
 
-## Limitations and Requirements
+## Router Functions
 
-Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from an object. Because this is a *library* and not a compiler extension, I don't have the luxury of peeking inside your objects and poking around for the right types. Because of this, if you have a struct that owns a `GC::ptr` instance, you need to specify that explicitly. So how do you do this?
+**This section is extremely-important. If you plan to use `cpp-gc` in any capacity, read this section in its entirety.**
+
+Other languages that implement garbage collection have it built right into the language and the compiler handles all the nasty bits for you. For instance, one piece of information a garbage collector needs to know is the set of all outgoing garbage-collected pointers from an object.
+
+However, something like this is impossible in C++; after all, C++ allows you to do very low-level things like create a buffer as `char buffer[sizeof(T)]` and then refer to an object that you conditionally may or may not have constructed at any point in runtime via `reinterpret_cast<T*>(buffer)`. Garbage collected languages like Java and C# would curl up into a little ball at the sight of this.
+
+And so, if you want to create a proper garbage-collected type for use in `cpp-gc` you must do a tiny bit of extra work to specify such things explicitly. So how do you do this?
 
 `cpp-gc` declares a template struct called `router` with the following form:
 
@@ -56,13 +71,18 @@ struct MyType
 {
     GC::ptr<int>    foo;
     GC::ptr<double> bar;
+    
+    int    some_data;
+    double some_other_data;
+    
+    std::vector<bool> flags;
 };
 template<> struct GC::router<MyType>
 {
     // when we want to route to MyType
     static void route(const MyType &obj, GC::router_fn func)
     {
-        // also route to its children
+        // also route to its children (only ones that may own GC::ptr objects are required)
         GC::route(obj.foo, func);
         GC::route(obj.bar, func);
     }
@@ -71,19 +91,23 @@ template<> struct GC::router<MyType>
 
 So here's what's happening: `cpp-gc` will send a message *(the router_fn object)* to your type. Your type will route that to all its children. Recursively, this will eventually reach leaf types, which have no children. Because object ownership cannot be cyclic, this will never degrade into an infinite loop.
 
-To be absolutely explicit: you "own" any object for which you alone control the lifetime. No one else is allowed to destroy said "owned" object while you still "own" it. Taking on new objects to own or releasing objects you already own (possibly to someone else) is still possible, but you're responsible for the correctness of such actions via your specialization of `router<T>::route()`.
+Additionally, you only need to route to children that may own (directly or indirectly) `GC::ptr` objects. Routing to anything else is a glorified no-op that may be slow if your optimizer isn't smart enough to elide it. However, because optimizers are generally pretty clever, you may wish to route to some objects just for future-proofing. Feel free.
 
-Thus, you would route to the contents of a `std::vector<T>` or to the pointed-to object of `std::unique_ptr<T>`, but not to the pointed-to object of `T*` unless you know that you own it (in the same way that `std::unique_ptr<T>` owns its pointed-to object). Although the same rules apply, you should probably never route to the pointed-to object of `std::shared_ptr<T>` or `GC::ptr<T>`, as these imply you're not the sole owner of the pointed-to object. You can still route to these objects (and must in the case of `GC::ptr<T>`), just not to what they point to.
+To be absolutely explicit: you "own" any object for which you **alone** control the lifetime. Such an "owned" object can only have one owner at a time. Thus, you would never route to a shared resource, even if you happen to be the only owner at the moment of invocation.
+
+Thus, you would route to the contents of a `std::vector<T>` or to the pointed-to object of `std::unique_ptr<T>`, but not to the pointed-to object of `T*` unless you know that you own it in the same way that `std::unique_ptr<T>` owns its pointed-to object. Although the same rules apply, you should probably never route to the pointed-to object of `std::shared_ptr<T>` or `GC::ptr<T>`, as these imply it's a shared resource. You can still route to these objects (and must in the case of `GC::ptr<T>`), just not to what they point to.
+
+If it is possible to re-point or add/remove something you would route to, such an operation must be atomic with respect to your router specialization. So, if you have a `std::vector<GC::ptr<int>>`, you would need to ensure adding/removing to/from this container and your router function iterating through it are mutually exclusive (i.e. mutex). This would also apply for re-pointing e.g. a `std::unique_ptr<GC::ptr<int>>`. However, re-pointing a `GC::ptr` is already atomic with respect to all router functions, so there's no need to do anything in this last case.
 
 Additionally, it is undefined behavior to route to the same object twice. Because of this, you should not route to some object and also to something inside it - e.g. you can route to a `std::vector<T>` or to each of its elements, but you should never do both.
 
-The default implementation does nothing, which is ok if `T` does not own any `GC::ptr` instances directly or indirectly, but otherwise you need to specialize it for your type.
+The default implementation for `router<T>::route()` does nothing, which is ok if `T` does not own any `GC::ptr` instances directly or indirectly, but otherwise you need to specialize it for your type.
 
 This is extremely-important to get correct, as anything you don't route to is considered not to be a part of your object, which could result in premature deallocation of resources. So take extra care to make sure this is correct.
 
 The following section summarizes built-in specializations of `GC::router`:
 
-## Built-in Router Specializations
+## Built-in Router Functions
 
 The following types have well-formed `GC::router` specializations pre-defined for your convenience. As mentioned in the above section, you should not route to one of these types and also to its contents, as this would result in routing to the same object twice, which is undefined bahavior.
 
