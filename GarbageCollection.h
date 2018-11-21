@@ -152,6 +152,11 @@ public: // -- ptr -- //
 	template<typename T>
 	struct ptr
 	{
+	public: // -- types -- //
+
+		// type of element stored
+		typedef std::remove_extent_t<T> element_type;
+
 	private: // -- data -- //
 
 		T *obj; // pointer to the object (not the same as handle->obj because of type conversions)
@@ -267,8 +272,20 @@ public: // -- ptr -- //
 
 	public: // -- obj access -- //
 
-		T &operator*() const { return *obj; }
-		T *operator->() const { return obj; }
+		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
+		element_type *get() const { return reinterpret_cast<element_type*>(obj); }
+
+		// accesses an item in an array. only defined if T is an array type.
+		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && std::is_array<J>::value, int> = 0>
+		element_type &operator[](std::ptrdiff_t index) const { return get()[index]; }
+
+		element_type &operator*() const { return *get(); }
+		element_type *operator->() const { return get(); }
+
+		// returns true iff this ptr points to a managed object (non-null)
+		explicit operator bool() const { return get() != nullptr; }
+
+	public: // -- misc -- //
 
 		// returns the number of references to the current object.
 		// if this object is not pointing at any object, returns 0.
@@ -277,12 +294,6 @@ public: // -- ptr -- //
 			std::lock_guard<std::mutex> lock(GC::mutex);
 			return handle ? handle->ref_count : 0;
 		}
-
-		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
-		T *get() const { return obj; }
-
-		// returns true iff this ptr points to a managed object (non-null)
-		explicit operator bool() const { return get() != nullptr; }
 
 	public: // -- comparison -- //
 

@@ -122,6 +122,14 @@ int main()
 	merp->emplace(3, GC::make<ListNode>());
 	merp->emplace(4, GC::make<ListNode>());
 
+	GC::ptr<int> not_arr = GC::make<int>();
+	GC::ptr<int[16][16][16][16]> yes_arr = GC::make<int[16][16][16][16]>();
+
+	//not_arr[0] = 9;
+	(**yes_arr)[1][5] = 7;
+	yes_arr[2][6][1][5] = 7;
+	****yes_arr = 7;
+
 	/*merp->push_back(GC::make<ListNode>());
 	merp->push_back(GC::make<ListNode>());
 	merp->emplace_back(GC::make<ListNode>());
@@ -140,12 +148,12 @@ int main()
 		for (int i = 0; i < 2; ++i)
 			for (int j = 0; j < 2; ++j)
 				for (int k = 0; k < 2; ++k)
-					(*arr_ptr)[i][j][k] = GC::make<int>((i + j)*j + i*j*k + k*i + k + 1);
+					arr_ptr[i][j][k] = GC::make<int>((i + j)*j + i*j*k + k*i + k + 1);
 
 		for (int i = 0; i < 2; ++i)
 			for (int j = 0; j < 2; ++j)
 				for (int k = 0; k < 2; ++k)
-					std::cerr << "elem (" << i << ", " << j << ", " << k << ") = " << *(*arr_ptr)[i][j][k] << '\n';
+					std::cerr << "elem (" << i << ", " << j << ", " << k << ") = " << *arr_ptr[i][j][k] << '\n';
 
 		GC::collect();
 		std::cerr << "\n\n";
