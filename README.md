@@ -88,28 +88,28 @@ The following section summarizes built-in specializations of `GC::router`:
 The following types have well-formed `GC::router` specializations pre-defined for your convenience. As mentioned in the above section, you should not route to one of these types and also to its contents, as this would result in routing to the same object twice, which is undefined bahavior.
 
 * `T[N]`
-* `std::unique_ptr<T, Deleter>`
-* `std::pair<T1, T2>`
-* `std::tuple<Types...>`
 * `std::array<T, N>`
-* `std::vector<T, Allocator>`
 * `std::deque<T, Allocator>`
 * `std::forward_list<T, Allocator>`
 * `std::list<T, Allocator>`
-* `std::set<Key, Compare, Allocator>`
-* `std::multiset<Key, Compare, Allocator>`
 * `std::map<Key, T, Compare, Allocator>`
 * `std::multimap<Key, T, Compare, Allocator>`
-* `std::unordered_set<Key, Hash, KeyEqual, Allocator>`
-* `std::unordered_multiset<Key, Hash, KeyEqual, Allocator>`
+* `std::multiset<Key, Compare, Allocator>`
+* `std::pair<T1, T2>`
+* `std::set<Key, Compare, Allocator>`
+* `std::tuple<Types...>`
+* `std::unique_ptr<T, Deleter>`
 * `std::unordered_map<Key, T, Hash, KeyEqual, Allocator>`
 * `std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>`
+* `std::unordered_multiset<Key, Hash, KeyEqual, Allocator>`
+* `std::unordered_set<Key, Hash, KeyEqual, Allocator>`
+* `std::vector<T, Allocator>`
 
 The following types have ill-formed `GC::router` specializations pre-defined for safety. This is typically because there is no way to route to said type's contents. It is a compile error to use any of these, which should help limit confusion.
 
-* `std::stack<T, Container>`
-* `std::queue<T, Container>`
 * `std::priority_queue<T, Container, Compare>`
+* `std::queue<T, Container>`
+* `std::stack<T, Container>`
 
 ## Examples
 
