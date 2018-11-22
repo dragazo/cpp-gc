@@ -133,9 +133,137 @@ struct derived : base1, base2
 
 };
 
+
+
+
+struct TreeNode
+{
+    // left and right sub-trees
+    GC::ptr<TreeNode> left;
+    GC::ptr<TreeNode> right;
+    
+    double value;
+    
+    enum op_t { val, add, sub, mul, div } op;
+};
+template<> struct GC::router<TreeNode>
+{
+    static void route(const TreeNode &node, GC::router_fn func)
+    {
+        // route to our GC::ptr instances
+        GC::route(node.left, func);
+        GC::route(node.right, func);
+        // no need to route to anything else
+    }
+};
+
+
+class SymbolTable
+{
+private:
+    std::unordered_map<std::string, GC::ptr<TreeNode>> symbols;
+    
+    // we need to route to the contents of symbols, but symbols is a mutable collection.
+    // we therefore need insert/delete to be synchronous with respect to the router:
+    mutable std::mutex symbols_mutex;
+    
+    // make the particular router class a friend so it can use our private data
+    friend class GC::router<SymbolTable>;
+    
+public:
+    void update(std::string name, GC::ptr<TreeNode> new_value)
+    {
+        // modification of the mutable collection of GC::ptr and router must be mutually exclusive
+        std::lock_guard<std::mutex> lock(symbols_mutex);
+        
+        symbols[name] = new_value;
+    }
+};
+template<> struct GC::router<SymbolTable>
+{
+    static void route(const SymbolTable &table, GC::router_fn func)
+    {
+        // modification of the mutable collection of GC::ptr and router must be mutually exclusive
+        std::lock_guard<std::mutex> lock(table.symbols_mutex);
+
+        GC::route(table.symbols, func);
+    }
+};
+
+
+
+
+class MaybeTreeNode
+{
+private:
+    // the buffer for the object
+    alignas(TreeNode) char buf[sizeof(TreeNode)];
+    bool contains_tree_node = false;
+    
+    // because we'll be constructing destucting it on the fly,
+    // buf is a mutable container of a type we need to route to.
+    // thus we need to synchronize "re-pointing" it and the router function.
+    mutable std::mutex buf_mutex;
+    
+    // friend the particular router class so it can access our private data
+    friend class GC::router<MaybeTreeNode>;
+    
+public:
+    void construct()
+    {
+        if (contains_tree_node) throw std::runtime_error("baka");
+        
+        // we need to synchronize with the router
+        std::lock_guard<std::mutex> lock(buf_mutex);
+        
+        // construct the object
+        new (buf) TreeNode;
+        contains_tree_node = true;
+    }
+    void destruct()
+    {
+        if (!contains_tree_node) throw std::runtime_error("baka");
+        
+        // we need to synchronize with the router
+        std::lock_guard<std::mutex> lock(buf_mutex);
+        
+        // destroy the object
+        reinterpret_cast<TreeNode*>(buf)->~TreeNode();
+        contains_tree_node = false;
+    }
+};
+template<> struct GC::router<MaybeTreeNode>
+{
+    static void route(const MaybeTreeNode &maybe, GC::router_fn func)
+    {
+        // this must be synchronized with constructing/destucting the buffer object.
+        std::lock_guard<std::mutex> lock(maybe.buf_mutex);
+        
+        // because TreeNode contains GC::ptr objects, we need to route to it,
+        // but only if the MaybeTreeNode actually has it constructed in the buffer.
+        if (maybe.contains_tree_node) GC::route(*reinterpret_cast<const TreeNode*>(maybe.buf), func);
+    }
+};
+
+
+
+
+
 int main()
 {
 	GC::strategy(GC::strategies::manual);
+
+    {
+        auto i1 = GC::make<TreeNode>();
+        auto i3 = GC::make<SymbolTable>();    
+        auto i2 = GC::make<MaybeTreeNode>();
+        
+        i1->left = i1;
+
+        GC::collect();
+    }
+    GC::collect();
+    std::cerr << "\n\n";
 
 	GC::ptr<std::unordered_multimap<int, GC::ptr<ListNode>>> merp = GC::make<std::unordered_multimap<int, GC::ptr<ListNode>>>();
 	
