@@ -341,6 +341,29 @@ public: // -- ptr -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
+public: // -- dynamic cast -- //
+
+	template<typename To, typename From, std::enable_if_t<!std::is_same<To, void>::value && std::is_polymorphic<From>::value, int> = 0>
+	static ptr<To> dynamicCast(const GC::ptr<From> &p)
+	{
+		// perform the dynamic cast
+		To *obj = dynamic_cast<To*>(p.obj);
+
+		// if it's non-null, return a ptr to it
+		if (obj)
+		{
+			ptr<To> res(no_rooting_t{});
+			
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
+			res.__init(obj, p.handle);
+
+			return res;
+		}
+		// otherwise return null ptr
+		else return {};
+	}
+
 public: // -- core router specializations -- //
 
 	// specialization of router for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>).

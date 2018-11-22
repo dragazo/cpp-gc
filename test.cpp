@@ -3,6 +3,7 @@
 #include <thread>
 #include <chrono>
 #include <cstddef>
+#include <cassert>
 
 #include "GarbageCollection.h"
 
@@ -106,13 +107,26 @@ struct GC::router<wrap<T>>
 	}
 };
 
+struct virtual_type
+{
+	virtual ~virtual_type() {}
+};
+struct non_virtual_type
+{
+
+};
+
 struct base1
 {
 	int a;
+
+	virtual ~base1() {}
 };
 struct base2
 {
 	int b;
+
+	virtual ~base2() {}
 };
 struct derived : base1, base2
 {
@@ -192,6 +206,22 @@ int main()
 	GC::ptr<derived> dp = GC::make<derived>();
 	GC::ptr<base1> bp1 = GC::make<base1>();
 	GC::ptr<base2> bp2 = GC::make<base2>();
+
+	//GC::dynamicCast<void>(bp1);
+	//GC::dynamicCast<int>(bp1);
+	
+	//GC::dynamicCast<const int>(const_2);
+	
+	auto dyn_cast1 = GC::dynamicCast<virtual_type>(bp1);
+	auto dyn_cast2 = GC::dynamicCast<non_virtual_type>(bp1);
+
+	assert(dyn_cast1 == nullptr);
+	assert(dyn_cast1 == nullptr);
+
+	std::cerr << "\ndynamicCast():\nthese should be null: " << dyn_cast1 << ' ' << dyn_cast2 << "\n";
+	
+	GC::ptr<derived> back_to_derived_1 = GC::dynamicCast<derived>(bp1);
+	GC::ptr<derived> back_to_derived_2 = GC::dynamicCast<derived>(bp2);
 
 	dp->a = 123;
 	dp->b = 456;

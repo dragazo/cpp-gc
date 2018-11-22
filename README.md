@@ -27,7 +27,7 @@ When you allocate an object via `GC::make<T>(Args...)` it creates a new garbage-
 
 `GC::collect()` triggers a full garbage collection pass, which accounts for cycles using the typical mark-and-sweep algorithm. This is rather slow compared to the other method `cpp-gc` uses to manage non-cyclic references, but is required if you do in fact have cycles. So when should you call it? Probably never. I'll explain:
 
-## GC Strategy ##
+## GC Strategy
 
 `cpp-gc` has several "strategy" options for automatically deciding when to perform a full garbage collect pass. This is controlled by a bitfield enum called `GC::strategies`.
 
@@ -89,7 +89,7 @@ template<> struct GC::router<MyType>
 };
 ```
 
-So here's what's happening: `cpp-gc` will send a message *(the router_fn object)* to your type. Your type will route that to all its children. Recursively, this will eventually reach leaf types, which have no children. Because object ownership cannot be cyclic, this will never degrade into an infinite loop.
+So here's what's happening: `cpp-gc` will send a message *(the router_fn object)* to your type. Your type will route that to all its children. Recursively, this will eventually reach leaf types, which have no children via `GC::route()` or `GC::route_range()`. Because object ownership cannot be cyclic, this will never degrade into an infinite loop.
 
 Additionally, you only need to route to children that may own (directly or indirectly) `GC::ptr` objects. Routing to anything else is a glorified no-op that may be slow if your optimizer isn't smart enough to elide it. However, because optimizers are generally pretty clever, you may wish to route to some objects just for future-proofing. Feel free.
 
