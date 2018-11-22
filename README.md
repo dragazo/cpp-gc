@@ -12,7 +12,8 @@ Contents:
 * [GC Strategy](#gc-strategy)
 * [Router Functions](#router-functions)
 * [Built-in Router Functions](#built-in-router-functions)
-* [Examples](#examples)
+* [Example Structs and Router Functions](#example-structs-and-router-functions)
+* [Usage Examples](#usage-examples)
 * [Best Practices](#best-practices)
 
 ## How it Works
@@ -97,7 +98,7 @@ To be absolutely explicit: you "own" any object for which you **alone** control 
 
 Thus, you would route to the contents of a `std::vector<T>` or to the pointed-to object of `std::unique_ptr<T>`, but not to the pointed-to object of `T*` unless you know that you own it in the same way that `std::unique_ptr<T>` owns its pointed-to object. Although the same rules apply, you should probably never route to the pointed-to object of `std::shared_ptr<T>` or `GC::ptr<T>`, as these imply it's a shared resource. You can still route to these objects (and must in the case of `GC::ptr<T>`), just not to what they point to.
 
-If it is possible to re-point or add/remove something you would route to, such an operation must be atomic with respect to your router specialization. So, if you have a `std::vector<GC::ptr<int>>`, you would need to ensure adding/removing to/from this container and your router function iterating through it are mutually exclusive (i.e. mutex). This would also apply for re-pointing e.g. a `std::unique_ptr<GC::ptr<int>>`. However, re-pointing a `GC::ptr` is already atomic with respect to all router functions, so there's no need to do anything in this last case.
+If it is possible to re-point or add/remove something you would route to, such an operation must be atomic with respect to your router specialization. So, if you have a `std::vector<GC::ptr<int>>`, you would need to ensure adding/removing to/from this container and your router function iterating through it are mutually exclusive (i.e. mutex). This would also apply for re-pointing e.g. a `std::unique_ptr<GC::ptr<int>>`.
 
 Additionally, it is undefined behavior to route to the same object twice. Because of this, you should not route to some object and also to something inside it - e.g. you can route to a `std::vector<T>` or to each of its elements, but you should never do both.
 
@@ -135,7 +136,128 @@ The following types have ill-formed `GC::router` specializations pre-defined for
 * `std::queue<T, Container>`
 * `std::stack<T, Container>`
 
-## Examples
+## Example Structs and Router Functions
+
+This section will consist of several examples of possible structs/classes you might write and their accompanying router specializations, including all necessary safety features in the best practices section. Only the relevant pieces of code are included. Everything else is assumed to be exactly the same as normal C++ class writing with no tricks involved.
+
+This example demonstrates the most common use case: having `GC::ptr` objects by value in the object.
+
+```cpp
+struct TreeNode
+{
+    // left and right sub-trees
+    GC::ptr<TreeNode> left;
+    GC::ptr<TreeNode> right;
+    
+    double value;
+    
+    enum op_t { val, add, sub, mul, div } op;
+};
+template<> struct GC::router<TreeNode>
+{
+    static void route(const TreeNode &node, GC::router_fn func)
+    {
+        // route to our GC::ptr instances
+        GC::route(node.left, func);
+        GC::route(node.right, func);
+        // no need to route to anything else
+    }
+};
+```
+
+Now we'll use the tree type we just created to make a garbage-collected symbol table. This demonstrates the (less-frequent) use case of having a mutable container of `GC::ptr` objects. This requires special considerations in terms of thread safety, as mentioned in the above section on router functions.
+
+```cpp
+class SymbolTable
+{
+private:
+    std::unordered_map<std::string, GC::ptr<TreeNode>> symbols;
+    
+    // we need to route to the contents of symbols, but symbols is a mutable collection.
+    // we therefore need insert/delete to be synchronous with respect to the router:
+    mutable std::mutex symbols_mutex;
+    
+    // make the particular router class a friend so it can use our private data
+    friend class GC::router<SymbolTable>;
+    
+public:
+    void update(std::string name, GC::ptr<TreeNode> new_value)
+    {
+        // modification of the mutable collection of GC::ptr and router must be mutually exclusive
+        std::lock_guard<std::mutex> lock(symbols_mutex);
+        
+        symbols[name] = new_value;
+    }
+};
+template<> struct GC::router<SymbolTable>
+{
+    static void route(const SymbolTable &table, GC::router_fn func)
+    {
+        // modification of the mutable collection of GC::ptr and router must be mutually exclusive
+        std::lock_guard<std::mutex> lock(table.symbols_mutex);
+
+        GC::route(table.symbols, func);
+    }
+};
+```
+
+The next example demonstrates a rather uncommon use case: having a memory buffer that may at any time either contain nothing or a constructed object of a type we need to route to. This requires a bit more effort on your part. This is uncommon because said buffer could just be replaced with a `GC::ptr` object to avoid the headache, with null being the no-object state. Never-the-less, it is shown here as an example in case you need such behavior.
+
+```cpp
+class MaybeTreeNode
+{
+private:
+    // the buffer for the object
+    alignas(TreeNode) char buf[sizeof(TreeNode)];
+    bool contains_tree_node = false;
+    
+    // because we'll be constructing destucting it on the fly,
+    // buf is a mutable container of a type we need to route to.
+    // thus we need to synchronize "re-pointing" it and the router function.
+    mutable std::mutex buf_mutex;
+    
+    // friend the particular router class so it can access our private data
+    friend class GC::router<MaybeTreeNode>;
+    
+public:
+    void construct()
+    {
+        if (contains_tree_node) throw std::runtime_error("baka");
+        
+        // we need to synchronize with the router
+        std::lock_guard<std::mutex> lock(buf_mutex);
+        
+        // construct the object
+        new (buf) TreeNode;
+        contains_tree_node = true;
+    }
+    void destruct()
+    {
+        if (!contains_tree_node) throw std::runtime_error("baka");
+        
+        // we need to synchronize with the router
+        std::lock_guard<std::mutex> lock(buf_mutex);
+        
+        // destroy the object
+        reinterpret_cast<TreeNode*>(buf)->~TreeNode();
+        contains_tree_node = false;
+    }
+};
+template<> struct GC::router<MaybeTreeNode>
+{
+    static void route(const MaybeTreeNode &maybe, GC::router_fn func)
+    {
+        // this must be synchronized with constructing/destucting the buffer object.
+        std::lock_guard<std::mutex> lock(maybe.buf_mutex);
+        
+        // because TreeNode contains GC::ptr objects, we need to route to it,
+        // but only if the MaybeTreeNode actually has it constructed in the buffer.
+        if (maybe.contains_tree_node) GC::route(*reinterpret_cast<const TreeNode*>(maybe.buf), func);
+    }
+};
+```
+
+## Usage Examples
 
 For our example, we'll make a doubly-linked list that supports garbage collection. We'll begin by defining our node type `ListNode`.
 
@@ -209,11 +331,14 @@ As soon as `GC::collect()` is executed, all the cycles will be dealt with and yo
 
 ## Best Practices
 
-Here we'll go through a couple of tips for getting the maximum performance out of `cpp-gc`:
+Here we'll go through a couple of tips for getting the maximum performance out of `cpp-gc` while minimizing the chance for error:
 
-1. Don't call `GC::collect()` explicitly. If you start calling `GC::collect()` explicitly, there's a pretty good chance you could be calling it in rapid succession. This will do little more than cripple your performance. The only time you should ever call it explicitly is if you for some reason **need** the objects to be destroyed immediately *(which is unlikely)*.
+1. **Performance** - Don't call `GC::collect()` explicitly. If you start calling `GC::collect()` explicitly, there's a pretty good chance you could be calling it in rapid succession. This will do little more than cripple your performance. The only time you should ever call it explicitly is if you for some reason **need** the objects to be destroyed immediately *(which is unlikely)*.
 
-1. When possible, use raw pointers. Let's say you have a `GC::ptr<std::vector<int>>` that you need to pass to a function. Does the function really need to **own** the value or does it just need access to it? In the vast majority of cases, you'll find you only need access to the object. In these cases, you're much better off performance-wise to have the function take a raw pointer instead. This also has the effect of being less restrictive (i.e. you don't need to pass the object as a specific type of smart pointer). *(this same rule applies to other smart pointers like std::shared_ptr as well)*.
+1. **Performance** - When possible, use raw pointers. Let's say you have a `GC::ptr<std::vector<int>>` that you need to pass to a function. Does the function really need to **own** the value or does it just need access to it? In the vast majority of cases, you'll find you only need access to the object. In these cases, you're much better off performance-wise to have the function take a raw pointer instead. This also has the effect of being less restrictive (i.e. you don't need to pass the object as a specific type of smart pointer). *(this same rule applies to other smart pointers like `std::shared_ptr` as well)*.
 
-1. If you find you only use a `GC::ptr` instance to point to another object for normal pointer logic (and if you know that reference isn't isn't the only reference to said object) you should use `GC::ptr<T>*` or `GC::ptr<T>&` instead. This still lets you refer to the `GC::ptr<T>` object (and what it points to) but doesn't require unnecessary increments/decrements on each and every assignment to/from it. This is demonstrated in the example above, where the end-of-list pointer was a raw pointer to gc pointer.
+1. **Performance** - If you find you only use a `GC::ptr` instance to point to another object for normal pointer logic (and if you know that reference isn't isn't the only reference to said object) you should use `GC::ptr<T>*` or `GC::ptr<T>&` instead. This still lets you refer to the `GC::ptr<T>` object (and what it points to) but doesn't require unnecessary increments/decrements on each and every assignment to/from it. This is demonstrated in the example above, where the end-of-list pointer was a raw pointer to a gc pointer.
 
+1. **Safety** - As mentioned in the section on router functions, if your type owns an object that you would route to but that can be re-pointed or modified in some way (e.g. `std::vector<GC::ptr<int>>`, `std::unique_ptr<GC::ptr<int>>` etc.), re-pointing or adding/removing etc. must be atomic with respect to the router function routing to its contents. Because of this, you'll generally need to use a mutex to synchronize access to the object's contents. To make sure no one else messes up this safety, such an object should be made private and given atomic accessors if necessary.
+
+1. **Safety** - Continuing off the last point, do not create a lone (i.e. not in a struct/class) `GC::ptr<T>` where `T` is a mutable container of `GC::ptr`. Modifying a lone instance of it could be rather dangerous due to not having a built-in mutex and encupsulation with atomic accessors.
