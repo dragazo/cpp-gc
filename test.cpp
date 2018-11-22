@@ -168,7 +168,7 @@ private:
     mutable std::mutex symbols_mutex;
     
     // make the particular router class a friend so it can use our private data
-    friend class GC::router<SymbolTable>;
+    friend struct GC::router<SymbolTable>;
     
 public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
@@ -206,7 +206,7 @@ private:
     mutable std::mutex buf_mutex;
     
     // friend the particular router class so it can access our private data
-    friend class GC::router<MaybeTreeNode>;
+    friend struct GC::router<MaybeTreeNode>;
     
 public:
     void construct()
@@ -255,12 +255,28 @@ int main()
 
     {
         auto i1 = GC::make<TreeNode>();
-        auto i3 = GC::make<SymbolTable>();    
-        auto i2 = GC::make<MaybeTreeNode>();
+        auto i2 = GC::make<SymbolTable>();    
+        auto i3 = GC::make<MaybeTreeNode>();
         
+		assert(i1 && i2 && i3);
+
         i1->left = i1;
 
         GC::collect();
+
+		GC::ptr<const TreeNode> ci1 = i1;
+		GC::ptr<const SymbolTable> ci2 = i2;
+		GC::ptr<const MaybeTreeNode> ci3 = i3;
+
+		GC::ptr<const TreeNode> _ci1 = GC::constCast<const TreeNode>(i1);
+		GC::ptr<const SymbolTable> _ci2 = GC::constCast<const SymbolTable>(i2);
+		GC::ptr<const MaybeTreeNode> _ci3 = GC::constCast<const MaybeTreeNode>(i3);
+
+		GC::ptr<TreeNode> nci1 = GC::constCast<TreeNode>(ci1);
+		GC::ptr<SymbolTable> nci2 = GC::constCast<SymbolTable>(ci2);
+		GC::ptr<MaybeTreeNode> nci3 = GC::constCast<MaybeTreeNode>(ci3);
+
+		//auto i1_ = GC::staticCast<int>(i1);
     }
     GC::collect();
     std::cerr << "\n\n";
@@ -335,6 +351,20 @@ int main()
 	GC::ptr<base1> bp1 = GC::make<base1>();
 	GC::ptr<base2> bp2 = GC::make<base2>();
 
+	assert(dp && bp1 && bp2);
+
+	auto interp_1 = GC::reinterpretCast<non_virtual_type>(dp);
+	auto interp_2 = GC::reinterpretCast<base1>(dp);
+	auto interp_3 = GC::reinterpretCast<derived>(dp);
+	auto interp_4 = GC::reinterpretCast<int>(dp);
+	auto interp_5 = GC::reinterpretCast<sse_t>(dp);
+
+	assert(interp_1.get() == (void*)dp.get());
+	assert(interp_2.get() == (void*)dp.get());
+	assert(interp_3.get() == (void*)dp.get());
+	assert(interp_4.get() == (void*)dp.get());
+	assert(interp_5.get() == (void*)dp.get());
+
 	//GC::dynamicCast<void>(bp1);
 	//GC::dynamicCast<int>(bp1);
 	
@@ -347,9 +377,6 @@ int main()
 	assert(dyn_cast1 == nullptr);
 
 	std::cerr << "\ndynamicCast():\nthese should be null: " << dyn_cast1 << ' ' << dyn_cast2 << "\n";
-	
-	GC::ptr<derived> back_to_derived_1 = GC::dynamicCast<derived>(bp1);
-	GC::ptr<derived> back_to_derived_2 = GC::dynamicCast<derived>(bp2);
 
 	dp->a = 123;
 	dp->b = 456;
@@ -358,6 +385,20 @@ int main()
 
 	GC::ptr<base1> dp_as_b1 = dp;
 	GC::ptr<base2> dp_as_b2 = dp;
+
+	GC::ptr<base1> _dp_as_b1 = GC::staticCast<base1>(dp);
+	GC::ptr<base2> _dp_as_b2 = GC::staticCast<base2>(dp);
+	
+	assert(dp_as_b1 == _dp_as_b1);
+	assert(dp_as_b2 == _dp_as_b2);
+
+	assert(dynamic_cast<derived*>(dp_as_b1.get()) == dp.get());
+
+	GC::ptr<derived> back_to_derived_1 = GC::dynamicCast<derived>(dp_as_b1);
+	GC::ptr<derived> back_to_derived_2 = GC::dynamicCast<derived>(dp_as_b2);
+
+	assert(back_to_derived_1 == back_to_derived_2);
+	assert(back_to_derived_1 == dp);
 
 	std::cerr << "a: " << dp_as_b1->a << '\n';
 	std::cerr << "b: " << dp_as_b2->b << '\n';

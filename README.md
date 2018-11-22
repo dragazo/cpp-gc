@@ -178,7 +178,7 @@ private:
     mutable std::mutex symbols_mutex;
     
     // make the particular router class a friend so it can use our private data
-    friend class GC::router<SymbolTable>;
+    friend struct GC::router<SymbolTable>;
     
 public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
@@ -217,7 +217,7 @@ private:
     mutable std::mutex buf_mutex;
     
     // friend the particular router class so it can access our private data
-    friend class GC::router<MaybeTreeNode>;
+    friend struct GC::router<MaybeTreeNode>;
     
 public:
     void construct()

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <cassert>
 
 #include <memory>
 #include <tuple>
@@ -169,7 +170,7 @@ private: // -- tuple routing -- //
 	};
 
 public: // -- ptr -- //
-	
+
 	// a self-managed garbage-collected pointer
 	template<typename T>
 	struct ptr
@@ -341,27 +342,84 @@ public: // -- ptr -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
-public: // -- dynamic cast -- //
+public: // -- ptr casting -- //
 
-	template<typename To, typename From, std::enable_if_t<!std::is_same<To, void>::value && std::is_polymorphic<From>::value, int> = 0>
+	template<typename To, typename From>
+	static ptr<To> staticCast(const GC::ptr<From> &p)
+	{
+		// perform the cast
+		To *obj = static_cast<To*>(p.obj);
+
+		// create a ptr to it
+		ptr<To> res(no_rooting_t{});
+
+		// link it to the object
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+			res.__init(obj, p.handle);
+		}
+
+		return res;
+	}
+
+	template<typename To, typename From>
 	static ptr<To> dynamicCast(const GC::ptr<From> &p)
 	{
 		// perform the dynamic cast
 		To *obj = dynamic_cast<To*>(p.obj);
 
-		// if it's non-null, return a ptr to it
+		// if it's non-null
 		if (obj)
 		{
+			// create a ptr to it
 			ptr<To> res(no_rooting_t{});
-			
-			std::lock_guard<std::mutex> lock(GC::mutex);
 
-			res.__init(obj, p.handle);
+			// link it to the object
+			{
+				std::lock_guard<std::mutex> lock(GC::mutex);
+				res.__init(obj, p.handle);
+			}
 
 			return res;
 		}
 		// otherwise return null ptr
 		else return {};
+	}
+
+	template<typename To, typename From>
+	static ptr<To> constCast(const GC::ptr<From> &p)
+	{
+		// perform the cast
+		To *obj = const_cast<To*>(p.obj);
+
+		// create a ptr to it
+		ptr<To> res(no_rooting_t{});
+
+		// link it to the object
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+			res.__init(obj, p.handle);
+		}
+
+		return res;
+	}
+
+	template<typename To, typename From>
+	static ptr<To> reinterpretCast(const GC::ptr<From> &p)
+	{
+		// perform the cast
+		To *obj = reinterpret_cast<To*>(p.obj);
+
+		// create a ptr to it
+		ptr<To> res(no_rooting_t{});
+
+		// link it to the object
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+			res.__init(obj, p.handle);
+		}
+
+		return res;
 	}
 
 public: // -- core router specializations -- //
