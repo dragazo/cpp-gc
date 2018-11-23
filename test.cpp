@@ -253,6 +253,8 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
+	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
+
     {
         auto i1 = GC::make<TreeNode>();
         auto i2 = GC::make<SymbolTable>();    
@@ -289,7 +291,7 @@ int main()
 	merp->emplace(4, GC::make<ListNode>());
 
 	GC::ptr<int> not_arr = GC::make<int>();
-	GC::ptr<int[16][16][16][16]> yes_arr = GC::make<int[16][16][16][16]>();
+	GC::ptr<int[][16][16][16]> yes_arr = GC::make<int[][16][16][16]>(16);
 
 	//not_arr[0] = 9;
 	(**yes_arr)[1][5] = 7;
@@ -309,7 +311,7 @@ int main()
 
 	{
 		std::cerr << "ptr<ptr<int>[2][2][2]>:\n";
-		GC::ptr<GC::ptr<int>[2][2][2]> arr_ptr = GC::make<GC::ptr<int>[2][2][2]>();
+		GC::ptr<GC::ptr<int>[][2][2]> arr_ptr = GC::make<GC::ptr<int>[][2][2]>(2);
 
 		for (int i = 0; i < 2; ++i)
 			for (int j = 0; j < 2; ++j)

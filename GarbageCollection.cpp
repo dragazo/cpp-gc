@@ -152,7 +152,7 @@ void GC::handle_del_list()
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
 		#endif
 
-		handle->dtor(handle->obj);
+		handle->dtor(handle->obj, handle->count);
 	}
 
 	// delete the handles
@@ -175,7 +175,7 @@ void GC::__mark_sweep(info *handle)
 	handle->marked = true;
 
 	// for each outgoing arc
-	handle->router(handle->obj, +[](info *const &arc)
+	handle->router(handle->obj, handle->count, +[](info *const &arc)
 	{
 		// if it hasn't been marked, recurse to it (only if non-null)
 		if (arc && !arc->marked) __mark_sweep(arc);
@@ -206,7 +206,7 @@ void GC::collect()
 			i->marked = false;
 
 			// claim its children (see above comment)
-			i->router(i->obj, GC::__unroot);
+			i->router(i->obj, i->count, GC::__unroot);
 		}
 
 		// -- mark and sweep -- //

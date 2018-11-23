@@ -81,25 +81,18 @@ public: // -- outgoing arcs -- //
 
 private: // -- private types -- //
 
-	// the raw version of router<T> that uses void* instead of T& (we have to do this for generality).
-	// equivalent to router<T>::route() where obj is reinterpret cast to T* and dereferenced.
-	template<typename T>
-	struct __router
-	{
-		static void __route(void *obj, router_fn func) { router<T>::route(*reinterpret_cast<T*>(obj), func); }
-	};
-
 	// represents a single garbage-collected object's allocation info.
 	// this is used internally by the garbage collector's logic - DO NOT MANUALLY MODIFY THIS.
 	// ANY POINTER OF THIS TYPE UNDER GC MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
 	struct info
 	{
-		void *const obj; // pointer to the managed object
+		void *const       obj;   // pointer to the managed object
+		const std::size_t count; // the number of elements in obj
 
-		void(*const dtor)(void *_obj);    // a function to destroy obj
-		void(*const dealloc)(void *_obj); // a function to deallocate memory - called after dtor()
+		void(*const dtor)(void *_obj, std::size_t _count); // a function to destroy obj
+		void(*const dealloc)(void *_obj);                  // a function to deallocate memory - called after dtor()
 
-		void(*const router)(void *_obj, router_fn); // a router function to use for this object
+		void(*const router)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
 
 		std::size_t ref_count = 1;      // the reference count for this allocation
 		bool        destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
@@ -110,45 +103,41 @@ private: // -- private types -- //
 		info *next; // so we need to manage a linked list on our own
 
 		// populates info - ref count starts at 1
-		info(void *_obj, void(*_dtor)(void*), void(*_dealloc)(void*), void(*_router)(void*, router_fn))
-			: obj(_obj), dtor(_dtor), dealloc(_dealloc), router(_router)
+		info(void *_obj, std::size_t _count, void(*_dtor)(void*, std::size_t), void(*_dealloc)(void*), void(*_router)(void*, std::size_t, router_fn))
+			: obj(_obj), count(_count), dtor(_dtor), dealloc(_dealloc), router(_router)
 		{}
 	};
 
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
 	struct no_rooting_t {};
 
-private: // -- construction / destruction -- //
+public: // -- extent extensions -- //
 
-	// constructs or destructs T in place
+	// gets the full (total) extent of a potentially multi-dimensional array.
+	// for scalar types this is 1.
+	// for array of unknown bound, returns the full extent of the known bounds.
 	template<typename T>
-	struct __ctor_dtor
-	{
-		template<typename ...Args>
-		static void ctor(T *pos, Args &&...args) { new (pos) T{std::forward<Args>(args)...}; }
-
-		static void dtor(T *pos) { pos->~T(); }
-		static void __dtor(void *pos) { dtor((T*)pos); }
-	};
-
-	// handles the construction/destruction of C-style arrays in place
-	template<typename T, std::size_t N>
-	struct __ctor_dtor<T[N]>
-	{
-		static void ctor(T(*pos)[N]) { for (std::size_t i = 0; i < N; ++i) __ctor_dtor<T>::ctor(*pos + i); }
-
-		static void dtor(T(*pos)[N]) { for (std::size_t i = 0; i < N; ++i) __ctor_dtor<T>::dtor(*pos + i); }
-		static void __dtor(void *pos) { dtor((T(*)[N])pos); }
-	};
-
-private: // -- extent extensions -- //
-
-	// gets the total extent of a multi-dimensional array. 1 for scalar types.
-	template<typename T>
-	struct __full_extent : std::integral_constant<std::size_t, 1> {};
+	struct full_extent : std::integral_constant<std::size_t, 1> {};
 
 	template<typename T, std::size_t N>
-	struct __full_extent<T[N]> : std::integral_constant<std::size_t, N * __full_extent<T>::value> {};
+	struct full_extent<T[N]> : std::integral_constant<std::size_t, N * full_extent<T>::value> {};
+
+	template<typename T>
+	struct full_extent<T[]> : std::integral_constant<std::size_t, full_extent<T>::value> {};
+
+private: // -- array typing helpers -- //
+
+	// true if T is an array of unknown bound, false otherwise
+	template<typename T>
+	struct is_unbound_array : std::false_type {};
+	template<typename T>
+	struct is_unbound_array<T[]> : std::true_type {};
+
+	// true if T is an array of known bound, false otherwise
+	template<typename T>
+	struct is_bound_array : std::false_type {};
+	template<typename T, std::size_t N>
+	struct is_bound_array<T[N]> : std::true_type {};
 
 private: // -- tuple routing -- //
 
@@ -560,80 +549,164 @@ public: // -- stdlib container router specializations -- //
 		// intentionally blank - we can't iterate through a priority queue
 	};
 
-public: // -- ptr allocation -- //
+private: // -- allocation helpers -- //
 
-	// creates a new dynamic instance of T that is bound to a ptr.
-	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
-	template<typename T, typename ...Args>
-	static ptr<T> make(Args &&...args)
+	// allocates size bytes of space with the given alignment.
+	// returns a non-null pointer.
+	// if the allocation fails but strategies::allocfail is checked, will try once more.
+	// otherwise, or if the second attempt fails, throws std::bad_alloc.
+	// any non-null return value must be deleted via checked_aligned_free().
+	static void *checked_aligned_malloc(std::size_t size, std::size_t align)
 	{
-		// -- normalize T -- //
-
-		// typedef the non-const type
-		typedef std::remove_const_t<T> NCT;
-
-		// get the element type and the full extent
-		typedef std::remove_const_t<std::remove_all_extents_t<NCT>> ElemT;
-		constexpr std::size_t full_extent = __full_extent<NCT>::value;
-
-		// -- create the buffer for both NCT and its info object -- //
-
-		// allocate aligned space for NCT and info
-		void *buf = GC::aligned_malloc(sizeof(NCT) + sizeof(info), std::max(alignof(NCT), alignof(info)));
+		// allocate aligned space for object(s) and info
+		void *buf = GC::aligned_malloc(size, align);
 
 		// if that failed but we have allocfail collect mode enabled
 		if (!buf && (int)strategy() & (int)strategies::allocfail)
 		{
 			// collect and retry the allocation
 			GC::collect();
-			buf = GC::aligned_malloc(sizeof(NCT) + sizeof(info), std::max(alignof(NCT), alignof(info)));
+			buf = GC::aligned_malloc(size, align);
 		}
 
 		// if that failed, throw bad alloc
 		if (!buf) throw std::bad_alloc();
+		
+		return buf;
+	}
 
-		// alias the buffer partitions (pt == buf always)
-		NCT  *obj = reinterpret_cast<NCT*>(buf);
-		info *handle = reinterpret_cast<info*>((char*)buf + sizeof(NCT));
+	// frees a block of memory allocated by checked_aligned_malloc().
+	static void checked_aligned_free(void *ptr) { GC::aligned_free(ptr); }
 
-		// -- construct the objects -- //
+public: // -- ptr allocation -- //
 
-		// try to construct the NCT object
-		try { __ctor_dtor<NCT>::ctor(obj, std::forward<Args>(args)...); }
+	// creates a new dynamic instance of T that is bound to a ptr.
+	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
+	template<typename T, typename ...Args, std::enable_if_t<!std::is_array<T>::value, int> = 0>
+	static ptr<T> make(Args &&...args)
+	{
+		// -- normalize T -- //
+
+		// strip cv qualifiers
+		typedef std::remove_cv_t<T> NCVT;
+		
+		// -- create the buffer for both the object and its info object -- //
+
+		// allocate the buffer space
+		void *const buf = checked_aligned_malloc(sizeof(NCVT) + sizeof(info), std::max(alignof(NCVT), alignof(info)));
+
+		// alias the buffer partitions
+		NCVT *obj = reinterpret_cast<NCVT*>(buf);
+		info *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + sizeof(NCVT));
+
+		// -- construct the object -- //
+
+		// try to construct the object
+		try { new (obj) NCVT{std::forward<Args>(args)...}; }
 		// if that fails, deallocate buf and rethrow
-		catch (...) { GC::aligned_free(buf); throw; }
+		catch (...) { GC::checked_aligned_free(buf); throw; }
 
 		// construct the info object
-		new (handle) info(
-			obj,                      // object to manage
-			__ctor_dtor<NCT>::__dtor, // dtor function
-			GC::aligned_free,         // dealloc function
-			__router<NCT>::__route);  // router function
+		new (handle) info(obj, 1,
+			[](void *_obj, std::size_t) { reinterpret_cast<NCVT*>(_obj)->~NCVT(); },
+			GC::checked_aligned_free,
+			[](void *_obj, std::size_t, GC::router_fn func) { GC::router<NCVT>::route(*reinterpret_cast<NCVT*>(_obj), func); });
 
 		// -- do the garbage collection aspects -- //
 
-		// create a ptr ahead of time - uses correct T - (make sure to use the no_rooting_t ctor)
 		ptr<T> res(GC::no_rooting_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
-			// link the info object
-			__link(handle);
+			__link(handle); // link the info object
+			res.__init(obj, handle); // initialize ptr with handle
+			handle->router(handle->obj, handle->count, GC::__unroot); // claim this object's children
 
-			// initialize ptr with handle
-			res.__init(obj, handle);
-
-			// claim this object's children
-			handle->router(handle->obj, GC::__unroot);
-
-			// begin timed collect
-			__start_timed_collect();
+			__start_timed_collect(); // begin timed collect
 		}
 
 		// return the created ptr
 		return res;
 	}
+
+	template<typename T, std::enable_if_t<GC::is_unbound_array<T>::value, int> = 0>
+	static ptr<T> make(std::size_t count)
+	{
+		// -- normalize T -- //
+
+		// strip cv qualifiers and all extents
+		typedef std::remove_cv_t<std::remove_all_extents_t<T>> element_type;
+
+		// get the total number of elements
+		const std::size_t total_count = count * GC::full_extent<T>::value;
+
+		// -- create the buffer for the objects and their info object -- //
+
+		// allocate the buffer space
+		void *const buf = checked_aligned_malloc(total_count * sizeof(element_type) + sizeof(info), std::max(alignof(element_type), alignof(info)));
+
+		// alias the buffer partitions
+		element_type *obj = reinterpret_cast<element_type*>(buf);
+		info         *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + total_count * sizeof(element_type));
+
+		// -- construct the objects -- //
+
+		std::size_t constructed_count = 0; // number of successfully constructed objects
+
+		// try to construct the objects
+		try
+		{
+			for (std::size_t i = 0; i < total_count; ++i)
+			{
+				new (obj + i) element_type();
+				++constructed_count; // inc constructed_count after each success
+			}
+		}
+		// if that fails
+		catch (...)
+		{
+			// destroy anything we successfully constructed
+			for (std::size_t i = 0; i < constructed_count; ++i) (obj + i)->~element_type();
+
+			// deallocate the buffer and rethrow whatever killed us
+			GC::checked_aligned_free(buf);
+			throw;
+		}
+
+		// construct the info object
+		new (handle) info(obj, total_count,
+			[](void *_obj, std::size_t _count)
+			{
+				for (std::size_t i = 0; i < _count; ++i)
+					reinterpret_cast<element_type*>(_obj)[i].~element_type();
+			},
+			GC::checked_aligned_free,
+			[](void *_obj, std::size_t _count, GC::router_fn func)
+			{
+				for (std::size_t i = 0; i < _count; ++i)
+					GC::route(reinterpret_cast<element_type*>(_obj)[i], func);
+			});
+		
+		// -- do the garbage collection asspects -- //
+
+		ptr<T> res(GC::no_rooting_t{});
+
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
+			__link(handle); // link the info object
+			res.__init(reinterpret_cast<T*>(obj), handle); // initialize ptr with handle
+			handle->router(handle->obj, handle->count, GC::__unroot); // claim this object's children
+
+			__start_timed_collect(); // begin timed collect
+		}
+
+		return res;
+	}
+
+	template<typename T, std::enable_if_t<GC::is_bound_array<T>::value, int> = 0>
+	static void make() = delete;
 
 	// triggers a full garbage collection pass.
 	// objects that are not in use will be deleted.
