@@ -304,6 +304,14 @@ int main()
 	typedef int what_is_this[];
 	typedef what_is_this *what_is_this_2;
 
+	auto v_test1 = std::make_unique<std::vector<int>>(16);
+	auto v_test2 = std::make_shared<std::vector<int>>(16);
+	auto v_test3 = GC::make<std::vector<int>>(16);
+
+	assert(v_test1->size() == 16);
+	assert(v_test2->size() == 16);
+	assert(v_test3->size() == 16);
+
 	std::cerr << "convertible: " << std::is_convertible<int[1], int[1]>::value << '\n';
 
 	std::cerr << "what is this? " << std::is_same<what_is_this_2, int(*)[]>::value << "\n\n";

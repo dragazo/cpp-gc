@@ -65,14 +65,14 @@ public: // -- outgoing arcs -- //
 	// it is undefined behavior to use any gc utilities (directly or indirectly) during this function's invocation.
 	// this default implementation is sufficient for any type that does not contain GC::ptr by value (directly or indirectly).
 	// T should be non-const and the function should take const &T.
-	// THIS IS USED FOR ROUTER DEFINITION - YOU SHOULD NOT USE IT DIRECTLY FOR ROUTING (E.G. INSIDE YOUR router<T>::route() DEFINITION).
+	// THIS IS USED FOR ROUTER DEFINITION - YOU SHOULD NOT USE IT DIRECTLY FOR ROUTING.
 	template<typename T>
 	struct router { static void route(const T &obj, router_fn func) {} };
 
 	// routes obj into func recursively.
 	// you should use this function for routing in router<T>::route() definitions (rather than direct use of router<T>::route()).
 	template<typename T>
-	static void route(const T &obj, router_fn func) { router<std::remove_const_t<T>>::route(obj, func); }
+	static void route(const T &obj, router_fn func) { router<std::remove_cv_t<T>>::route(obj, func); }
 
 	// routes each element in an iterator range into func recursively.
 	// like route(), this function is safe to use directly - DO NOT USE router<T>::route() DIRECTLY
@@ -84,8 +84,8 @@ private: // -- private types -- //
 	// the virtual function table type for info objects.
 	struct info_vtable
 	{
-		void(*const destroy)(void *_obj, std::size_t _count); // a function to destroy obj
-		void(*const dealloc)(void *_obj);                     // a function to deallocate memory - called after dtor()
+		void(*const destroy)(void *_obj, std::size_t _count); // a function to destroy the object
+		void(*const dealloc)(void *_obj);                     // a function to deallocate memory - called after destroy
 
 		void(*const route)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
 
@@ -96,7 +96,7 @@ private: // -- private types -- //
 
 	// represents a single garbage-collected object's allocation info.
 	// this is used internally by the garbage collector's logic - DO NOT MANUALLY MODIFY THIS.
-	// ANY POINTER OF THIS TYPE UNDER GC MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
+	// ANY POINTER OF THIS TYPE UNDER GC CONTROL MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
 	struct info
 	{
 		void *const       obj;   // pointer to the managed object
@@ -155,26 +155,6 @@ private: // -- array typing helpers -- //
 	struct is_bound_array : std::false_type {};
 	template<typename T, std::size_t N>
 	struct is_bound_array<T[N]> : std::true_type {};
-
-private: // -- tuple routing -- //
-
-	// recursively routes to all elements of a tuple with ordinal indicies [0, Len)
-	template<std::size_t Len, typename ...Types>
-	struct __tuple_router
-	{
-		static void __route(const std::tuple<Types...> &tuple, router_fn func)
-		{
-			GC::route(std::get<Len - 1>(tuple), func);
-			__tuple_router<Len - 1, Types...>::__route(tuple, func);
-		}
-	};
-
-	// base case - does nothing
-	template<typename ...Types>
-	struct __tuple_router<0, Types...>
-	{
-		static void __route(const std::tuple<Types...> &tuple, router_fn func) {}
-	};
 
 public: // -- ptr -- //
 
@@ -436,19 +416,47 @@ public: // -- ptr casting -- //
 
 public: // -- core router specializations -- //
 
-	// specialization of router for ptr<T> (i.e. ptr<T> can be thought of as a struct containing a ptr<T>).
-	// this is required, as all GC::route() calls must eventually decay to calling ptr<T> routers.
+	// base case for router - this one actually does something directly
 	template<typename T>
 	struct router<ptr<T>>
 	{
 		static void route(const ptr<T> &obj, router_fn func) { func(obj.handle); }
 	};
 
-	// routes a message directed at a C-style array to each element in said array
+public: // -- C-style array router specializations -- //
+
+	// routes a message directed at a C-style bounded array to each element in said array
 	template<typename T, std::size_t N>
 	struct router<T[N]>
 	{
 		static void route(const T(&objs)[N], router_fn func) { for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func); }
+	};
+
+	// ill-formed variant for unbounded arrays
+	template<typename T>
+	struct router<T[]>
+	{
+		// intentionally left blank - we don't know the extent, so we can't route to its contents
+	};
+
+private: // -- tuple routing -- //
+
+	// recursively routes to all elements of a tuple with ordinal indicies [0, Len)
+	template<std::size_t Len, typename ...Types>
+	struct __tuple_router
+	{
+		static void __route(const std::tuple<Types...> &tuple, router_fn func)
+		{
+			GC::route(std::get<Len - 1>(tuple), func);
+			__tuple_router<Len - 1, Types...>::__route(tuple, func);
+		}
+	};
+
+	// base case - does nothing
+	template<typename ...Types>
+	struct __tuple_router<0, Types...>
+	{
+		static void __route(const std::tuple<Types...> &tuple, router_fn func) {}
 	};
 
 public: // -- stdlib misc router specializations -- //
@@ -573,11 +581,11 @@ public: // -- stdlib container router specializations -- //
 
 private: // -- allocation helpers -- //
 
-	// allocates size bytes of space with the given alignment.
-	// returns a non-null pointer.
-	// if the allocation fails but strategies::allocfail is checked, will try once more.
-	// otherwise, or if the second attempt fails, throws std::bad_alloc.
-	// any non-null return value must be deleted via checked_aligned_free().
+	// allocates size bytes of space with the given alignment - returns a non-null pointer.
+	// it is undefined behavior if size is 0.
+	// if the allocation fails but strategies::allocfail is checked, will try once more after calling GC::collect().
+	// otherwise, or if the second attempt also fails, throws std::bad_alloc.
+	// return value must be deleted via checked_aligned_free().
 	static void *checked_aligned_malloc(std::size_t size, std::size_t align)
 	{
 		// allocate aligned space for object(s) and info
@@ -602,7 +610,7 @@ private: // -- allocation helpers -- //
 
 public: // -- ptr allocation -- //
 
-	// creates a new dynamic instance of T that is bound to a ptr.
+	// creates a new dynamic scalar instance of T that is bound to a ptr.
 	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
 	template<typename T, typename ...Args, std::enable_if_t<!std::is_array<T>::value, int> = 0>
 	static ptr<T> make(Args &&...args)
@@ -610,29 +618,29 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// strip cv qualifiers
-		typedef std::remove_cv_t<T> NCVT;
+		typedef std::remove_cv_t<T> element_type;
 		
 		// -- create the vtable -- //
 
 		static const info_vtable _vtable(
-			[](void *_obj, std::size_t) { reinterpret_cast<NCVT*>(_obj)->~NCVT(); },
+			[](void *_obj, std::size_t) { reinterpret_cast<element_type*>(_obj)->~element_type(); },
 			GC::checked_aligned_free,
-			[](void *_obj, std::size_t, GC::router_fn func) { GC::router<NCVT>::route(*reinterpret_cast<NCVT*>(_obj), func); }
+			[](void *_obj, std::size_t, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(_obj), func); }
 		);
 
 		// -- create the buffer for both the object and its info object -- //
 
 		// allocate the buffer space
-		void *const buf = checked_aligned_malloc(sizeof(NCVT) + sizeof(info), std::max(alignof(NCVT), alignof(info)));
+		void *const buf = checked_aligned_malloc(sizeof(element_type) + sizeof(info), std::max(alignof(element_type), alignof(info)));
 
 		// alias the buffer partitions
-		NCVT *obj = reinterpret_cast<NCVT*>(buf);
-		info *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + sizeof(NCVT));
+		element_type *obj = reinterpret_cast<element_type*>(buf);
+		info         *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + sizeof(element_type));
 
 		// -- construct the object -- //
 
 		// try to construct the object
-		try { new (obj) NCVT{std::forward<Args>(args)...}; }
+		try { new (obj) element_type(std::forward<Args>(args)...); }
 		// if that fails, deallocate buf and rethrow
 		catch (...) { GC::checked_aligned_free(buf); throw; }
 
@@ -657,6 +665,8 @@ public: // -- ptr allocation -- //
 		return res;
 	}
 
+	// creates a new dynamic array of T that is bound to a ptr.
+	// throws any exception resulting from any T object's construction, but does not leak resources if this occurs.
 	template<typename T, std::enable_if_t<GC::is_unbound_array<T>::value, int> = 0>
 	static ptr<T> make(std::size_t count)
 	{

@@ -130,8 +130,9 @@ The following types have well-formed `GC::router` specializations pre-defined fo
 * `std::unordered_set<Key, Hash, KeyEqual, Allocator>`
 * `std::vector<T, Allocator>`
 
-The following types have ill-formed `GC::router` specializations pre-defined for safety. This is typically because there is no way to route to said type's contents. It is a compile error to use any of these, which should help limit confusion.
+The following types have ill-formed `GC::router` specializations pre-defined for safety. This is typically because there is no way to route to said type's contents for one reason or another. It is a compile error to use any of these, which should help limit confusion on usage.
 
+* `T[]`
 * `std::priority_queue<T, Container, Compare>`
 * `std::queue<T, Container>`
 * `std::stack<T, Container>`
