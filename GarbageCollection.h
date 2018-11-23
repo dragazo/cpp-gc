@@ -180,7 +180,7 @@ public: // -- ptr -- //
 
 	private: // -- data -- //
 
-		T *obj; // pointer to the object (not the same as handle->obj because of type conversions)
+		element_type *obj; // pointer to the object
 
 		GC::info *handle; // the handle to use for gc management functions.
 
@@ -192,7 +192,7 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object of a compatible type (i.e. static or dynamic cast).
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		void reset(T *_obj, GC::info *_handle)
+		void reset(element_type *_obj, GC::info *_handle)
 		{
 			// repoint to the proper object
 			obj = _obj;
@@ -224,7 +224,7 @@ public: // -- ptr -- //
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, creates a valid, but empty ptr.
 		// GC::mutex must be locked prior to invocation.
-		void __init(T *_obj, GC::info *_handle)
+		void __init(element_type *_obj, GC::info *_handle)
 		{
 			GC::__root(handle);
 
@@ -276,7 +276,7 @@ public: // -- ptr -- //
 			if (handle) GC::__addref(handle); // we're new - inc ref count
 		}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr(const ptr<J> &other) : obj(static_cast<T*>(other.obj)), handle(other.handle)
+		ptr(const ptr<J> &other) : obj(static_cast<element_type*>(other.obj)), handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
@@ -287,14 +287,14 @@ public: // -- ptr -- //
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
 		ptr &operator=(const ptr &other) { reset(other.obj, other.handle);	return *this; }
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr &operator=(const ptr<J> &other) { reset(static_cast<T*>(other.obj), other.handle); return *this; }
+		ptr &operator=(const ptr<J> &other) { reset(static_cast<element_type*>(other.obj), other.handle); return *this; }
 
 		ptr &operator=(std::nullptr_t) { reset(nullptr, nullptr); return *this; }
 
 	public: // -- obj access -- //
 
 		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
-		element_type *get() const { return reinterpret_cast<element_type*>(obj); }
+		element_type *get() const { return obj; }
 
 		// accesses an item in an array. only defined if T is an array type.
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && std::is_array<J>::value, int> = 0>
@@ -647,20 +647,23 @@ public: // -- ptr allocation -- //
 	{
 		// -- normalize T -- //
 
-		// strip cv qualifiers and all extents
-		typedef std::remove_cv_t<std::remove_all_extents_t<T>> element_type;
+		// strip cv qualifiers and first extent to get element type
+		typedef std::remove_cv_t<std::remove_extent_t<T>> element_type;
 
-		// get the total number of elements
-		const std::size_t total_count = count * GC::full_extent<T>::value;
+		// strip cv qualifiers and all extents to get scalar type
+		typedef std::remove_cv_t<std::remove_all_extents_t<T>> scalar_type;
+
+		// get the total number of scalar objects - we'll build the array in terms of scalar entities
+		const std::size_t scalar_count = count * GC::full_extent<T>::value;
 
 		// -- create the buffer for the objects and their info object -- //
 
 		// allocate the buffer space
-		void *const buf = checked_aligned_malloc(total_count * sizeof(element_type) + sizeof(info), std::max(alignof(element_type), alignof(info)));
+		void *const buf = checked_aligned_malloc(scalar_count * sizeof(scalar_type) + sizeof(info), std::max(alignof(scalar_type), alignof(info)));
 
 		// alias the buffer partitions
-		element_type *obj = reinterpret_cast<element_type*>(buf);
-		info         *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + total_count * sizeof(element_type));
+		scalar_type *obj = reinterpret_cast<scalar_type*>(buf);
+		info        *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + scalar_count * sizeof(scalar_type));
 
 		// -- construct the objects -- //
 
@@ -669,9 +672,9 @@ public: // -- ptr allocation -- //
 		// try to construct the objects
 		try
 		{
-			for (std::size_t i = 0; i < total_count; ++i)
+			for (std::size_t i = 0; i < scalar_count; ++i)
 			{
-				new (obj + i) element_type();
+				new (obj + i) scalar_type();
 				++constructed_count; // inc constructed_count after each success
 			}
 		}
@@ -679,7 +682,7 @@ public: // -- ptr allocation -- //
 		catch (...)
 		{
 			// destroy anything we successfully constructed
-			for (std::size_t i = 0; i < constructed_count; ++i) (obj + i)->~element_type();
+			for (std::size_t i = 0; i < constructed_count; ++i) (obj + i)->~scalar_type();
 
 			// deallocate the buffer and rethrow whatever killed us
 			GC::checked_aligned_free(buf);
@@ -687,17 +690,17 @@ public: // -- ptr allocation -- //
 		}
 
 		// construct the info object
-		new (handle) info(obj, total_count,
+		new (handle) info(obj, scalar_count,
 			[](void *_obj, std::size_t _count)
 			{
 				for (std::size_t i = 0; i < _count; ++i)
-					reinterpret_cast<element_type*>(_obj)[i].~element_type();
+					reinterpret_cast<scalar_type*>(_obj)[i].~scalar_type();
 			},
 			GC::checked_aligned_free,
 			[](void *_obj, std::size_t _count, GC::router_fn func)
 			{
 				for (std::size_t i = 0; i < _count; ++i)
-					GC::route(reinterpret_cast<element_type*>(_obj)[i], func);
+					GC::route(reinterpret_cast<scalar_type*>(_obj)[i], func);
 			});
 		
 		// -- do the garbage collection asspects -- //
@@ -708,7 +711,10 @@ public: // -- ptr allocation -- //
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
 			__link(handle); // link the info object
-			res.__init(reinterpret_cast<T*>(obj), handle); // initialize ptr with handle
+
+			// initialize ptr with handle (the cast is safe because element_type is either scalar_type or bound array of scalar_type)
+			res.__init(reinterpret_cast<element_type*>(obj), handle);
+
 			handle->route(GC::__unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect

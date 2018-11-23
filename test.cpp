@@ -304,6 +304,8 @@ int main()
 	typedef int what_is_this[];
 	typedef what_is_this *what_is_this_2;
 
+	std::cerr << "convertible: " << std::is_convertible<int[1], int[1]>::value << '\n';
+
 	std::cerr << "what is this? " << std::is_same<what_is_this_2, int(*)[]>::value << "\n\n";
 
 	/*merp->push_back(GC::make<ListNode>());
