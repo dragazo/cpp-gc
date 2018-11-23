@@ -81,6 +81,19 @@ public: // -- outgoing arcs -- //
 
 private: // -- private types -- //
 
+	// the virtual function table type for info objects.
+	struct info_vtable
+	{
+		void(*const destroy)(void *_obj, std::size_t _count); // a function to destroy obj
+		void(*const dealloc)(void *_obj);                     // a function to deallocate memory - called after dtor()
+
+		void(*const route)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
+
+		info_vtable(void(*_destroy)(void*, std::size_t), void(*_dealloc)(void*), void(*_route)(void*, std::size_t, router_fn))
+			: destroy(_destroy), dealloc(_dealloc), route(_route)
+		{}
+	};
+
 	// represents a single garbage-collected object's allocation info.
 	// this is used internally by the garbage collector's logic - DO NOT MANUALLY MODIFY THIS.
 	// ANY POINTER OF THIS TYPE UNDER GC MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
@@ -89,10 +102,7 @@ private: // -- private types -- //
 		void *const       obj;   // pointer to the managed object
 		const std::size_t count; // the number of elements in obj
 
-		void(*const _destroy)(void *_obj, std::size_t _count); // a function to destroy obj
-		void(*const _dealloc)(void *_obj);                     // a function to deallocate memory - called after dtor()
-
-		void(*const _route)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
+		const info_vtable *const vtable; // virtual function table to use
 
 		std::size_t ref_count = 1;      // the reference count for this allocation
 		bool        destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
@@ -103,16 +113,16 @@ private: // -- private types -- //
 		info *next; // so we need to manage a linked list on our own
 
 		// populates info - ref count starts at 1
-		info(void *_obj_, std::size_t _count_, void(*_destroy_)(void*, std::size_t), void(*_dealloc_)(void*), void(*_route_)(void*, std::size_t, router_fn))
-			: obj(_obj_), count(_count_), _destroy(_destroy_), _dealloc(_dealloc_), _route(_route_)
+		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
+			: obj(_obj), count(_count), vtable(_vtable)
 		{}
 
 		// -- helpers -- //
 
-		void destroy() { _destroy(obj, count); }
-		void dealloc() { _dealloc(obj); }
+		void destroy() { vtable->destroy(obj, count); }
+		void dealloc() { vtable->dealloc(obj); }
 
-		void route(router_fn func) { _route(obj, count, func); }
+		void route(router_fn func) { vtable->route(obj, count, func); }
 	};
 
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
@@ -602,6 +612,14 @@ public: // -- ptr allocation -- //
 		// strip cv qualifiers
 		typedef std::remove_cv_t<T> NCVT;
 		
+		// -- create the vtable -- //
+
+		static const info_vtable _vtable(
+			[](void *_obj, std::size_t) { reinterpret_cast<NCVT*>(_obj)->~NCVT(); },
+			GC::checked_aligned_free,
+			[](void *_obj, std::size_t, GC::router_fn func) { GC::router<NCVT>::route(*reinterpret_cast<NCVT*>(_obj), func); }
+		);
+
 		// -- create the buffer for both the object and its info object -- //
 
 		// allocate the buffer space
@@ -619,10 +637,7 @@ public: // -- ptr allocation -- //
 		catch (...) { GC::checked_aligned_free(buf); throw; }
 
 		// construct the info object
-		new (handle) info(obj, 1,
-			[](void *_obj, std::size_t) { reinterpret_cast<NCVT*>(_obj)->~NCVT(); },
-			GC::checked_aligned_free,
-			[](void *_obj, std::size_t, GC::router_fn func) { GC::router<NCVT>::route(*reinterpret_cast<NCVT*>(_obj), func); });
+		new (handle) info(obj, 1, &_vtable);
 
 		// -- do the garbage collection aspects -- //
 
@@ -655,6 +670,22 @@ public: // -- ptr allocation -- //
 
 		// get the total number of scalar objects - we'll build the array in terms of scalar entities
 		const std::size_t scalar_count = count * GC::full_extent<T>::value;
+
+		// -- create the vtable -- //
+
+		static const info_vtable _vtable(
+			[](void *_obj, std::size_t _count)
+			{
+				for (std::size_t i = 0; i < _count; ++i)
+					reinterpret_cast<scalar_type*>(_obj)[i].~scalar_type();
+			},
+			GC::checked_aligned_free,
+			[](void *_obj, std::size_t _count, GC::router_fn func)
+			{
+				for (std::size_t i = 0; i < _count; ++i)
+					GC::route(reinterpret_cast<scalar_type*>(_obj)[i], func);
+			}
+		);
 
 		// -- create the buffer for the objects and their info object -- //
 
@@ -690,18 +721,7 @@ public: // -- ptr allocation -- //
 		}
 
 		// construct the info object
-		new (handle) info(obj, scalar_count,
-			[](void *_obj, std::size_t _count)
-			{
-				for (std::size_t i = 0; i < _count; ++i)
-					reinterpret_cast<scalar_type*>(_obj)[i].~scalar_type();
-			},
-			GC::checked_aligned_free,
-			[](void *_obj, std::size_t _count, GC::router_fn func)
-			{
-				for (std::size_t i = 0; i < _count; ++i)
-					GC::route(reinterpret_cast<scalar_type*>(_obj)[i], func);
-			});
+		new (handle) info(obj, scalar_count, &_vtable);
 		
 		// -- do the garbage collection asspects -- //
 
