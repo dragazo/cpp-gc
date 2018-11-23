@@ -347,6 +347,16 @@ int main()
 
 	ListNode n;
 
+	GC::ptr<double> _null_ctor_test1{};
+	GC::ptr<double> null_ctor_test1;
+	GC::ptr<double> _null_ctor_test2(nullptr);
+	GC::ptr<double> null_ctor_test2 = nullptr;
+
+	std::shared_ptr<double> _otest1;
+	std::shared_ptr<double> otest1 = nullptr;
+	std::unique_ptr<double> _otest2;
+	std::unique_ptr<double> otest2 = nullptr;
+
 	GC::ptr<derived> dp = GC::make<derived>();
 	GC::ptr<base1> bp1 = GC::make<base1>();
 	GC::ptr<base2> bp2 = GC::make<base2>();

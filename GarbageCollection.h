@@ -13,6 +13,7 @@
 #include <exception>
 #include <stdexcept>
 #include <cassert>
+#include <cstddef>
 
 #include <memory>
 #include <tuple>
@@ -237,7 +238,7 @@ public: // -- ptr -- //
 	public: // -- ctor / dtor / asgn -- //
 
 		// creates an empty ptr (null)
-		ptr() : obj(nullptr), handle(nullptr)
+		ptr(std::nullptr_t = nullptr) : obj(nullptr), handle(nullptr)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 
@@ -273,7 +274,7 @@ public: // -- ptr -- //
 		ptr(const ptr &other) : obj(other.obj), handle(other.handle)
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
-
+			
 			GC::__root(handle); // register handle as a root
 			if (handle) GC::__addref(handle); // we're new - inc ref count
 		}
