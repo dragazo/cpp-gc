@@ -349,6 +349,8 @@ int main()
 	t.d[4] = '6';
 	std::cerr << "max align: " << alignof(std::max_align_t) << "\n\n";
 
+	auto sse_t_obj = GC::make<sse_t>();
+
 	GC::ptr<int> ip = GC::make<int>(46);
 	GC::ptr<int> ip_self = ip;
 	std::cerr << "      int val:  " << *ip << '\n';

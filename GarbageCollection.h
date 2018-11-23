@@ -579,34 +579,57 @@ public: // -- stdlib container router specializations -- //
 		// intentionally blank - we can't iterate through a priority queue
 	};
 
-private: // -- allocation helpers -- //
+private: // -- aligned raw memory allocators -- //
 
-	// allocates size bytes of space with the given alignment - returns a non-null pointer.
-	// it is undefined behavior if size is 0.
-	// if the allocation fails but strategies::allocfail is checked, will try once more after calling GC::collect().
-	// otherwise, or if the second attempt also fails, throws std::bad_alloc.
-	// return value must be deleted via checked_aligned_free().
-	static void *checked_aligned_malloc(std::size_t size, std::size_t align)
+	// uses whatever default alignment the stdlib implementation uses (i.e. std::max_align_t).
+	// this is more space-efficient than active alignment, but can only be used for certain types.
+	struct __passive_aligned_allocator
 	{
-		// allocate aligned space for object(s) and info
-		void *buf = GC::aligned_malloc(size, align);
+		static void *alloc(std::size_t size) { return std::malloc(size); }
+		static void dealloc(void *p) { std::free(p); }
+	};
 
-		// if that failed but we have allocfail collect mode enabled
-		if (!buf && (int)strategy() & (int)strategies::allocfail)
+	// actively aligns blocks of memory to the given alignment.
+	// this is less space-efficient than passive alignment, but must be used for over-aligned types.
+	template<std::size_t align>
+	struct __active_aligned_allocator
+	{
+		static void *alloc(std::size_t size) { return GC::aligned_malloc(size, align); }
+		static void dealloc(void *p) { GC::aligned_free(p); }
+	};
+
+	// wrapper for an allocator that additionally performs gc-specific logic
+	template<typename allocator_t>
+	struct __checked_allocator
+	{
+		static void *alloc(std::size_t size)
 		{
-			// collect and retry the allocation
-			GC::collect();
-			buf = GC::aligned_malloc(size, align);
+			// allocate the space
+			void *buf = allocator_t::alloc(size);
+
+			// if that failed but we have allocfail collect mode enabled
+			if (!buf && (int)strategy() & (int)strategies::allocfail)
+			{
+				// collect and retry the allocation
+				GC::collect();
+				buf = allocator_t::alloc(size);
+			}
+
+			// if that failed, throw bad alloc
+			if (!buf) throw std::bad_alloc();
+
+			return buf;
 		}
+		static void dealloc(void *p) { allocator_t::dealloc(p); }
+	};
 
-		// if that failed, throw bad alloc
-		if (!buf) throw std::bad_alloc();
-		
-		return buf;
-	}
+	// given a type T, returns the type of an aligned allocator that will give the most efficient proper alignment.
+	// these functions do not have definitions - they are meant to be used in decltype context.
+	template<std::size_t align, std::enable_if_t<(align <= alignof(std::max_align_t)), int> = 0>
+	static __checked_allocator<__passive_aligned_allocator> __returns_checked_aligned_allocator_type();
 
-	// frees a block of memory allocated by checked_aligned_malloc().
-	static void checked_aligned_free(void *ptr) { GC::aligned_free(ptr); }
+	template<std::size_t align, std::enable_if_t<(align > alignof(std::max_align_t)), int> = 0>
+	static __checked_allocator<__active_aligned_allocator<align>> __returns_checked_aligned_allocator_type();
 
 public: // -- ptr allocation -- //
 
@@ -620,18 +643,21 @@ public: // -- ptr allocation -- //
 		// strip cv qualifiers
 		typedef std::remove_cv_t<T> element_type;
 		
+		// get the allocator
+		typedef decltype(__returns_checked_aligned_allocator_type<std::max(alignof(element_type), alignof(info))>()) allocator_t;
+
 		// -- create the vtable -- //
 
 		static const info_vtable _vtable(
 			[](void *_obj, std::size_t) { reinterpret_cast<element_type*>(_obj)->~element_type(); },
-			GC::checked_aligned_free,
+			allocator_t::dealloc,
 			[](void *_obj, std::size_t, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(_obj), func); }
 		);
 
 		// -- create the buffer for both the object and its info object -- //
 
 		// allocate the buffer space
-		void *const buf = checked_aligned_malloc(sizeof(element_type) + sizeof(info), std::max(alignof(element_type), alignof(info)));
+		void *const buf = allocator_t::alloc(sizeof(element_type) + sizeof(info));
 
 		// alias the buffer partitions
 		element_type *obj = reinterpret_cast<element_type*>(buf);
@@ -642,7 +668,7 @@ public: // -- ptr allocation -- //
 		// try to construct the object
 		try { new (obj) element_type(std::forward<Args>(args)...); }
 		// if that fails, deallocate buf and rethrow
-		catch (...) { GC::checked_aligned_free(buf); throw; }
+		catch (...) { allocator_t::dealloc(buf); throw; }
 
 		// construct the info object
 		new (handle) info(obj, 1, &_vtable);
@@ -681,6 +707,9 @@ public: // -- ptr allocation -- //
 		// get the total number of scalar objects - we'll build the array in terms of scalar entities
 		const std::size_t scalar_count = count * GC::full_extent<T>::value;
 
+		// get the allocator
+		typedef decltype(__returns_checked_aligned_allocator_type<std::max(alignof(scalar_type), alignof(info))>()) allocator_t;
+
 		// -- create the vtable -- //
 
 		static const info_vtable _vtable(
@@ -689,7 +718,7 @@ public: // -- ptr allocation -- //
 				for (std::size_t i = 0; i < _count; ++i)
 					reinterpret_cast<scalar_type*>(_obj)[i].~scalar_type();
 			},
-			GC::checked_aligned_free,
+			allocator_t::dealloc,
 			[](void *_obj, std::size_t _count, GC::router_fn func)
 			{
 				for (std::size_t i = 0; i < _count; ++i)
@@ -700,7 +729,7 @@ public: // -- ptr allocation -- //
 		// -- create the buffer for the objects and their info object -- //
 
 		// allocate the buffer space
-		void *const buf = checked_aligned_malloc(scalar_count * sizeof(scalar_type) + sizeof(info), std::max(alignof(scalar_type), alignof(info)));
+		void *const buf = allocator_t::alloc(scalar_count * sizeof(scalar_type) + sizeof(info));
 
 		// alias the buffer partitions
 		scalar_type *obj = reinterpret_cast<scalar_type*>(buf);
@@ -726,7 +755,7 @@ public: // -- ptr allocation -- //
 			for (std::size_t i = 0; i < constructed_count; ++i) (obj + i)->~scalar_type();
 
 			// deallocate the buffer and rethrow whatever killed us
-			GC::checked_aligned_free(buf);
+			allocator_t::dealloc(buf);
 			throw;
 		}
 
