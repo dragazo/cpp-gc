@@ -298,6 +298,14 @@ int main()
 	yes_arr[2][6][1][5] = 7;
 	****yes_arr = 7;
 
+	//GC::ptr<int[5]> wrong_t;
+	GC::ptr<int[]> right_t;
+
+	typedef int what_is_this[];
+	typedef what_is_this *what_is_this_2;
+
+	std::cerr << "what is this? " << std::is_same<what_is_this_2, int(*)[]>::value << "\n\n";
+
 	/*merp->push_back(GC::make<ListNode>());
 	merp->push_back(GC::make<ListNode>());
 	merp->emplace_back(GC::make<ListNode>());

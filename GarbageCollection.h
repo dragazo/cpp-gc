@@ -89,10 +89,10 @@ private: // -- private types -- //
 		void *const       obj;   // pointer to the managed object
 		const std::size_t count; // the number of elements in obj
 
-		void(*const dtor)(void *_obj, std::size_t _count); // a function to destroy obj
-		void(*const dealloc)(void *_obj);                  // a function to deallocate memory - called after dtor()
+		void(*const _destroy)(void *_obj, std::size_t _count); // a function to destroy obj
+		void(*const _dealloc)(void *_obj);                     // a function to deallocate memory - called after dtor()
 
-		void(*const router)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
+		void(*const _route)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
 
 		std::size_t ref_count = 1;      // the reference count for this allocation
 		bool        destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
@@ -103,9 +103,16 @@ private: // -- private types -- //
 		info *next; // so we need to manage a linked list on our own
 
 		// populates info - ref count starts at 1
-		info(void *_obj, std::size_t _count, void(*_dtor)(void*, std::size_t), void(*_dealloc)(void*), void(*_router)(void*, std::size_t, router_fn))
-			: obj(_obj), count(_count), dtor(_dtor), dealloc(_dealloc), router(_router)
+		info(void *_obj_, std::size_t _count_, void(*_destroy_)(void*, std::size_t), void(*_dealloc_)(void*), void(*_route_)(void*, std::size_t, router_fn))
+			: obj(_obj_), count(_count_), _destroy(_destroy_), _dealloc(_dealloc_), _route(_route_)
 		{}
+
+		// -- helpers -- //
+
+		void destroy() { _destroy(obj, count); }
+		void dealloc() { _dealloc(obj); }
+
+		void route(router_fn func) { _route(obj, count, func); }
 	};
 
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
@@ -161,7 +168,8 @@ private: // -- tuple routing -- //
 
 public: // -- ptr -- //
 
-	// a self-managed garbage-collected pointer
+	// a self-managed garbage-collected pointer to type T.
+	// T may be a scalar type or an unbound array.
 	template<typename T>
 	struct ptr
 	{
@@ -331,6 +339,10 @@ public: // -- ptr -- //
 		friend bool operator>(std::nullptr_t a, const ptr &b) { return a > b.get(); }
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
+
+	// T may not be a bounded array
+	template<typename T, std::size_t N>
+	struct ptr<T[N]>;
 
 public: // -- ptr casting -- //
 
@@ -621,7 +633,7 @@ public: // -- ptr allocation -- //
 
 			__link(handle); // link the info object
 			res.__init(obj, handle); // initialize ptr with handle
-			handle->router(handle->obj, handle->count, GC::__unroot); // claim this object's children
+			handle->route(GC::__unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
 		}
@@ -697,7 +709,7 @@ public: // -- ptr allocation -- //
 
 			__link(handle); // link the info object
 			res.__init(reinterpret_cast<T*>(obj), handle); // initialize ptr with handle
-			handle->router(handle->obj, handle->count, GC::__unroot); // claim this object's children
+			handle->route(GC::__unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
 		}
