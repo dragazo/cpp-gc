@@ -18,7 +18,18 @@ struct ptr_set
 
 	std::tuple<int, int, int, long, long, int, GC::ptr<int>, int> tuple_thing;
 
-	ptr_set() : val(0) {}
+	GC::ptr<std::unordered_map<std::string, unsigned int>> mapydoo1;
+	GC::ptr<std::unordered_map<std::string, unsigned int>> mapydoo2;
+
+	ptr_set() : val(0)
+	{
+		auto ptr = new std::unordered_map<std::string, unsigned int>;
+		ptr->emplace("hello", 67);
+		ptr->emplace("world", 4765);
+
+		mapydoo1 = GC::adopt(ptr);
+		mapydoo2 = GC::adopt<std::unordered_map<std::string, unsigned int>>(nullptr);
+	}
 };
 template<> struct GC::router<ptr_set>
 {
@@ -38,6 +49,10 @@ template<> struct GC::router<ptr_set>
 		GC::route(set.thingy, func);
 
 		GC::route(set.tuple_thing, func);
+
+		GC::route(set.mapydoo1, func);
+		GC::route(set.mapydoo2, func);
+
 	}
 };
 
@@ -434,6 +449,12 @@ int main()
 
 	std::cerr << "a: " << dp_as_b1->a << '\n';
 	std::cerr << "b: " << dp_as_b2->b << '\n';
+
+	//auto _ii = std::make_unique<int[]>(56);
+	//auto _jj = std::make_shared<int[]>(56);
+	//auto _kk = GC::make<int[]>(56);
+
+	//assert(std::is_same<int,int>::value);
 
 	//GC::ptr<derived> wrong_dp = bp;
 

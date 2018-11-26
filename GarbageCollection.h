@@ -787,6 +787,61 @@ public: // -- ptr allocation -- //
 	template<typename T, std::enable_if_t<GC::is_bound_array<T>::value, int> = 0>
 	static void make() = delete;
 
+	// adopts a pre-existing scalar instance of T this is, after this call, bound to a ptr.
+	// throws any exception resulting from failed memory allocation - in this case the object is deleted.
+	template<typename T, typename Deleter = std::default_delete<T>, std::enable_if_t<!std::is_array<T>::value, int> = 0>
+	static ptr<T> adopt(T *obj)
+	{
+		// -- verification -- //
+
+		// if obj is null, return an null ptr
+		if (!obj) return {};
+
+		// -- normalize T -- //
+
+		// get the allocator
+		typedef decltype(__returns_checked_aligned_allocator_type<alignof(info)>()) allocator_t;
+
+		// -- create the vtable -- //
+
+		static const info_vtable _vtable(
+			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
+			[](info &handle) { allocator_t::dealloc(&handle); },
+			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); }
+		);
+
+		// -- create the info object for management -- //
+
+		info *handle;
+
+		// allocate the buffer space for the info object
+		try { handle = reinterpret_cast<info*>(allocator_t::alloc(sizeof(info))); }
+		// on failure, delete the object and rethrow whatever killed us
+		catch (...) { Deleter()(obj); throw; }
+
+		// construct the info object
+		new (handle) info(obj, 1, &_vtable);
+
+		// -- do the garbage collection aspects -- //
+
+		ptr<T> res(GC::no_rooting_t{});
+
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
+			__link(handle); // link the info object
+			res.__init(obj, handle); // initialize ptr with handle
+			handle->route(GC::__unroot); // claim this object's children
+
+			__start_timed_collect(); // begin timed collect
+		}
+
+		// return the created ptr
+		return res;
+	}
+
+	
+
 	// triggers a full garbage collection pass.
 	// objects that are not in use will be deleted.
 	// objects that are in use will not be moved (i.e. pointers will still be valid).
