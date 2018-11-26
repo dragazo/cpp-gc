@@ -81,15 +81,17 @@ public: // -- outgoing arcs -- //
 
 private: // -- private types -- //
 
+	struct info;
+
 	// the virtual function table type for info objects.
 	struct info_vtable
 	{
-		void(*const destroy)(void *_obj, std::size_t _count); // a function to destroy the object
-		void(*const dealloc)(void *_obj);                     // a function to deallocate memory - called after destroy
+		void(*const destroy)(info&); // a function to destroy the object
+		void(*const dealloc)(info&); // a function to deallocate memory - called after destroy
 
-		void(*const route)(void *_obj, std::size_t _count, router_fn); // a router function to use for this object
+		void(*const route)(info&, router_fn); // a router function to use for this object
 
-		info_vtable(void(*_destroy)(void*, std::size_t), void(*_dealloc)(void*), void(*_route)(void*, std::size_t, router_fn))
+		info_vtable(void(*_destroy)(info&), void(*_dealloc)(info&), void(*_route)(info&, router_fn))
 			: destroy(_destroy), dealloc(_dealloc), route(_route)
 		{}
 	};
@@ -112,17 +114,17 @@ private: // -- private types -- //
 		info *prev; // the std::list iterator contract isn't quite what we want
 		info *next; // so we need to manage a linked list on our own
 
-		// populates info - ref count starts at 1
+		// populates info - ref count starts at 1 - prev/next are undefined
 		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
 			: obj(_obj), count(_count), vtable(_vtable)
 		{}
 
 		// -- helpers -- //
 
-		void destroy() { vtable->destroy(obj, count); }
-		void dealloc() { vtable->dealloc(obj); }
+		void destroy() { vtable->destroy(*this); }
+		void dealloc() { vtable->dealloc(*this); }
 
-		void route(router_fn func) { vtable->route(obj, count, func); }
+		void route(router_fn func) { vtable->route(*this, func); }
 	};
 
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
@@ -649,9 +651,9 @@ public: // -- ptr allocation -- //
 		// -- create the vtable -- //
 
 		static const info_vtable _vtable(
-			[](void *_obj, std::size_t) { reinterpret_cast<element_type*>(_obj)->~element_type(); },
-			allocator_t::dealloc,
-			[](void *_obj, std::size_t, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(_obj), func); }
+			[](info &handle) { reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
+			[](info &handle) { allocator_t::dealloc(handle.obj); },
+			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); }
 		);
 
 		// -- create the buffer for both the object and its info object -- //
@@ -713,16 +715,16 @@ public: // -- ptr allocation -- //
 		// -- create the vtable -- //
 
 		static const info_vtable _vtable(
-			[](void *_obj, std::size_t _count)
+			[](info &handle)
 			{
-				for (std::size_t i = 0; i < _count; ++i)
-					reinterpret_cast<scalar_type*>(_obj)[i].~scalar_type();
+				for (std::size_t i = 0; i < handle.count; ++i)
+					reinterpret_cast<scalar_type*>(handle.obj)[i].~scalar_type();
 			},
-			allocator_t::dealloc,
-			[](void *_obj, std::size_t _count, GC::router_fn func)
+			[](info &handle) { allocator_t::dealloc(handle.obj); },
+			[](info &handle, GC::router_fn func)
 			{
-				for (std::size_t i = 0; i < _count; ++i)
-					GC::route(reinterpret_cast<scalar_type*>(_obj)[i], func);
+				for (std::size_t i = 0; i < handle.count; ++i)
+					GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func);
 			}
 		);
 
