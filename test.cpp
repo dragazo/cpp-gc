@@ -270,7 +270,7 @@ template<> struct GC::router<MaybeTreeNode>
 };
 
 
-
+#define COMMA ,
 
 
 int main()
@@ -281,6 +281,37 @@ int main()
 	assert(arr_ptr_new != nullptr);
 
 	GC::collect();
+
+
+	GC::ptr<int[6]> arr_test_0;
+	GC::ptr<int[5][6]> arr_test_1;
+	GC::ptr<int[][6]> arr_test_2;
+	GC::ptr<int[][5][6]> arr_test_3;
+	GC::ptr<int[]> arr_test_4;
+
+	GC::ptr<int> sc_test_0;
+
+	GC::reinterpretCast<int[]>(arr_test_0);
+	GC::reinterpretCast<double[]>(arr_test_0);
+	GC::constCast<const int[6]>(arr_test_0);
+	GC::constCast<const int[]>(arr_test_4);
+	GC::staticCast<const int[]>(arr_test_4);
+	//GC::staticCast<const double[]>(arr_test_4);
+	//GC::dynamicCast<const int>(arr_test_4);
+
+	GC::staticCast<const int>(sc_test_0);
+
+	{
+		int *_t = nullptr;
+		const int *c_t = static_cast<const int*>(_t);
+	}
+
+	assert(std::is_same<decltype(arr_test_0.get()) COMMA int(*)[6]>::value);
+	assert(std::is_same<decltype(arr_test_1.get()) COMMA int(*)[5][6]>::value);
+	assert(std::is_same<decltype(arr_test_2.get()) COMMA int(*)[6]>::value);
+	assert(std::is_same<decltype(arr_test_3.get()) COMMA int(*)[5][6]>::value);
+	assert(std::is_same<decltype(arr_test_4.get()) COMMA int(*)>::value);
+
 
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 

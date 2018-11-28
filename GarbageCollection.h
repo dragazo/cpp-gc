@@ -240,6 +240,17 @@ public: // -- ptr -- //
 			handle = _handle;
 		}
 
+		// constructs a new ptr instance with the specified obj and handle.
+		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
+		// INCREMENTS THE REF COUNT on handle (if non-null).
+		ptr(element_type *_obj, info *_handle) : obj(_obj), handle(_handle)
+		{
+			std::lock_guard<std::mutex> lock(GC::mutex);
+
+			GC::__root(handle);
+			if (handle) GC::__addref(handle);
+		}
+
 	public: // -- ctor / dtor / asgn -- //
 
 		// creates an empty ptr (null)
@@ -352,86 +363,29 @@ public: // -- ptr -- //
 
 public: // -- ptr casting -- //
 
-	template<typename To, typename From>
+	template<typename To, typename From, std::enable_if_t<std::is_convertible<From, To>::value || std::is_same<std::remove_cv_t<To>, std::remove_cv_t<From>>::value, int> = 0>
 	static ptr<To> staticCast(const GC::ptr<From> &p)
 	{
-		// perform the cast
-		To *obj = static_cast<To*>(p.obj);
-
-		// create a ptr to it
-		ptr<To> res(no_rooting_t{});
-
-		// link it to the object
-		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-			res.__init(obj, p.handle);
-			__addref(p.handle); // init doesn't inc the ref count for us
-		}
-
-		return res;
+		return p.obj ? ptr<To>(static_cast<typename ptr<To>::element_type*>(p.obj), p.handle) : ptr<To>();
 	}
 
-	template<typename To, typename From>
+	template<typename To, typename From, std::enable_if_t<std::is_polymorphic<From>::value, int> = 0>
 	static ptr<To> dynamicCast(const GC::ptr<From> &p)
 	{
-		// perform the dynamic cast
 		To *obj = dynamic_cast<To*>(p.obj);
-
-		// if it's non-null
-		if (obj)
-		{
-			// create a ptr to it
-			ptr<To> res(no_rooting_t{});
-
-			// link it to the object
-			{
-				std::lock_guard<std::mutex> lock(GC::mutex);
-				res.__init(obj, p.handle);
-				__addref(p.handle); // init doesn't inc the ref count for us
-			}
-
-			return res;
-		}
-		// otherwise return null ptr
-		else return {};
+		return obj ? ptr<To>(obj, p.handle) : ptr<To>();
 	}
 
-	template<typename To, typename From>
+	template<typename To, typename From, std::enable_if_t<std::is_same<std::remove_cv_t<To>, std::remove_cv_t<From>>::value, int> = 0>
 	static ptr<To> constCast(const GC::ptr<From> &p)
 	{
-		// perform the cast
-		To *obj = const_cast<To*>(p.obj);
-
-		// create a ptr to it
-		ptr<To> res(no_rooting_t{});
-
-		// link it to the object
-		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-			res.__init(obj, p.handle);
-			__addref(p.handle); // init doesn't inc the ref count for us
-		}
-
-		return res;
+		return ptr<To>(const_cast<typename ptr<To>::element_type*>(p.obj), p.handle);
 	}
 
 	template<typename To, typename From>
 	static ptr<To> reinterpretCast(const GC::ptr<From> &p)
 	{
-		// perform the cast
-		To *obj = reinterpret_cast<To*>(p.obj);
-
-		// create a ptr to it
-		ptr<To> res(no_rooting_t{});
-
-		// link it to the object
-		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-			res.__init(obj, p.handle);
-			__addref(p.handle); // init doesn't inc the ref count for us
-		}
-
-		return res;
+		return ptr<To>(reinterpret_cast<typename ptr<To>::element_type*>(p.obj), p.handle);
 	}
 
 public: // -- core router specializations -- //
