@@ -21,6 +21,9 @@ struct ptr_set
 	GC::ptr<std::unordered_map<std::string, unsigned int>> mapydoo1;
 	GC::ptr<std::unordered_map<std::string, unsigned int>> mapydoo2;
 
+	GC::ptr<int[]> doodle_dud_0;
+	GC::ptr<int[]> doodle_dud_1;
+
 	ptr_set() : val(0)
 	{
 		auto ptr = new std::unordered_map<std::string, unsigned int>;
@@ -29,6 +32,9 @@ struct ptr_set
 
 		mapydoo1 = GC::adopt(ptr);
 		mapydoo2 = GC::adopt<std::unordered_map<std::string, unsigned int>>(nullptr);
+
+		doodle_dud_0 = GC::adopt(new int[1024], 1024);
+		doodle_dud_0 = GC::adopt(new int[2048], 2048);
 	}
 };
 template<> struct GC::router<ptr_set>
@@ -52,6 +58,9 @@ template<> struct GC::router<ptr_set>
 
 		GC::route(set.mapydoo1, func);
 		GC::route(set.mapydoo2, func);
+
+		GC::route(set.doodle_dud_0, func);
+		GC::route(set.doodle_dud_1, func);
 
 	}
 };
