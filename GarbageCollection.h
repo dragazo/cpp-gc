@@ -126,7 +126,7 @@ private: // -- private types -- //
 
 		void route(router_fn func) { vtable->route(*this, func); }
 	};
-
+	
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
 	struct no_rooting_t {};
 
@@ -158,6 +158,21 @@ private: // -- array typing helpers -- //
 	template<typename T, std::size_t N>
 	struct is_bound_array<T[N]> : std::true_type {};
 
+	// stips off the top level of unbound array (bound is not stripped)
+	template<typename T>
+	struct remove_unbound_extent { typedef T type; };
+	template<typename T>
+	struct remove_unbound_extent<T[]> { typedef T type; };
+
+	// strips off the top level of bound array (unbound is not stripped)
+	template<typename T>
+	struct remove_bound_extent { typedef T type; };
+	template<typename T, std::size_t N>
+	struct remove_bound_extent<T[N]> { typedef T type; };
+
+	template<typename T> using remove_unbound_extent_t = typename remove_unbound_extent<T>::type;
+	template<typename T> using remove_bound_extent_t = typename remove_bound_extent<T>::type;
+
 public: // -- ptr -- //
 
 	// a self-managed garbage-collected pointer to type T.
@@ -168,7 +183,7 @@ public: // -- ptr -- //
 	public: // -- types -- //
 
 		// type of element stored
-		typedef std::remove_extent_t<T> element_type;
+		typedef GC::remove_unbound_extent_t<T> element_type;
 
 	private: // -- data -- //
 
@@ -216,6 +231,7 @@ public: // -- ptr -- //
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, creates a valid, but empty ptr.
 		// GC::mutex must be locked prior to invocation.
+		// DOES NOT INC THE REF COUNT!!
 		void __init(element_type *_obj, GC::info *_handle)
 		{
 			GC::__root(handle);
@@ -288,15 +304,17 @@ public: // -- ptr -- //
 		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
 		element_type *get() const { return obj; }
 
-		// accesses an item in an array. only defined if T is an array type.
-		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && std::is_array<J>::value, int> = 0>
-		element_type &operator[](std::ptrdiff_t index) const { return get()[index]; }
-
 		element_type &operator*() const { return *get(); }
 		element_type *operator->() const { return get(); }
 
 		// returns true iff this ptr points to a managed object (non-null)
 		explicit operator bool() const { return get() != nullptr; }
+
+	public: // -- array obj access -- //
+
+		// accesses an item in an array. only defined if T is an array type.
+		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
+		element_type &operator[](std::ptrdiff_t index) const { return get()[index]; }
 
 	public: // -- misc -- //
 
@@ -332,10 +350,6 @@ public: // -- ptr -- //
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
 	};
 
-	// T may not be a bounded array
-	template<typename T, std::size_t N>
-	struct ptr<T[N]>;
-
 public: // -- ptr casting -- //
 
 	template<typename To, typename From>
@@ -351,6 +365,7 @@ public: // -- ptr casting -- //
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 			res.__init(obj, p.handle);
+			__addref(p.handle); // init doesn't inc the ref count for us
 		}
 
 		return res;
@@ -372,6 +387,7 @@ public: // -- ptr casting -- //
 			{
 				std::lock_guard<std::mutex> lock(GC::mutex);
 				res.__init(obj, p.handle);
+				__addref(p.handle); // init doesn't inc the ref count for us
 			}
 
 			return res;
@@ -393,6 +409,7 @@ public: // -- ptr casting -- //
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 			res.__init(obj, p.handle);
+			__addref(p.handle); // init doesn't inc the ref count for us
 		}
 
 		return res;
@@ -411,6 +428,7 @@ public: // -- ptr casting -- //
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
 			res.__init(obj, p.handle);
+			__addref(p.handle); // init doesn't inc the ref count for us
 		}
 
 		return res;
@@ -635,7 +653,7 @@ private: // -- aligned raw memory allocators -- //
 
 public: // -- ptr allocation -- //
 
-	// creates a new dynamic scalar instance of T that is bound to a ptr.
+	// creates a new dynamic instance of T that is bound to a ptr.
 	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
 	template<typename T, typename ...Args, std::enable_if_t<!std::is_array<T>::value, int> = 0>
 	static ptr<T> make(Args &&...args)
@@ -764,7 +782,7 @@ public: // -- ptr allocation -- //
 		// construct the info object
 		new (handle) info(obj, scalar_count, &_vtable);
 		
-		// -- do the garbage collection asspects -- //
+		// -- do the garbage collection aspects -- //
 
 		ptr<T> res(GC::no_rooting_t{});
 
@@ -784,8 +802,14 @@ public: // -- ptr allocation -- //
 		return res;
 	}
 
+	// creates a new dynamic instance of T that is bound to a ptr.
+	// throws any exception resulting from any T's constructor but does not leak resources if this occurs.
 	template<typename T, std::enable_if_t<GC::is_bound_array<T>::value, int> = 0>
-	static void make() = delete;
+	static ptr<T> make()
+	{
+		// create it with the dynamic array form and reinterpret it to normal array form
+		return reinterpretCast<T>(make<std::remove_extent_t<T>[]>(std::extent<T>::value));
+	}
 
 	// adopts a pre-existing scalar instance of T that is, after this call, bound to a ptr.
 	// throws any exception resulting from failed memory allocation - in this case the object is deleted.

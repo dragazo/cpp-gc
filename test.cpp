@@ -277,6 +277,11 @@ int main()
 {
 	GC::strategy(GC::strategies::manual);
 
+	GC::ptr<int[16]> arr_ptr_new = GC::make<int[16]>();
+	assert(arr_ptr_new != nullptr);
+
+	GC::collect();
+
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
     {
@@ -402,6 +407,8 @@ int main()
 	std::shared_ptr<double> otest1 = nullptr;
 	std::unique_ptr<double> _otest2;
 	std::unique_ptr<double> otest2 = nullptr;
+
+	
 
 	GC::ptr<derived> dp = GC::make<derived>();
 	GC::ptr<base1> bp1 = GC::make<base1>();
