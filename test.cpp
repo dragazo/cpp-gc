@@ -273,6 +273,14 @@ template<> struct GC::router<MaybeTreeNode>
 #define COMMA ,
 
 
+struct alert_t
+{
+	alert_t() { std::cerr << "ctor\n"; }
+	~alert_t() { std::cerr << "dtor\n"; }
+};
+
+
+
 int main()
 {
 	GC::strategy(GC::strategies::manual);
@@ -281,6 +289,18 @@ int main()
 	assert(arr_ptr_new != nullptr);
 
 	GC::collect();
+
+	std::cerr << "\n----------------\n";
+	{
+		GC::ptr<alert_t> holder;
+
+		{
+			auto arr = GC::make<alert_t[]>(4);
+			holder = arr.get(2);
+		}
+		std::cerr << "destroyed array\n";
+	}
+	std::cerr << "----------------\n\n";;
 
 
 	GC::ptr<int[6]> arr_test_0;

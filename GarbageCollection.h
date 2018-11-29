@@ -130,7 +130,7 @@ private: // -- private types -- //
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
 	struct no_rooting_t {};
 
-public: // -- extent extensions -- //
+private: // -- extent extensions -- //
 
 	// gets the full (total) extent of a potentially multi-dimensional array.
 	// for scalar types this is 1.
@@ -324,8 +324,15 @@ public: // -- ptr -- //
 	public: // -- array obj access -- //
 
 		// accesses an item in an array. only defined if T is an array type.
+		// undefined behavior if index is out of bounds.
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
 		element_type &operator[](std::ptrdiff_t index) const { return get()[index]; }
+
+		// returns a ptr to an item in an array. only defined if T is an array type.
+		// the returned ptr is an owner of the entire array, so the array will not be deallocated while it exists.
+		// undefined behavior if index is out of bounds.
+		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
+		ptr<element_type> get(std::ptrdiff_t index) const { return {get() + index, handle}; }
 
 	public: // -- misc -- //
 
