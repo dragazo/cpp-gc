@@ -13,6 +13,7 @@ Contents:
 * [Router Functions](#router-functions)
 * [Built-in Router Functions](#built-in-router-functions)
 * [Example Structs and Router Functions](#example-structs-and-router-functions)
+* [Undefined Behavior](#undefined-behavior)
 * [Usage Examples](#usage-examples)
 * [Best Practices](#best-practices)
 
@@ -257,6 +258,15 @@ template<> struct GC::router<MaybeTreeNode>
     }
 };
 ```
+
+## Undefined Behavior
+
+In this section, we'll cover all the cases that result in undefined behavior and summarize the logic behind these decisions.
+
+* Dereferencing/Indexing a null ptr - obvious.
+* Not routing to all your owned objects - messes up reachability traversal and can result in prematurely-deleted objects.
+* Not making your router function mutually explusive with re-pointing or adding/removing/etc things you would route to - explained in immense detail above.
+* Accessing the pointed-to object of a ptr<T> in the destructor of its (potentially-indirect) owner - you and the pointed-to object might have been scheduled for garbage collection together, so it might already have been destroyed.
 
 ## Usage Examples
 
