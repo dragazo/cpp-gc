@@ -288,6 +288,7 @@ int main()
 	GC::ptr<int[][6]> arr_test_2;
 	GC::ptr<int[][5][6]> arr_test_3;
 	GC::ptr<int[]> arr_test_4;
+	GC::ptr<virtual_type> arr_test_5;
 
 	GC::ptr<int> sc_test_0;
 
@@ -298,6 +299,7 @@ int main()
 	GC::staticCast<const int[]>(arr_test_4);
 	//GC::staticCast<const double[]>(arr_test_4);
 	//GC::dynamicCast<const int>(arr_test_4);
+	//GC::dynamicCast<int[]>(arr_test_5);
 
 	GC::staticCast<const int>(sc_test_0);
 

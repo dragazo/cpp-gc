@@ -369,10 +369,10 @@ public: // -- ptr casting -- //
 		return p.obj ? ptr<To>(static_cast<typename ptr<To>::element_type*>(p.obj), p.handle) : ptr<To>();
 	}
 
-	template<typename To, typename From, std::enable_if_t<std::is_polymorphic<From>::value, int> = 0>
+	template<typename To, typename From, std::enable_if_t<std::is_polymorphic<From>::value && !std::is_array<To>::value, int> = 0>
 	static ptr<To> dynamicCast(const GC::ptr<From> &p)
 	{
-		To *obj = dynamic_cast<To*>(p.obj);
+		auto obj = dynamic_cast<typename ptr<To>::element_type*>(p.obj);
 		return obj ? ptr<To>(obj, p.handle) : ptr<To>();
 	}
 
