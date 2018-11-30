@@ -996,17 +996,87 @@ private: // -- functions you should never ever call ever. did i mention YOU SHOU
 	static void __timed_collect_func();
 };
 
-// -------------------- //
+// ------------------------- //
 
-// -- misc functions -- //
+// -- std specializations -- //
 
-// -------------------- //
+// ------------------------- //
 
 template<typename T>
 struct std::hash<GC::ptr<T>>
 {
 	std::size_t operator()(const GC::ptr<T> &p) const { return std::hash<T*>()(p.get()); }
 };
+
+// defines an atomic gc ptr
+template<typename T>
+struct std::atomic<GC::ptr<T>>
+{
+private: // -- data -- //
+
+	GC::ptr<T> value;
+	std::mutex mutex;
+
+public: // -- ctor / dtor / asgn -- //
+
+	atomic() = default;
+
+	~atomic() = default;
+
+	atomic(const atomic&) = delete;
+	atomic &operator=(const atomic&) = delete;
+
+public: // -- store / load -- //
+
+	atomic(const GC::ptr<T> &desired) : value(desired) {}
+	atomic &operator=(const GC::ptr<T> &desired)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		value = desired;
+		return *this;
+	}
+
+	void store(const GC::ptr<T> &desired, std::memory_order order = std::memory_order_seq_cst)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		value = desired;
+	}
+
+	GC::ptr<T> load(std::memory_order order = std::memory_order_seq_cst) const
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return value;
+	}
+	operator GC::ptr<T>() const
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return value;
+	}
+
+public: // -- exchange -- //
+
+	GC::ptr<T> exchange(const GC::ptr<T> &desired, std::memory_order order = std::memory_order_seq_cst)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		GC::ptr<T> ret = value;
+		value = desired;
+		return ret;
+	}
+
+	// !! add compare exchange stuff !! //
+
+public: // -- lock info -- //
+
+	static constexpr bool is_always_lock_free = false;
+
+	bool is_lock_free() const noexcept { return is_always_lock_free; }
+};
+
+// -------------------- //
+
+// -- misc functions -- //
+
+// -------------------- //
 
 // outputs the stored pointer to the stream - equivalent to ostr << ptr.get()
 template<typename T, typename U, typename V>

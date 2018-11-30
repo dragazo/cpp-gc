@@ -280,6 +280,8 @@ struct alert_t
 };
 
 
+std::atomic<GC::ptr<int[]>> atomic_gc_ptr;
+
 
 int main()
 {
@@ -534,8 +536,30 @@ int main()
 
 	/**/
 	{
-		std::thread t1([]() { while (1) foo(); });
-		std::thread t2([]() { int i = 0; while (1) { std::cerr << "collecting pass " << ++i << '\n'; GC::collect(); } });
+		std::thread t1([]()
+		{
+			while (1)
+			{
+				atomic_gc_ptr = GC::make<int[]>(65565);
+
+				foo();
+
+				atomic_gc_ptr = GC::make<int[]>(65565);
+			}
+		});
+		std::thread t2([]()
+		{
+			int i = 0;
+			while (1)
+			{
+				atomic_gc_ptr = GC::make<int[]>(65565);
+
+				std::cerr << "collecting pass " << ++i << '\n';
+				GC::collect();
+
+				atomic_gc_ptr = GC::make<int[]>(65565);
+			}
+		});
 		
 		t1.join();
 		t2.join();
