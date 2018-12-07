@@ -115,6 +115,7 @@ The following types have well-formed `GC::router` specializations pre-defined fo
 
 * `T[N]`
 * `std::array<T, N>`
+* `std::atomic<GC::ptr<T>>`
 * `std::deque<T, Allocator>`
 * `std::forward_list<T, Allocator>`
 * `std::list<T, Allocator>`
@@ -134,6 +135,7 @@ The following types have well-formed `GC::router` specializations pre-defined fo
 The following types have ill-formed `GC::router` specializations pre-defined for safety. This is typically because there is no way to route to said type's contents for one reason or another. It is a compile error to use any of these, which should help limit confusion on usage.
 
 * `T[]`
+* `std::atomic<T>` (where T is not a GC::ptr)
 * `std::priority_queue<T, Container, Compare>`
 * `std::queue<T, Container>`
 * `std::stack<T, Container>`

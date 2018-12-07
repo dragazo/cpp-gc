@@ -460,6 +460,13 @@ public: // -- stdlib misc router specializations -- //
 		static void route(const std::tuple<Types...> &tuple, router_fn func) { __tuple_router<sizeof...(Types), Types...>::__route(tuple, func); }
 	};
 
+	template<typename T>
+	struct router<std::atomic<T>>
+	{
+		// ill-formed - we would need to read the atomic's value and if the T in atomic<T> uses a gc function on fetch, we could deadlock.
+		// you can avoid this problem if you can avoid calling any gc functions, in which case feel free to make a valid specialization.
+	};
+
 public: // -- stdlib container router specializations -- //
 
 	// source https://en.cppreference.com/w/cpp/container
@@ -1015,7 +1022,9 @@ struct std::atomic<GC::ptr<T>>
 private: // -- data -- //
 
 	GC::ptr<T> value;
-	std::mutex mutex;
+	mutable std::mutex mutex;
+
+	friend struct GC::router<std::atomic<GC::ptr<T>>>;
 
 public: // -- ctor / dtor / asgn -- //
 
@@ -1070,6 +1079,18 @@ public: // -- lock info -- //
 	static constexpr bool is_always_lock_free = false;
 
 	bool is_lock_free() const noexcept { return is_always_lock_free; }
+};
+
+// an appropriate specialization for atomic (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
+template<typename T>
+struct GC::router<std::atomic<GC::ptr<T>>>
+{
+	static void route(const std::atomic<GC::ptr<T>> &atomic, GC::router_fn func)
+	{
+		// we avoid calling any gc functions by not actually using the load function - we just lock and use the object directly
+		std::lock_guard<std::mutex> lock(atomic.mutex);
+		GC::route(atomic.value, func);
+	}
 };
 
 // -------------------- //
