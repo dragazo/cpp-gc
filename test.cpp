@@ -280,7 +280,7 @@ struct alert_t
 };
 
 
-std::atomic<GC::ptr<int[]>> *atomic_gc_ptr;
+
 
 
 struct atomic_container
@@ -302,6 +302,8 @@ struct GC::router<atomic_container>
 	}
 };
 
+std::atomic<GC::ptr<atomic_container>> *atomic_gc_ptr;
+
 int main()
 {
 	GC::strategy(GC::strategies::manual);
@@ -317,7 +319,7 @@ int main()
 	GC::collect();
 	std::cerr << '\n';
 
-	atomic_gc_ptr = new std::atomic<GC::ptr<int[]>>;
+	atomic_gc_ptr = new std::atomic<GC::ptr<atomic_container>>;
 
 	GC::ptr<int[16]> arr_ptr_new = GC::make<int[16]>();
 	assert(arr_ptr_new != nullptr);
@@ -572,11 +574,38 @@ int main()
 		{
 			while (1)
 			{
-				*atomic_gc_ptr = GC::make<int[]>(65565);
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+
+
+				std::cerr << "--------------------------------------begin segment\n";
+				GC::ptr<atomic_container> _subptr = atomic_gc_ptr->load();
+				std::cerr << "--------------------------------------       subptr get\n";
+				_subptr->atomic_1 = GC::make<double>(1.1);
+				_subptr->atomic_2 = GC::make<double>(2.2);
+				_subptr->atomic_3 = GC::make<double>(3.3);
+				_subptr->atomic_4 = GC::make<double>(4.4);
+
+				//(*atomic_gc_ptr).load()->atomic_1 = GC::make<double>(1.1);
+				//(*atomic_gc_ptr).load()->atomic_2 = GC::make<double>(2.2);
+				//(*atomic_gc_ptr).load()->atomic_3 = GC::make<double>(3.3);
+				//(*atomic_gc_ptr).load()->atomic_4 = GC::make<double>(4.4);
+				std::cerr << "--------------------------------------        end segment\n";
 
 				foo();
 
-				*atomic_gc_ptr = GC::make<int[]>(65565);
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
+				*atomic_gc_ptr = GC::make<atomic_container>();
 			}
 		});
 		std::thread t2([]()
@@ -584,12 +613,14 @@ int main()
 			int i = 0;
 			while (1)
 			{
-				*atomic_gc_ptr = GC::make<int[]>(65565);
+				*atomic_gc_ptr = GC::make<atomic_container>();
+
+
 
 				std::cerr << "collecting pass " << ++i << '\n';
 				GC::collect();
 
-				*atomic_gc_ptr = GC::make<int[]>(65565);
+				*atomic_gc_ptr = GC::make<atomic_container>();
 			}
 		});
 		

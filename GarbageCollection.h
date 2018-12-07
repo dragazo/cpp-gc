@@ -128,7 +128,7 @@ private: // -- private types -- //
 	};
 	
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
-	struct no_rooting_t {};
+	struct no_init_t {};
 
 private: // -- extent extensions -- //
 
@@ -199,7 +199,8 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object of a compatible type (i.e. static or dynamic cast).
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		void reset(element_type *_obj, GC::info *_handle)
+		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list() AFTER THE LOCK ON GC::mutex IS RELEASED.
+		bool __reset(element_type *_obj, GC::info *_handle)
 		{
 			// repoint to the proper object
 			obj = _obj;
@@ -209,35 +210,44 @@ public: // -- ptr -- //
 			{
 				bool call_handle_del_list = false;
 
-				{
-					std::lock_guard<std::mutex> lock(GC::mutex);
+				// drop our object
+				if (handle) call_handle_del_list = GC::__delref(handle);
 
-					// drop our object
-					if (handle) call_handle_del_list = GC::__delref(handle);
+				// take on other's object
+				handle = _handle;
+				if (handle) GC::__addref(handle);
 
-					// take on other's object
-					handle = _handle;
-					if (handle) GC::__addref(handle);
-				}
-
-				// after a call to __delref we must call handle_del_list()
-				if (call_handle_del_list) GC::handle_del_list();
+				return call_handle_del_list;
 			}
+			else return false;
+		}
+		// as __reset but begins by locking GC::mutex. additionally, internally handles the return value flag (see above).
+		void reset(element_type *_obj, GC::info *_handle)
+		{
+			bool call_handle_del_list = false;
+
+			{
+				std::lock_guard<std::mutex> lock(GC::mutex);
+				call_handle_del_list = __reset(_obj, _handle);
+			}
+
+			if (call_handle_del_list) GC::handle_del_list();
 		}
 
-		// creates an empty ptr but DOES NOT ROOT THE INTERNAL HANDLE
-		explicit ptr(GC::no_rooting_t) : obj(nullptr), handle(nullptr) {}
-		// must be used after the no_rooting_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE.
+		// creates an empty ptr but does no initialization (e.g. DOES NOT ROOT THE INTERNAL HANDLE)
+		explicit ptr(GC::no_init_t) : obj(nullptr), handle(nullptr) {}
+		// must be used after the no_init_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE.
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, creates a valid, but empty ptr.
 		// GC::mutex must be locked prior to invocation.
 		// DOES NOT INC THE REF COUNT!!
 		void __init(element_type *_obj, GC::info *_handle)
 		{
-			GC::__root(handle);
-
+			// initialize pointers before rooting so we always point at something valid while under gc control
 			obj = _obj;
 			handle = _handle;
+
+			GC::__root(handle);
 		}
 
 		// constructs a new ptr instance with the specified obj and handle.
@@ -304,7 +314,7 @@ public: // -- ptr -- //
 		}
 
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
-		ptr &operator=(const ptr &other) { reset(other.obj, other.handle);	return *this; }
+		ptr &operator=(const ptr &other) { reset(other.obj, other.handle); return *this; }
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
 		ptr &operator=(const ptr<J> &other) { reset(static_cast<element_type*>(other.obj), other.handle); return *this; }
 
@@ -366,6 +376,105 @@ public: // -- ptr -- //
 		friend bool operator<=(std::nullptr_t a, const ptr &b) { return a <= b.get(); }
 		friend bool operator>(std::nullptr_t a, const ptr &b) { return a > b.get(); }
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
+	};
+
+	// defines an atomic gc ptr
+	template<typename T>
+	struct atomic_ptr
+	{
+	private: // -- data -- //
+
+		GC::ptr<T> value;
+
+		friend struct GC::router<atomic_ptr<T>>;
+
+	public: // -- ctor / dtor / asgn -- //
+
+		atomic_ptr() = default;
+
+		~atomic_ptr() = default;
+
+		atomic_ptr(const atomic_ptr&) = delete;
+		atomic_ptr &operator=(const atomic_ptr&) = delete;
+
+	public: // -- store / load -- //
+
+		atomic_ptr(const GC::ptr<T> &desired) : value(desired) {}
+		atomic_ptr &operator=(const GC::ptr<T> &desired)
+		{
+			// assignment calls reset(), which is already atomic due to locking GC::mutex
+			value = desired;
+			return *this;
+		}
+
+		void store(const GC::ptr<T> &desired)
+		{
+			// assignment calls reset(), which is already atomic due to locking GC::mutex
+			value = desired;
+		}
+		GC::ptr<T> load() const
+		{
+			GC::ptr<T> ret(GC::no_init_t{});
+
+			{
+				std::lock_guard<std::mutex> lock(GC::mutex);
+				ret.__init(nullptr, nullptr);
+
+				// we can ignore the return value because ret is always null prior to this call
+				ret.__reset(value.obj, value.handle);
+			}
+
+			return ret;
+		}
+
+		operator GC::ptr<T>() const
+		{
+			return load();
+		}
+
+	public: // -- exchange -- //
+
+		GC::ptr<T> exchange(const GC::ptr<T> &desired)
+		{
+			// not using lock_guard because we need special lock behavior - see below
+			std::unique_lock<std::mutex> lock(GC::mutex);
+
+			GC::ptr<T> ret(GC::no_init_t{});
+			ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
+
+			bool call_handle_del_list = false;
+
+			if (ret.__reset(value.obj, value.handle)) call_handle_del_list = true;
+			if (value.__reset(desired.obj, desired.handle)) call_handle_del_list = true;
+
+			// unlock early because we need to do other stuff like call GC::handle_del_list() and ptr ctors/dtors
+			lock.unlock();
+
+			// handle __reset return value flag (see __reset() comments).
+			if (call_handle_del_list) GC::handle_del_list();
+
+			return ret;
+		}
+
+		// !! add compare exchange stuff !! //
+
+	public: // -- lock info -- //
+
+		static constexpr bool is_always_lock_free = false;
+
+		bool is_lock_free() const noexcept { return is_always_lock_free; }
+	};
+
+	// an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
+	template<typename T>
+	struct router<atomic_ptr<GC::ptr<T>>>
+	{
+		static void route(const atomic_ptr<T> &atomic, GC::router_fn func)
+		{
+			// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
+			// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
+			GC::route(atomic.value, func);
+		}
 	};
 
 public: // -- ptr casting -- //
@@ -663,7 +772,7 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		ptr<T> res(GC::no_rooting_t{});
+		ptr<T> res(GC::no_init_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
@@ -752,7 +861,7 @@ public: // -- ptr allocation -- //
 		
 		// -- do the garbage collection aspects -- //
 
-		ptr<T> res(GC::no_rooting_t{});
+		ptr<T> res(GC::no_init_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
@@ -817,7 +926,7 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		ptr<T> res(GC::no_rooting_t{});
+		ptr<T> res(GC::no_init_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
@@ -871,7 +980,7 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		ptr<T[]> res(GC::no_rooting_t{});
+		ptr<T[]> res(GC::no_init_t{});
 
 		{
 			std::lock_guard<std::mutex> lock(GC::mutex);
@@ -986,7 +1095,7 @@ private: // -- private interface -- //
 	// instead of destroying the object immediately when the ref count reaches zero, adds it to del_list.
 	// returns true iff the object was scheduled for destruction in del_list.
 	static bool __delref(info *handle);
-
+	
 	// handles actual deletion of any objects scheduled for deletion if del_list.
 	static void handle_del_list();
 
@@ -1015,14 +1124,13 @@ struct std::hash<GC::ptr<T>>
 	std::size_t operator()(const GC::ptr<T> &p) const { return std::hash<T*>()(p.get()); }
 };
 
-// defines an atomic gc ptr
+// standard wrapper for atomic_ptr
 template<typename T>
 struct std::atomic<GC::ptr<T>>
 {
 private: // -- data -- //
 
-	GC::ptr<T> value;
-	mutable std::mutex mutex;
+	GC::atomic_ptr<T> value;
 
 	friend struct GC::router<std::atomic<GC::ptr<T>>>;
 
@@ -1038,57 +1146,34 @@ public: // -- ctor / dtor / asgn -- //
 public: // -- store / load -- //
 
 	atomic(const GC::ptr<T> &desired) : value(desired) {}
-	atomic &operator=(const GC::ptr<T> &desired)
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		value = desired;
-		return *this;
-	}
+	atomic &operator=(const GC::ptr<T> &desired) { value = desired; return *this; }
 
-	void store(const GC::ptr<T> &desired, std::memory_order order = std::memory_order_seq_cst)
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		value = desired;
-	}
+	void store(const GC::ptr<T> &desired) { value.store(desired); }
+	GC::ptr<T> load() const { return value.load(); }
 
-	GC::ptr<T> load(std::memory_order order = std::memory_order_seq_cst) const
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		return value;
-	}
-	operator GC::ptr<T>() const
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		return value;
-	}
+	operator GC::ptr<T>() const { return static_cast<GC::ptr<T>>(value); }
 
 public: // -- exchange -- //
 
-	GC::ptr<T> exchange(const GC::ptr<T> &desired, std::memory_order order = std::memory_order_seq_cst)
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		GC::ptr<T> ret = value;
-		value = desired;
-		return ret;
-	}
+	GC::ptr<T> exchange(const GC::ptr<T> &desired) { return value.exchange(desired); }
 
 	// !! add compare exchange stuff !! //
 
 public: // -- lock info -- //
 
-	static constexpr bool is_always_lock_free = false;
+	static constexpr bool is_always_lock_free = GC::atomic_ptr<T>::is_always_lock_free;
 
 	bool is_lock_free() const noexcept { return is_always_lock_free; }
 };
 
-// an appropriate specialization for atomic (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
+// an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
 template<typename T>
 struct GC::router<std::atomic<GC::ptr<T>>>
 {
 	static void route(const std::atomic<GC::ptr<T>> &atomic, GC::router_fn func)
 	{
-		// we avoid calling any gc functions by not actually using the load function - we just lock and use the object directly
-		std::lock_guard<std::mutex> lock(atomic.mutex);
+		// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
+		// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
 		GC::route(atomic.value, func);
 	}
 };
