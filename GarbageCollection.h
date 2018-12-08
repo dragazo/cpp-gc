@@ -69,15 +69,31 @@ public: // -- outgoing arcs -- //
 	template<typename T>
 	struct router { static void route(const T &obj, router_fn func) {} };
 
-	// routes obj into func recursively.
-	// you should use this function for routing in router<T>::route() definitions (rather than direct use of router<T>::route()).
+	// recursively routes to obj - SHOUD ONLY BE USED IN ROUTER SPECIALIZATIONS
 	template<typename T>
-	static void route(const T &obj, router_fn func) { router<std::remove_cv_t<T>>::route(obj, func); }
+	static void route(const T &obj, router_fn func) { GC::router<std::remove_cv_t<T>>::route(obj, func); }
 
-	// routes each element in an iterator range into func recursively.
-	// like route(), this function is safe to use directly - DO NOT USE router<T>::route() DIRECTLY
+	// recursively routes to each object in an iteration range - SHOULD ONLY BE USED IN ROUTER SPECIALIZATIONS
 	template<typename IterBegin, typename IterEnd>
 	static void route_range(IterBegin begin, IterEnd end, router_fn func) { for (; begin != end; ++begin) GC::route(*begin, func); }
+
+public: // -- outgoing arcs optimization paths -- //
+
+	// mutable_router routes to all the mutable targets of a router specialization (i.e. when you would route to an object's contents but the contents may change).
+	// this function is meant to cut down on unnecessary routing during garbage collection passes, and is thus purely an optimization mechanism.
+	// THE DEFAULT IMPLEMENTATION JUST CALLS THE NORMAL ROUTER FUNCTION AND IS SUITABLE FOR ANY TYPE, REGARDLESS OF CONTENTS.
+	// SPECIALIZATIONS SHOULD USE GC::mutable_route() and GC::mutable_route_range() inside said specializations for this function.
+	// the things routed to by this function should be a subset of what's routed to by the normal router function - specifically only mutable targets.
+	template<typename T>
+	struct mutable_router { static void mutable_route(const T &obj, router_fn func) { GC::route(obj, func); } };
+
+	// recursively routes to obj's mutable contents - SHOULD ONLY BE USED IN MUTABLE_ROUTER SPECIALIZATIONS
+	template<typename T>
+	static void mutable_route(const T &obj, router_fn func) { GC::mutable_router<std::remove_cv_t<T>>::mutable_route(obj, func); }
+
+	// recursively routes to each object's mutable contents in an iterator range - SHOULD ONLY BE USED IN MUTABLE_ROUTER SPECIALIZATIONS
+	template<typename IterBegin, typename IterEnd>
+	static void mutable_route_range(IterBegin begin, IterEnd end, router_fn func) { for (; begin != end; ++begin) GC::mutable_route(*begin, func); }
 
 private: // -- private types -- //
 
@@ -89,10 +105,11 @@ private: // -- private types -- //
 		void(*const destroy)(info&); // a function to destroy the object
 		void(*const dealloc)(info&); // a function to deallocate memory - called after destroy
 
-		void(*const route)(info&, router_fn); // a router function to use for this object
+		void(*const route)(info&, router_fn);         // a router function to use for this object
+		void(*const mutable_route)(info&, router_fn); // a mutable router function to use for this object
 
-		info_vtable(void(*_destroy)(info&), void(*_dealloc)(info&), void(*_route)(info&, router_fn))
-			: destroy(_destroy), dealloc(_dealloc), route(_route)
+		info_vtable(void(*_destroy)(info&), void(*_dealloc)(info&), void(*_route)(info&, router_fn), void(*_mutable_route)(info&, router_fn))
+			: destroy(_destroy), dealloc(_dealloc), route(_route), mutable_route(_mutable_route)
 		{}
 	};
 
@@ -125,6 +142,7 @@ private: // -- private types -- //
 		void dealloc() { vtable->dealloc(*this); }
 
 		void route(router_fn func) { vtable->route(*this, func); }
+		void mutable_route(router_fn func) { vtable->mutable_route(*this, func); }
 	};
 	
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
@@ -771,7 +789,8 @@ public: // -- ptr allocation -- //
 		static const info_vtable _vtable(
 			[](info &handle) { reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
 			[](info &handle) { allocator_t::dealloc(handle.obj); },
-			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); }
+			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); },
+			[](info &handle, GC::router_fn func) { GC::mutable_route(*reinterpret_cast<element_type*>(handle.obj), func); }
 		);
 
 		// -- create the buffer for both the object and its info object -- //
@@ -833,17 +852,10 @@ public: // -- ptr allocation -- //
 		// -- create the vtable -- //
 
 		static const info_vtable _vtable(
-			[](info &handle)
-			{
-				for (std::size_t i = 0; i < handle.count; ++i)
-					reinterpret_cast<scalar_type*>(handle.obj)[i].~scalar_type();
-			},
+			[](info &handle) { for (std::size_t i = 0; i < handle.count; ++i) reinterpret_cast<scalar_type*>(handle.obj)[i].~scalar_type(); },
 			[](info &handle) { allocator_t::dealloc(handle.obj); },
-			[](info &handle, GC::router_fn func)
-			{
-				for (std::size_t i = 0; i < handle.count; ++i)
-					GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func);
-			}
+			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); },
+			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::mutable_route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); }
 		);
 
 		// -- create the buffer for the objects and their info object -- //
@@ -932,7 +944,8 @@ public: // -- ptr allocation -- //
 		static const info_vtable _vtable(
 			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
 			[](info &handle) { allocator_t::dealloc(&handle); },
-			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); }
+			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); },
+			[](info &handle, GC::router_fn func) { GC::mutable_route(*reinterpret_cast<T*>(handle.obj), func); }
 		);
 
 		// -- create the info object for management -- //
@@ -986,7 +999,8 @@ public: // -- ptr allocation -- //
 		static const info_vtable _vtable(
 			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
 			[](info &handle) { allocator_t::dealloc(&handle); },
-			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); }
+			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); },
+			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::mutable_route(reinterpret_cast<T*>(handle.obj)[i], func); }
 		);
 
 		// -- create the info object for management -- //

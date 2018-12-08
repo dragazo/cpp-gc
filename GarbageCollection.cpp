@@ -206,7 +206,8 @@ void GC::collect()
 			i->marked = false;
 
 			// claim its children (see above comment)
-			i->route(GC::__unroot);
+			// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
+			i->mutable_route(GC::__unroot);
 		}
 
 		// -- mark and sweep -- //

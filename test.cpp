@@ -64,6 +64,11 @@ template<> struct GC::router<ptr_set>
 
 	}
 };
+template<> struct GC::mutable_router<ptr_set>
+{
+	// ptr_set contains no mutable targets
+	static void mutable_route(const ptr_set &set, router_fn func) {}
+};
 
 struct ListNode
 {
@@ -86,6 +91,14 @@ template<> struct GC::router<ListNode>
 		GC::route(node.next, func);
 
 		GC::route(node.set, func);
+	}
+};
+template<> struct GC::mutable_router<ListNode>
+{
+	static void mutable_route(const ListNode &node, router_fn func)
+	{
+		// only routing to set for future-proofing
+		GC::mutable_route(node.set, func);
 	}
 };
 
