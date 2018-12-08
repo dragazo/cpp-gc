@@ -176,7 +176,8 @@ private: // -- array typing helpers -- //
 public: // -- ptr -- //
 
 	// a self-managed garbage-collected pointer to type T.
-	// T may be a scalar type or an unbound array.
+	// if T is an unbound array, it is considered the "array" form, otherwise it is the "scalar" form.
+	// scalar and array forms may offer different interfaces.
 	template<typename T>
 	struct ptr
 	{
@@ -376,6 +377,17 @@ public: // -- ptr -- //
 		friend bool operator<=(std::nullptr_t a, const ptr &b) { return a <= b.get(); }
 		friend bool operator>(std::nullptr_t a, const ptr &b) { return a > b.get(); }
 		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
+
+	public: // -- swap -- //
+
+		void swap(ptr &other)
+		{
+			// regardless of sources for either ptr, reference counts won't change so we can use a trivial swap
+			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::swap(obj, other.obj);
+			std::swap(handle, other.handle);
+		}
+		friend void swap(ptr &a, ptr &b) { a.swap(b); }
 	};
 
 	// defines an atomic gc ptr
@@ -463,18 +475,17 @@ public: // -- ptr -- //
 		static constexpr bool is_always_lock_free = false;
 
 		bool is_lock_free() const noexcept { return is_always_lock_free; }
-	};
 
-	// an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
-	template<typename T>
-	struct router<atomic_ptr<GC::ptr<T>>>
-	{
-		static void route(const atomic_ptr<T> &atomic, GC::router_fn func)
+	public: // -- swap -- //
+
+		void swap(atomic_ptr &other)
 		{
-			// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
-			// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
-			GC::route(atomic.value, func);
+			// regardless of sources for either ptr, reference counts won't change so we can use a trivial swap
+			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::swap(value.obj, other.value.obj);
+			std::swap(value.handle, other.value.handle);
 		}
+		friend void swap(atomic_ptr &a, atomic_ptr &b) { a.swap(b); }
 	};
 
 public: // -- ptr casting -- //
@@ -511,6 +522,18 @@ public: // -- core router specializations -- //
 	struct router<ptr<T>>
 	{
 		static void route(const ptr<T> &obj, router_fn func) { func(obj.handle); }
+	};
+
+	// an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
+	template<typename T>
+	struct router<atomic_ptr<GC::ptr<T>>>
+	{
+		static void route(const atomic_ptr<T> &atomic, GC::router_fn func)
+		{
+			// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
+			// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
+			GC::route(atomic.value, func);
+		}
 	};
 
 public: // -- C-style array router specializations -- //
@@ -1164,6 +1187,11 @@ public: // -- lock info -- //
 	static constexpr bool is_always_lock_free = GC::atomic_ptr<T>::is_always_lock_free;
 
 	bool is_lock_free() const noexcept { return is_always_lock_free; }
+
+public: // -- swap -- //
+
+	void swap(atomic &other) { value.swap(other.value); }
+	friend void swap(atomic &a, atomic &b) { a.value.swap(b.value); }
 };
 
 // an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)

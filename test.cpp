@@ -112,6 +112,11 @@ void foo()
 		root->prev = *prev;
 		(*prev)->next = root;
 
+		using std::swap;
+
+		root.swap(*prev);
+		swap(root, *prev);
+
 		//GC::collect();
 		//std::cerr << "\n\n";
 	}
@@ -434,6 +439,16 @@ int main()
 
 	std::cerr << "what is this? " << std::is_same<what_is_this_2, int(*)[]>::value << "\n\n";
 
+	GC::atomic_ptr<float> atomic_test_0;
+	GC::atomic_ptr<float> atomic_test_1;
+
+	atomic_test_0 = GC::make<float>(2.718f);
+	atomic_test_1 = GC::make<float>(3.141f);
+
+	using std::swap;
+	atomic_test_0.swap(atomic_test_1);
+	swap(atomic_test_0, atomic_test_1);
+
 	/*merp->push_back(GC::make<ListNode>());
 	merp->push_back(GC::make<ListNode>());
 	merp->emplace_back(GC::make<ListNode>());
@@ -590,6 +605,10 @@ int main()
 				_subptr->atomic_2 = GC::make<double>(2.2);
 				_subptr->atomic_3 = GC::make<double>(3.3);
 				_subptr->atomic_4 = GC::make<double>(4.4);
+
+				using std::swap;
+
+				swap(_subptr->atomic_1, _subptr->atomic_2);
 
 				//(*atomic_gc_ptr).load()->atomic_1 = GC::make<double>(1.1);
 				//(*atomic_gc_ptr).load()->atomic_2 = GC::make<double>(2.2);
