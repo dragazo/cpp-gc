@@ -41,40 +41,10 @@
 
 class GC
 {
-private: struct info; // forward decl
-
 public: // -- router function types -- //
 
-	// type used for a normal router event
-	struct router_fn
-	{
-	private: // -- contents hidden for security -- //
-
-		void(*const func)(info *const &); // raw function pointer to call
-
-		router_fn(void(*_func)(info *const &)) : func(_func) {}
-		router_fn(std::nullptr_t) = delete;
-
-		void operator()(info *const &arg) { func(arg); }
-		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
-
-		friend class GC;
-	};
-	// type used for mutable router event
-	struct mutable_router_fn
-	{
-	private: // -- contents hidden for security -- //
-
-		void(*const func)(info *const &); // raw function pointer to call
-
-		mutable_router_fn(void(*_func)(info *const &)) : func(_func) {}
-		mutable_router_fn(std::nullptr_t) = delete;
-
-		void operator()(info *const &arg) { func(arg); }
-		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
-
-		friend class GC;
-	};
+	struct router_fn;
+	struct mutable_router_fn;
 
 private: // -- router function usage safety -- //
 
@@ -114,6 +84,7 @@ public: // -- router functions -- //
 	template<typename T>
 	struct router
 	{
+		// make sure we don't accidentally select a cv-qualified default implementation
 		static_assert(std::is_same<T, std::remove_cv_t<T>>::value, "router type T must not be cv-qualified");
 
 		// if this overload is selected, it implies T is a non-gc type - thus we don't need to route to anything
@@ -177,9 +148,42 @@ private: // -- private types -- //
 		void route(router_fn func) { vtable->route(*this, func); }
 		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
 	};
-	
+
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
 	struct no_init_t {};
+
+public: // -- router function type definitions -- //
+
+	// type used for a normal router event
+	struct router_fn
+	{
+	private: // -- contents hidden for security -- //
+
+		void(*const func)(info *const &); // raw function pointer to call
+
+		router_fn(void(*_func)(info *const &)) : func(_func) {}
+		router_fn(std::nullptr_t) = delete;
+
+		void operator()(info *const &arg) { func(arg); }
+		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
+
+		friend class GC;
+	};
+	// type used for mutable router event
+	struct mutable_router_fn
+	{
+	private: // -- contents hidden for security -- //
+
+		void(*const func)(info *const &); // raw function pointer to call
+
+		mutable_router_fn(void(*_func)(info *const &)) : func(_func) {}
+		mutable_router_fn(std::nullptr_t) = delete;
+
+		void operator()(info *const &arg) { func(arg); }
+		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
+
+		friend class GC;
+	};
 
 private: // -- extent extensions -- //
 
