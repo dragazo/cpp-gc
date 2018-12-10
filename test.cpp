@@ -381,6 +381,18 @@ int main()
 	assert(std::is_same<decltype(arr_test_3.get()) COMMA int(*)[5][6]>::value);
 	assert(std::is_same<decltype(arr_test_4.get()) COMMA int(*)>::value);
 
+	/**/
+	GC::ptr<std::stack<int>> stack_ptr = GC::make<std::stack<int>>();
+	GC::ptr<std::queue<int>> queue_ptr = GC::make<std::queue<int>>();
+	GC::ptr<std::priority_queue<int>> priority_queue_ptr = GC::make<std::priority_queue<int>>();
+
+	for (int i = 0; i < 8; ++i)
+	{
+		stack_ptr->push(i);
+		queue_ptr->push(i);
+		priority_queue_ptr->push(i);
+	}
+	/**/
 
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 

@@ -736,22 +736,54 @@ public: // -- stdlib container router specializations -- //
 		template<typename F> static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
 	};
 
+private: // -- std adapter internal container access functions -- //
+
+	// given a std adapter type (stack, queue, priority_queue), gets the underlying container (by reference)
+	template<typename Adapter>
+	static const auto &__get_adapter_container(const Adapter &adapter)
+	{
+		// we need access to Adapter's protected data, so create a derived type
+		struct HaxAdapter : Adapter
+		{
+			// given a std adapter type (stack, queue, priority_queue), gets the underlying container (by reference)
+			// this construction implicitly performs a static_cast on &HaxAdapter::c to convert it into &Adapter::c.
+			// this is safe because HaxAdapter doesn't define anything on its own, so if c exists, it came from Adapter.
+			static const auto &__get_adapter_container(const Adapter &adapter) { return adapter.*&HaxAdapter::c; }
+		};
+		
+		return HaxAdapter::__get_adapter_container(adapter);
+	}
+
+public: // -- std adapter routers -- //
+
 	template<typename T, typename Container>
 	struct router<std::stack<T, Container>>
 	{
-		// intentionally blank - we can't iterate through a stack
+		template<typename F> static void route(const std::stack<T, Container> &stack, F func)
+		{
+			const auto &container = __get_adapter_container(stack);
+			route_range(container.begin(), container.end(), func);
+		}
 	};
 
 	template<typename T, typename Container>
 	struct router<std::queue<T, Container>>
 	{
-		// intentionally blank - we can't iterate through a queue
+		template<typename F> static void route(const std::queue<T, Container> &stack, F func)
+		{
+			const auto &container = __get_adapter_container(stack);
+			route_range(container.begin(), container.end(), func);
+		}
 	};
 
 	template<typename T, typename Container, typename Compare>
 	struct router<std::priority_queue<T, Container, Compare>>
 	{
-		// intentionally blank - we can't iterate through a priority queue
+		template<typename F> static void route(const std::priority_queue<T, Container, Compare> &stack, F func)
+		{
+			const auto &container = __get_adapter_container(stack);
+			route_range(container.begin(), container.end(), func);
+		}
 	};
 
 private: // -- aligned raw memory allocators -- //
