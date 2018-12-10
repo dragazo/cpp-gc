@@ -12,9 +12,9 @@ struct alignas(16) sse_t { char d[16]; };
 struct ptr_set
 {
 	GC::ptr<int> a, b, c, d, e, f, g, h;
-	const int val;
+	int val;
 
-	std::unique_ptr<int> thingy;
+	std::shared_ptr<int> thingy;
 
 	std::tuple<int, int, int, long, long, int, GC::ptr<int>, int> tuple_thing;
 
@@ -72,7 +72,7 @@ struct ListNode
 	GC::ptr<ListNode> prev;
 	GC::ptr<ListNode> next;
 
-	const ptr_set set;
+	ptr_set set;
 
 	// show a message that says we called ctor
 	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(4)); }
@@ -89,7 +89,8 @@ template<> struct GC::router<ListNode>
 
 		GC::route(node.set, func);
 	}
-	static void route(const ListNode &node, GC::mutable_router_fn func)
+	static void route(const ListNode &node, GC::mutable_router_fn func) // this is correct
+	//static void route(ListNode node, GC::mutable_router_fn func) // this is wrong - by-value T could cause deadlocking
 	{
 		// only routing to set for future-proofing
 		GC::route(node.set, func);

@@ -49,36 +49,69 @@ public: // -- router function types -- //
 private: // -- router function usage safety -- //
 
 	// gets if T is any of several types - equivalent to (std::is_same<T, Types>::value || ...) but doesn't require C++17 fold expressions
-	template<typename T, typename First, typename ...Rest> struct is_same_any : std::integral_constant<bool, std::is_same<T, First>::value || GC::is_same_any<T, Rest...>::value> {};
-	template<typename T, typename First> struct is_same_any<T, First> : std::integral_constant<bool, std::is_same<T, First>::value> {};
+	template<typename T, typename First, typename ...Rest>
+	struct is_same_any : std::integral_constant<bool, std::is_same<T, First>::value || GC::is_same_any<T, Rest...>::value> {};
+	template<typename T, typename First>
+	struct is_same_any<T, First> : std::integral_constant<bool, std::is_same<T, First>::value> {};
 
-	// defines if T is a router function type - facilitates a type safety mechanism for GC::route().
-	template<typename T> static constexpr bool is_router_function_v = GC::is_same_any<T, GC::router_fn, GC::mutable_router_fn>::value;
+	// defines if T is a router function object type - facilitates a type safety mechanism for GC::route().
+	template<typename T>
+	struct is_router_function_object : GC::is_same_any<T, GC::router_fn, GC::mutable_router_fn> {};
+
+	// gets if T is a well-formed router function overload
+	template<typename T, typename F>
+	struct is_well_formed_router_function : GC::is_router_function_object<F>
+	{
+	private: typedef decltype(static_cast<void(*)(const T&, F)>(GC::router<std::remove_cv_t<T>>::route)) __type_check; // just used to make sure it exists
+	};
 
 public: // -- router functions -- //
 
 	// THE FOLLOWING INFORMATION IS CRITICAL FOR ANY USAGE OF THIS LIBRARY.
 
-	// a type T is defined to be "gc" if it owns an object that is itself considered gc.
+	// a type T is defined to be "gc" if it owns an object that is itself considered to be gc.
 	// by definition, GC::ptr, GC::atomic_ptr, and std::atomic<GC::ptr> are gc types.
 	// ownership means said "owned" object's lifetime is entirely controlled by the "owner".
 	// an object may only have one owner at any point in time - shared ownership is considered non-owning.
+	// thus global variables and static member variables are never considered to be owned objects.
+	// at any point in time, the owned object is considered to be part of its owner (i.e. as if it were a by-value member).
+
+	// the simplest form of ownership is a by-value member.
+	// another common category of owned object is a by-value container (e.g. std::vector, std::list, std::set, etc.).
+	// another case is a uniquely-owning pointer or reference - e.g. std::unique_ptr, or any other (potentially-smart) pointer/reference to an object you know you own uniquely.
+	// of course, these cases can be mixed - e.g. a by-value member std::unique_ptr which is a uniquely-owning pointer to a by-value container std::vector of a gc type.
+	
+	// it is important to remember that a container type like std::vector<T> is a gc type if T is a gc type.
 
 	// object reachability traversals are performed by router functions.
 	// for a gc type T, its router functions route a function-like object to its owned gc objects recursively.
 	// because object ownership cannot be cyclic, this will never degrade into infinite recursion.
 
-	// for a gc type T, a "mutable" owned object is defined to be an object for which you would route to its contents but said contents can be changed after construction.
+	// routing to anything you don't own is undefined behavior.
+	// thus, although it is legal to route to the "contents" of an owned object (i.e. owned object of an owned object), it is typically dangerous to do so.
+	// in general, you should just route to all your by-value members - it is their responsibility to properly route the message the rest of the way.
+
+	// if you are the owner of a gc type object, it is undefined behavior not to route to it (except in the special case of a mutable router function - see below).
+
+	// for a gc type T, a "mutable" owned object is defined to be an owned object for which you could legally route to its contents but said contents can be changed after construction.
 	// e.g. std::vector, std::list, std::set, and std::unique_ptr are all examples of "mutable" gc types because you own them (and their contents), but their contents can change.
-	// an "immutable" or "normal" owned object is defined as any object that is not "mutable".
+	// an "immutable" or "normal" owned object is defined as any owned object that is not "mutable".
 
-	// for a normal router event (i.e. GC::router_fn) this must at least route to all owned gc objects.
-	// for a mutable router event (i.e. GC::mutable_router_fn) this must at least route to all owned "mutable" gc objects.
-	// the mutable router event system is entirely a method for optimization.
+	// more formally, consider an owned object x:
+	// suppose you examine the set of all objects routed-to through x recursively.
+	// x is a "mutable" owned gc object iff for any two such router invocation sets taken over the lifetime of x the two sets are different. 
 
-	// this represents the router function set for objects of type T.
-	// router functions take const T& and a function-like object whose type depends on if it's for normal or mutable router events.
-	// the function-like object is guaranteed to be small and trivial - for efficiency, you should take it by value.
+	// it should be noted that re-pointing a GC::ptr, GC::atomic_ptr, or std::atomic<GC::ptr> is not a mutating action for the purposes of classifying a "mutable" owned gc object.
+	// this is due to the fact that you would never route to its pointed-to contents due to it being a shared resource.
+
+	// the following requirements pertain to router functions:
+	// for a normal router function (i.e. GC::router_fn) this must at least route to all owned gc objects.
+	// for a mutable router function (i.e. GC::mutable_router_fn) this must at least route to all owned "mutable" gc objects.
+	// the mutable router function system is entirely a method for optimization and can safely be ignored if desired.
+
+	// this type represents the router function set for objects of type T.
+	// router functions must be static, named "route", return void, and take two arguments: const T& and a router function object (i.e. GC::router_fn or GC::mutable_router_fn).
+	// the router function object is guaranteed to be small and trivial - for efficiency, you should take it by value.
 	// if you don't care about the efficiency mechanism of mutable router functions, you can defined the function type as a template type paramter, but it must be deducible.
 	// the default implementation is no-op, which is suitable for any non-gc type.
 	// this should not be used directly for routing to owned objects - see the helper functions below.
@@ -93,11 +126,18 @@ public: // -- router functions -- //
 	};
 
 	// recursively routes to obj - should only be used inside router functions
-	template<typename T, typename F, std::enable_if_t<GC::is_router_function_v<F>, int> = 0>
-	static void route(const T &obj, F func) { GC::router<std::remove_cv_t<T>>::route(obj, func); }
+	template<typename T, typename F, std::enable_if_t<GC::is_router_function_object<F>::value, int> = 0>
+	static void route(const T &obj, F func)
+	{
+		// make sure the underlying router function is valid
+		static_assert(is_well_formed_router_function<T, F>::value, "underlying router function was ill-formed");
+
+		// call the underlying router function
+		GC::router<std::remove_cv_t<T>>::route(obj, func);
+	}
 
 	// recursively routes to each object in an iteration range - should only be used inside router functions
-	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function_v<F>, int> = 0>
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function_object<F>::value, int> = 0>
 	static void route_range(IterBegin begin, IterEnd end, F func) { for (; begin != end; ++begin) GC::route(*begin, func); }
 
 private: // -- private types -- //
@@ -855,13 +895,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
-		auto lambda = [](info &handle, auto func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); };
+		auto router_set = [](info &handle, auto func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); };
 
 		static const info_vtable _vtable(
 			[](info &handle) { reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
 			[](info &handle) { allocator_t::dealloc(handle.obj); },
-			lambda,
-			lambda
+			router_set,
+			router_set
 		);
 
 		// -- create the buffer for both the object and its info object -- //
@@ -922,13 +962,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
-		auto lambda = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); };
+		auto router_set = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); };
 
 		static const info_vtable _vtable(
 			[](info &handle) { for (std::size_t i = 0; i < handle.count; ++i) reinterpret_cast<scalar_type*>(handle.obj)[i].~scalar_type(); },
 			[](info &handle) { allocator_t::dealloc(handle.obj); },
-			lambda,
-			lambda
+			router_set,
+			router_set
 		);
 
 		// -- create the buffer for the objects and their info object -- //
@@ -1014,13 +1054,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
-		auto lambda = [](info &handle, auto func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); };
+		auto router_set = [](info &handle, auto func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); };
 
 		static const info_vtable _vtable(
 			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
 			[](info &handle) { allocator_t::dealloc(&handle); },
-			lambda,
-			lambda
+			router_set,
+			router_set
 		);
 
 		// -- create the info object for management -- //
@@ -1071,13 +1111,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
-		auto lambda = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); };
+		auto router_set = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); };
 
 		static const info_vtable _vtable(
 			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
 			[](info &handle) { allocator_t::dealloc(&handle); },
-			lambda,
-			lambda
+			router_set,
+			router_set
 		);
 
 		// -- create the info object for management -- //
