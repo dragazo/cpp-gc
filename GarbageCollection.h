@@ -43,9 +43,9 @@ class GC
 {
 private: struct info; // forward decl
 
-public: // -- outgoing arcs -- //
+public: // -- router function types -- //
 
-	// type used for router event actions. USERS SHOULD NOT USE THIS DIRECTLY.
+	// type used for a normal router event
 	struct router_fn
 	{
 	private: // -- contents hidden for security -- //
@@ -53,6 +53,22 @@ public: // -- outgoing arcs -- //
 		void(*const func)(info *const &); // raw function pointer to call
 
 		router_fn(void(*_func)(info *const &)) : func(_func) {}
+		router_fn(std::nullptr_t) = delete;
+
+		void operator()(info *const &arg) { func(arg); }
+		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
+
+		friend class GC;
+	};
+	// type used for mutable router event
+	struct mutable_router_fn
+	{
+	private: // -- contents hidden for security -- //
+
+		void(*const func)(info *const &); // raw function pointer to call
+
+		mutable_router_fn(void(*_func)(info *const &)) : func(_func) {}
+		mutable_router_fn(std::nullptr_t) = delete;
 
 		void operator()(info *const &arg) { func(arg); }
 		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
@@ -60,40 +76,57 @@ public: // -- outgoing arcs -- //
 		friend class GC;
 	};
 
-	// for all data elements "elem" OWNED by obj that either ARE or OWN (directly or indirectly) a GC::ptr value, calls GC::route(elem, func) exactly once.
-	// obj must be the SOLE owner of elem, and elem must be the SOLE owner of its (direct or indirect) GC::ptr values.
-	// it is undefined behavior to use any gc utilities (directly or indirectly) during this function's invocation.
-	// this default implementation is sufficient for any type that does not contain GC::ptr by value (directly or indirectly).
-	// T should be non-const and the function should take const &T.
-	// THIS IS USED FOR ROUTER DEFINITION - YOU SHOULD NOT USE IT DIRECTLY FOR ROUTING.
+private: // -- router function usage safety -- //
+
+	// defines if T is a router function type - facilitates a type safety mechanism for GC::route().
+	template<typename T> struct is_router_function : std::false_type {};
+
+	template<> struct is_router_function<GC::router_fn> : std::true_type {};
+	template<> struct is_router_function<GC::mutable_router_fn> : std::true_type {};
+
+public: // -- router functions -- //
+
+	// THE FOLLOWING INFORMATION IS CRITICAL FOR ANY USAGE OF THIS LIBRARY.
+
+	// a type T is defined to be "gc" if it owns an object that is itself considered gc.
+	// by definition, GC::ptr, GC::atomic_ptr, and std::atomic<GC::ptr> are gc types.
+	// ownership means said "owned" object's lifetime is entirely controlled by the "owner".
+	// an object may only have one owner at any point in time - shared ownership is considered non-owning.
+
+	// object reachability traversals are performed by router functions.
+	// for a gc type T, its router functions route a function-like object to its owned gc objects recursively.
+	// because object ownership cannot be cyclic, this will never degrade into infinite recursion.
+
+	// for a gc type T, a "mutable" owned object is defined to be an object for which you would route to its contents but said contents can be changed after construction.
+	// e.g. std::vector, std::list, std::set, and std::unique_ptr are all examples of "mutable" gc types because you own them (and their contents), but their contents can change.
+	// an "immutable" or "normal" owned object is defined as any object that is not "mutable".
+
+	// for a normal router event (i.e. GC::router_fn) this must at least route to all owned gc objects.
+	// for a mutable router event (i.e. GC::mutable_router_fn) this must at least route to all owned "mutable" gc objects.
+	// the mutable router event system is entirely a method for optimization.
+
+	// this represents the router function set for objects of type T.
+	// router functions take const T& and a function-like object whose type depends on if it's for normal or mutable router events.
+	// the function-like object is guaranteed to be small and trivial - for efficiency, you should take it by value.
+	// if you don't care about the efficiency mechanism of mutable router functions, you can defined the function type as a template type paramter, but it must be deducible.
+	// the default implementation is no-op, which is suitable for any non-gc type.
+	// this should not be used directly for routing to owned objects - see the helper functions below.
 	template<typename T>
-	struct router { static void route(const T &obj, router_fn func) {} };
+	struct router
+	{
+		static_assert(std::is_same<T, std::remove_cv_t<T>>::value, "router type T must not be cv-qualified");
 
-	// recursively routes to obj - SHOUD ONLY BE USED IN ROUTER SPECIALIZATIONS
-	template<typename T>
-	static void route(const T &obj, router_fn func) { GC::router<std::remove_cv_t<T>>::route(obj, func); }
+		// if this overload is selected, it implies T is a non-gc type - thus we don't need to route to anything
+		template<typename F> static void route(const T &obj, F func) {}
+	};
 
-	// recursively routes to each object in an iteration range - SHOULD ONLY BE USED IN ROUTER SPECIALIZATIONS
-	template<typename IterBegin, typename IterEnd>
-	static void route_range(IterBegin begin, IterEnd end, router_fn func) { for (; begin != end; ++begin) GC::route(*begin, func); }
+	// recursively routes to obj - should only be used inside router functions
+	template<typename T, typename F, std::enable_if_t<GC::is_router_function<F>::value, int> = 0>
+	static void route(const T &obj, F func) { GC::router<std::remove_cv_t<T>>::route(obj, func); }
 
-public: // -- outgoing arcs optimization paths -- //
-
-	// mutable_router routes to all the mutable targets of a router specialization (i.e. when you would route to an object's contents but the contents may change).
-	// this function is meant to cut down on unnecessary routing during garbage collection passes, and is thus purely an optimization mechanism.
-	// THE DEFAULT IMPLEMENTATION JUST CALLS THE NORMAL ROUTER FUNCTION AND IS SUITABLE FOR ANY TYPE, REGARDLESS OF CONTENTS.
-	// SPECIALIZATIONS SHOULD USE GC::mutable_route() and GC::mutable_route_range() inside said specializations for this function.
-	// the things routed to by this function should be a subset of what's routed to by the normal router function - specifically only mutable targets.
-	template<typename T>
-	struct mutable_router { static void mutable_route(const T &obj, router_fn func) { GC::route(obj, func); } };
-
-	// recursively routes to obj's mutable contents - SHOULD ONLY BE USED IN MUTABLE_ROUTER SPECIALIZATIONS
-	template<typename T>
-	static void mutable_route(const T &obj, router_fn func) { GC::mutable_router<std::remove_cv_t<T>>::mutable_route(obj, func); }
-
-	// recursively routes to each object's mutable contents in an iterator range - SHOULD ONLY BE USED IN MUTABLE_ROUTER SPECIALIZATIONS
-	template<typename IterBegin, typename IterEnd>
-	static void mutable_route_range(IterBegin begin, IterEnd end, router_fn func) { for (; begin != end; ++begin) GC::mutable_route(*begin, func); }
+	// recursively routes to each object in an iteration range - should only be used inside router functions
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function<F>::value, int> = 0>
+	static void route_range(IterBegin begin, IterEnd end, F func) { for (; begin != end; ++begin) GC::route(*begin, func); }
 
 private: // -- private types -- //
 
@@ -106,9 +139,9 @@ private: // -- private types -- //
 		void(*const dealloc)(info&); // a function to deallocate memory - called after destroy
 
 		void(*const route)(info&, router_fn);         // a router function to use for this object
-		void(*const mutable_route)(info&, router_fn); // a mutable router function to use for this object
+		void(*const mutable_route)(info&, mutable_router_fn); // a mutable router function to use for this object
 
-		info_vtable(void(*_destroy)(info&), void(*_dealloc)(info&), void(*_route)(info&, router_fn), void(*_mutable_route)(info&, router_fn))
+		info_vtable(void(*_destroy)(info&), void(*_dealloc)(info&), void(*_route)(info&, router_fn), void(*_mutable_route)(info&, mutable_router_fn))
 			: destroy(_destroy), dealloc(_dealloc), route(_route), mutable_route(_mutable_route)
 		{}
 	};
@@ -142,7 +175,7 @@ private: // -- private types -- //
 		void dealloc() { vtable->dealloc(*this); }
 
 		void route(router_fn func) { vtable->route(*this, func); }
-		void mutable_route(router_fn func) { vtable->mutable_route(*this, func); }
+		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
 	};
 	
 	// used to select a GC::ptr constructor that does not perform a GC::root operation
@@ -241,6 +274,7 @@ public: // -- ptr -- //
 			else return false;
 		}
 		// as __reset but begins by locking GC::mutex. additionally, internally handles the return value flag (see above).
+		// this operation is atomic.
 		void reset(element_type *_obj, GC::info *_handle)
 		{
 			bool call_handle_del_list = false;
@@ -253,7 +287,7 @@ public: // -- ptr -- //
 			if (call_handle_del_list) GC::handle_del_list();
 		}
 
-		// creates an empty ptr but does no initialization (e.g. DOES NOT ROOT THE INTERNAL HANDLE)
+		// creates an empty ptr but does no elaborate initialization (e.g. DOES NOT ROOT THE INTERNAL HANDLE)
 		explicit ptr(GC::no_init_t) : obj(nullptr), handle(nullptr) {}
 		// must be used after the no_init_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE.
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
@@ -448,9 +482,9 @@ public: // -- ptr -- //
 
 			{
 				std::lock_guard<std::mutex> lock(GC::mutex);
-				ret.__init(nullptr, nullptr);
+				ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
 
-				// we can ignore the return value because ret is always null prior to this call
+				// we can ignore this return value because ret is always null prior to this call
 				ret.__reset(value.obj, value.handle);
 			}
 
@@ -472,10 +506,8 @@ public: // -- ptr -- //
 			GC::ptr<T> ret(GC::no_init_t{});
 			ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
 
-			bool call_handle_del_list = false;
-
-			if (ret.__reset(value.obj, value.handle)) call_handle_del_list = true;
-			if (value.__reset(desired.obj, desired.handle)) call_handle_del_list = true;
+			/*                       */ ret.__reset(value.obj, value.handle); // we can ignore this return value because ret is always null prior to this call
+			bool call_handle_del_list = value.__reset(desired.obj, desired.handle);
 
 			// unlock early because we need to do other stuff like call GC::handle_del_list() and ptr ctors/dtors
 			lock.unlock();
@@ -539,14 +571,14 @@ public: // -- core router specializations -- //
 	template<typename T>
 	struct router<ptr<T>>
 	{
-		static void route(const ptr<T> &obj, router_fn func) { func(obj.handle); }
+		template<typename F> static void route(const ptr<T> &obj, F func) { func(obj.handle); }
 	};
 
 	// an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
 	template<typename T>
 	struct router<atomic_ptr<GC::ptr<T>>>
 	{
-		static void route(const atomic_ptr<T> &atomic, GC::router_fn func)
+		template<typename F> static void route(const atomic_ptr<T> &atomic, F func)
 		{
 			// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
 			// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
@@ -560,7 +592,7 @@ public: // -- C-style array router specializations -- //
 	template<typename T, std::size_t N>
 	struct router<T[N]>
 	{
-		static void route(const T(&objs)[N], router_fn func) { for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func); }
+		template<typename F> static void route(const T(&objs)[N], F func) { for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func); }
 	};
 
 	// ill-formed variant for unbounded arrays
@@ -570,13 +602,13 @@ public: // -- C-style array router specializations -- //
 		// intentionally left blank - we don't know the extent, so we can't route to its contents
 	};
 
-private: // -- tuple routing -- //
+private: // -- tuple routing helpers -- //
 
 	// recursively routes to all elements of a tuple with ordinal indicies [0, Len)
 	template<std::size_t Len, typename ...Types>
 	struct __tuple_router
 	{
-		static void __route(const std::tuple<Types...> &tuple, router_fn func)
+		template<typename F> static void __route(const std::tuple<Types...> &tuple, F func)
 		{
 			GC::route(std::get<Len - 1>(tuple), func);
 			__tuple_router<Len - 1, Types...>::__route(tuple, func);
@@ -587,7 +619,7 @@ private: // -- tuple routing -- //
 	template<typename ...Types>
 	struct __tuple_router<0, Types...>
 	{
-		static void __route(const std::tuple<Types...> &tuple, router_fn func) {}
+		template<typename F> static void __route(const std::tuple<Types...> &tuple, F func) {}
 	};
 
 public: // -- stdlib misc router specializations -- //
@@ -595,19 +627,19 @@ public: // -- stdlib misc router specializations -- //
 	template<typename T1, typename T2>
 	struct router<std::pair<T1, T2>>
 	{
-		static void route(const std::pair<T1, T2> &pair, router_fn func) { GC::route(pair.first, func); GC::route(pair.second, func); }
-	};
-
-	template<typename T, typename Deleter>
-	struct router<std::unique_ptr<T, Deleter>>
-	{
-		static void route(const std::unique_ptr<T, Deleter> &obj, router_fn func) { if (obj) GC::route(*obj, func); }
+		template<typename F> static void route(const std::pair<T1, T2> &pair, F func) { GC::route(pair.first, func); GC::route(pair.second, func); }
 	};
 
 	template<typename ...Types>
 	struct router<std::tuple<Types...>>
 	{
-		static void route(const std::tuple<Types...> &tuple, router_fn func) { __tuple_router<sizeof...(Types), Types...>::__route(tuple, func); }
+		template<typename F> static void route(const std::tuple<Types...> &tuple, F func) { GC::__tuple_router<sizeof...(Types), Types...>::__route(tuple, func); }
+	};
+
+	template<typename T, typename Deleter>
+	struct router<std::unique_ptr<T, Deleter>>
+	{
+		template<typename F> static void route(const std::unique_ptr<T, Deleter> &obj, F func) { if (obj) GC::route(*obj, func); }
 	};
 
 	template<typename T>
@@ -624,79 +656,79 @@ public: // -- stdlib container router specializations -- //
 	template<typename T, std::size_t N>
 	struct router<std::array<T, N>>
 	{
-		static void route(const std::array<T, N> &arr, router_fn func) { route_range(arr.begin(), arr.end(), func); }
+		template<typename F> static void route(const std::array<T, N> &arr, F func) { GC::route_range(arr.begin(), arr.end(), func); }
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::vector<T, Allocator>>
 	{
-		static void route(const std::vector<T, Allocator> &vec, router_fn func) { route_range(vec.begin(), vec.end(), func); }
+		template<typename F> static void route(const std::vector<T, Allocator> &vec, F func) { GC::route_range(vec.begin(), vec.end(), func); }
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::deque<T, Allocator>>
 	{
-		static void route(const std::deque<T, Allocator> &deque, router_fn func) { route_range(deque.begin(), deque.end(), func); }
+		template<typename F> static void route(const std::deque<T, Allocator> &deque, F func) { route_range(deque.begin(), deque.end(), func); }
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::forward_list<T, Allocator>>
 	{
-		static void route(const std::forward_list<T, Allocator> &list, router_fn func) { route_range(list.begin(), list.end(), func); }
+		template<typename F> static void route(const std::forward_list<T, Allocator> &list, F func) { route_range(list.begin(), list.end(), func); }
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::list<T, Allocator>>
 	{
-		static void route(const std::list<T, Allocator> &list, router_fn func) { route_range(list.begin(), list.end(), func); }
+		template<typename F> static void route(const std::list<T, Allocator> &list, F func) { route_range(list.begin(), list.end(), func); }
 	};
 	
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<std::set<Key, Compare, Allocator>>
 	{
-		static void route(const std::set<Key, Compare, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+		template<typename F> static void route(const std::set<Key, Compare, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
 	};
 
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<std::multiset<Key, Compare, Allocator>>
 	{
-		static void route(const std::multiset<Key, Compare, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+		template<typename F> static void route(const std::multiset<Key, Compare, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
 	};
 
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<std::map<Key, T, Compare, Allocator>>
 	{
-		static void route(const std::map<Key, T, Compare, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+		template<typename F> static void route(const std::map<Key, T, Compare, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
 	};
 
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<std::multimap<Key, T, Compare, Allocator>>
 	{
-		static void route(const std::multimap<Key, T, Compare, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+		template<typename F> static void route(const std::multimap<Key, T, Compare, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
 	};
 
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
 	{
-		static void route(const std::unordered_set<Key, Hash, KeyEqual, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+		template<typename F> static void route(const std::unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
 	};
 
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 	{
-		static void route(const std::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, router_fn func) { route_range(set.begin(), set.end(), func); }
+		template<typename F> static void route(const std::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
 	};
 
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 	{
-		static void route(const std::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+		template<typename F> static void route(const std::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
 	};
 
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 	{
-		static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, router_fn func) { route_range(map.begin(), map.end(), func); }
+		template<typename F> static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
 	};
 
 	template<typename T, typename Container>
@@ -786,11 +818,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		auto lambda = [](info &handle, auto func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); };
+
 		static const info_vtable _vtable(
 			[](info &handle) { reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
 			[](info &handle) { allocator_t::dealloc(handle.obj); },
-			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); },
-			[](info &handle, GC::router_fn func) { GC::mutable_route(*reinterpret_cast<element_type*>(handle.obj), func); }
+			lambda,
+			lambda
 		);
 
 		// -- create the buffer for both the object and its info object -- //
@@ -851,11 +885,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		auto lambda = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); };
+
 		static const info_vtable _vtable(
 			[](info &handle) { for (std::size_t i = 0; i < handle.count; ++i) reinterpret_cast<scalar_type*>(handle.obj)[i].~scalar_type(); },
 			[](info &handle) { allocator_t::dealloc(handle.obj); },
-			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); },
-			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::mutable_route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); }
+			lambda,
+			lambda
 		);
 
 		// -- create the buffer for the objects and their info object -- //
@@ -941,11 +977,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		auto lambda = [](info &handle, auto func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); };
+
 		static const info_vtable _vtable(
 			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
 			[](info &handle) { allocator_t::dealloc(&handle); },
-			[](info &handle, GC::router_fn func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); },
-			[](info &handle, GC::router_fn func) { GC::mutable_route(*reinterpret_cast<T*>(handle.obj), func); }
+			lambda,
+			lambda
 		);
 
 		// -- create the info object for management -- //
@@ -996,11 +1034,13 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		auto lambda = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); };
+
 		static const info_vtable _vtable(
 			[](info &handle) { Deleter()(reinterpret_cast<T*>(handle.obj)); },
 			[](info &handle) { allocator_t::dealloc(&handle); },
-			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); },
-			[](info &handle, GC::router_fn func) { for (std::size_t i = 0; i < handle.count; ++i) GC::mutable_route(reinterpret_cast<T*>(handle.obj)[i], func); }
+			lambda,
+			lambda
 		);
 
 		// -- create the info object for management -- //
@@ -1212,7 +1252,7 @@ public: // -- swap -- //
 template<typename T>
 struct GC::router<std::atomic<GC::ptr<T>>>
 {
-	static void route(const std::atomic<GC::ptr<T>> &atomic, GC::router_fn func)
+	template<typename F> static void route(const std::atomic<GC::ptr<T>> &atomic, F func)
 	{
 		// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
 		// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
@@ -1231,6 +1271,20 @@ template<typename T, typename U, typename V>
 std::basic_ostream<U, V> &operator<<(std::basic_ostream<U, V> &ostr, const GC::ptr<T> &ptr)
 {
 	ostr << ptr.get();
+	return ostr;
+}
+
+// outputs the stored pointer to the stream - equivalent to ostr << ptr.load().get()
+template<typename T, typename U, typename V>
+std::basic_ostream<U, V> &operator<<(std::basic_ostream<U, V> &ostr, const GC::atomic_ptr<T> &ptr)
+{
+	ostr << ptr.load().get();
+	return ostr;
+}
+template<typename T, typename U, typename V>
+std::basic_ostream<U, V> &operator<<(std::basic_ostream<U, V> &ostr, const std::atomic<GC::ptr<T>> &ptr)
+{
+	ostr << ptr.load().get();
 	return ostr;
 }
 

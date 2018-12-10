@@ -39,7 +39,7 @@ struct ptr_set
 };
 template<> struct GC::router<ptr_set>
 {
-	static void route(const ptr_set &set, router_fn func)
+	static void route(const ptr_set &set, GC::router_fn func)
 	{
 		GC::route(set.a, func);
 		GC::route(set.b, func);
@@ -62,12 +62,9 @@ template<> struct GC::router<ptr_set>
 		GC::route(set.doodle_dud_0, func);
 		GC::route(set.doodle_dud_1, func);
 
+		//GC::route(set.a, set.a);
 	}
-};
-template<> struct GC::mutable_router<ptr_set>
-{
-	// ptr_set contains no mutable targets
-	static void mutable_route(const ptr_set &set, router_fn func) {}
+	static void route(const ptr_set &set, GC::mutable_router_fn func) {} // no mutable things to route to
 };
 
 struct ListNode
@@ -85,20 +82,17 @@ struct ListNode
 };
 template<> struct GC::router<ListNode>
 {
-	static void route(const ListNode &node, router_fn func)
+	static void route(const ListNode &node, GC::router_fn func)
 	{
 		GC::route(node.prev, func);
 		GC::route(node.next, func);
 
 		GC::route(node.set, func);
 	}
-};
-template<> struct GC::mutable_router<ListNode>
-{
-	static void mutable_route(const ListNode &node, router_fn func)
+	static void route(const ListNode &node, GC::mutable_router_fn func)
 	{
 		// only routing to set for future-proofing
-		GC::mutable_route(node.set, func);
+		GC::route(node.set, func);
 	}
 };
 
@@ -140,10 +134,9 @@ struct wrap
 {
 	GC::ptr<T> ptr;
 };
-template<typename T>
-struct GC::router<wrap<T>>
+template<typename T> struct GC::router<wrap<T>>
 {
-	static void route(const wrap<T> &w, router_fn fn)
+	template<typename F> static void route(const wrap<T> &w, F fn)
 	{
 		GC::route(w.ptr, fn);
 	}
@@ -190,7 +183,7 @@ struct TreeNode
 };
 template<> struct GC::router<TreeNode>
 {
-    static void route(const TreeNode &node, GC::router_fn func)
+    template<typename F> static void route(const TreeNode &node, F func)
     {
         // route to our GC::ptr instances
         GC::route(node.left, func);
@@ -223,7 +216,7 @@ public:
 };
 template<> struct GC::router<SymbolTable>
 {
-    static void route(const SymbolTable &table, GC::router_fn func)
+    template<typename F> static void route(const SymbolTable &table, F func)
     {
         // modification of the mutable collection of GC::ptr and router must be mutually exclusive
         std::lock_guard<std::mutex> lock(table.symbols_mutex);
@@ -276,7 +269,7 @@ public:
 };
 template<> struct GC::router<MaybeTreeNode>
 {
-    static void route(const MaybeTreeNode &maybe, GC::router_fn func)
+    template<typename F> static void route(const MaybeTreeNode &maybe, F func)
     {
         // this must be synchronized with constructing/destucting the buffer object.
         std::lock_guard<std::mutex> lock(maybe.buf_mutex);
@@ -311,7 +304,7 @@ struct atomic_container
 template<>
 struct GC::router<atomic_container>
 {
-	static void route(const atomic_container &atomic, GC::router_fn func)
+	template<typename F> static void route(const atomic_container &atomic, F func)
 	{
 		GC::route(atomic.atomic_1, func);
 		GC::route(atomic.atomic_2, func);
@@ -472,6 +465,10 @@ int main()
 	merp->emplace_back(GC::make<ListNode>());*/
 	GC::collect();
 	std::cerr << "\n\n";
+
+	GC::ptr<int> arr_of_ptr[16];
+
+	assert(std::is_default_constructible<GC::ptr<int>>::value);
 
 	{
 		std::cerr << "ptr<ptr<int>[2][2][2]>:\n";
