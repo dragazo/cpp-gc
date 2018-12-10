@@ -48,11 +48,12 @@ public: // -- router function types -- //
 
 private: // -- router function usage safety -- //
 
-	// defines if T is a router function type - facilitates a type safety mechanism for GC::route().
-	template<typename T> struct is_router_function : std::false_type {};
+	// gets if T is any of several types - equivalent to (std::is_same<T, Types>::value || ...) but doesn't require C++17 fold expressions
+	template<typename T, typename First, typename ...Rest> struct is_same_any : std::integral_constant<bool, std::is_same<T, First>::value || GC::is_same_any<T, Rest...>::value> {};
+	template<typename T, typename First> struct is_same_any<T, First> : std::integral_constant<bool, std::is_same<T, First>::value> {};
 
-	template<> struct is_router_function<GC::router_fn> : std::true_type {};
-	template<> struct is_router_function<GC::mutable_router_fn> : std::true_type {};
+	// defines if T is a router function type - facilitates a type safety mechanism for GC::route().
+	template<typename T> static constexpr bool is_router_function_v = GC::is_same_any<T, GC::router_fn, GC::mutable_router_fn>::value;
 
 public: // -- router functions -- //
 
@@ -92,11 +93,11 @@ public: // -- router functions -- //
 	};
 
 	// recursively routes to obj - should only be used inside router functions
-	template<typename T, typename F, std::enable_if_t<GC::is_router_function<F>::value, int> = 0>
+	template<typename T, typename F, std::enable_if_t<GC::is_router_function_v<F>, int> = 0>
 	static void route(const T &obj, F func) { GC::router<std::remove_cv_t<T>>::route(obj, func); }
 
 	// recursively routes to each object in an iteration range - should only be used inside router functions
-	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function<F>::value, int> = 0>
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function_v<F>, int> = 0>
 	static void route_range(IterBegin begin, IterEnd end, F func) { for (; begin != end; ++begin) GC::route(*begin, func); }
 
 private: // -- private types -- //
