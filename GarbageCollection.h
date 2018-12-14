@@ -164,7 +164,7 @@ private: // -- private types -- //
 	struct info
 	{
 		void *const       obj;   // pointer to the managed object
-		const std::size_t count; // the number of elements in obj
+		const std::size_t count; // the number of elements in obj (meaning varies by implementer)
 
 		const info_vtable *const vtable; // virtual function table to use
 

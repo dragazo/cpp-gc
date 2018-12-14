@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cassert>
+#include <sstream>
+#include <utility>
 
 #include "GarbageCollection.h"
 
@@ -315,6 +317,18 @@ struct GC::router<atomic_container>
 };
 
 std::atomic<GC::ptr<atomic_container>> *atomic_gc_ptr;
+
+
+
+template<typename T>
+std::string tostr(T &&v)
+{
+	std::ostringstream ostr;
+	ostr << std::forward<T>(v);
+	return ostr.str();
+}
+
+
 
 int main()
 {
@@ -648,6 +662,12 @@ int main()
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*atomic_gc_ptr = GC::make<atomic_container>();
+
+				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
+
+				for (int i = 0; i < 128; ++i)
+					table->update(tostr(i), GC::make<TreeNode>());
+
 			}
 		});
 		std::thread t2([]()
