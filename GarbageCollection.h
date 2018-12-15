@@ -296,7 +296,7 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object of a compatible type (i.e. static or dynamic cast).
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list() AFTER THE LOCK ON GC::mutex IS RELEASED.
+		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list() AFTER THE LOCK ON GC::roots.mutex IS RELEASED.
 		bool __reset(element_type *_obj, GC::info *_handle)
 		{
 			// repoint to the proper object
@@ -308,11 +308,11 @@ public: // -- ptr -- //
 				bool call_handle_del_list = false;
 
 				// drop our object
-				if (handle) call_handle_del_list = GC::__delref(handle);
+				if (handle) call_handle_del_list = GC::objs.__delref(handle);
 
 				// take on other's object
 				handle = _handle;
-				if (handle) GC::__addref(handle);
+				if (handle) GC::objs.__addref(handle);
 
 				return call_handle_del_list;
 			}
@@ -325,7 +325,7 @@ public: // -- ptr -- //
 			bool call_handle_del_list = false;
 
 			{
-				std::lock_guard<std::mutex> lock(GC::mutex);
+				std::lock_guard<std::mutex> lock(GC::objs.mutex);
 				call_handle_del_list = __reset(_obj, _handle);
 			}
 
@@ -345,7 +345,7 @@ public: // -- ptr -- //
 			obj = _obj;
 			handle = _handle;
 
-			GC::__root(handle);
+			GC::roots.add(handle);
 		}
 
 		// constructs a new ptr instance with the specified obj and handle.
@@ -353,10 +353,8 @@ public: // -- ptr -- //
 		// INCREMENTS THE REF COUNT on handle (if non-null).
 		ptr(element_type *_obj, info *_handle) : obj(_obj), handle(_handle)
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-
-			GC::__root(handle);
-			if (handle) GC::__addref(handle);
+			GC::roots.add(handle);
+			if (handle) GC::objs.addref(handle);
 		}
 
 	public: // -- ctor / dtor / asgn -- //
@@ -364,10 +362,7 @@ public: // -- ptr -- //
 		// creates an empty ptr (null)
 		ptr(std::nullptr_t = nullptr) : obj(nullptr), handle(nullptr)
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-
-			// register handle as a root
-			GC::__root(handle);
+			GC::roots.add(handle);
 		}
 
 		~ptr()
@@ -375,10 +370,10 @@ public: // -- ptr -- //
 			bool call_handle_del_list = false;
 
 			{
-				std::lock_guard<std::mutex> lock(GC::mutex);
+				std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
 				// if we have a handle, dec reference count
-				if (handle) call_handle_del_list = GC::__delref(handle);
+				if (handle) call_handle_del_list = GC::objs.__delref(handle);
 
 				// set handle to null - we must always point to a valid object or null
 				handle = nullptr;
@@ -387,7 +382,7 @@ public: // -- ptr -- //
 				obj = nullptr;
 
 				// unregister handle as a root
-				GC::__unroot(handle);
+				GC::roots.remove(handle);
 			}
 
 			// after a call to __delref we must call handle_del_list()
@@ -397,18 +392,14 @@ public: // -- ptr -- //
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
 		ptr(const ptr &other) : obj(other.obj), handle(other.handle)
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-			
-			GC::__root(handle); // register handle as a root
-			if (handle) GC::__addref(handle); // we're new - inc ref count
+			GC::roots.add(handle); // register handle as a root
+			if (handle) GC::objs.addref(handle); // we're new - inc ref count
 		}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
 		ptr(const ptr<J> &other) : obj(static_cast<element_type*>(other.obj)), handle(other.handle)
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-
-			GC::__root(handle); // register handle as a root
-			if (handle) GC::__addref(handle); // we're new - inc ref count
+			GC::roots.add(handle); // register handle as a root
+			if (handle) GC::objs.addref(handle); // we're new - inc ref count
 		}
 
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
@@ -480,7 +471,7 @@ public: // -- ptr -- //
 		void swap(ptr &other)
 		{
 			// regardless of sources for either ptr, reference counts won't change so we can use a trivial swap
-			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 			std::swap(obj, other.obj);
 			std::swap(handle, other.handle);
 		}
@@ -526,7 +517,7 @@ public: // -- ptr -- //
 			GC::ptr<T> ret(GC::no_init_t{});
 
 			{
-				std::lock_guard<std::mutex> lock(GC::mutex);
+				std::lock_guard<std::mutex> lock(GC::objs.mutex);
 				ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
 
 				// we can ignore this return value because ret is always null prior to this call
@@ -546,7 +537,7 @@ public: // -- ptr -- //
 		GC::ptr<T> exchange(const GC::ptr<T> &desired)
 		{
 			// not using lock_guard because we need special lock behavior - see below
-			std::unique_lock<std::mutex> lock(GC::mutex);
+			std::unique_lock<std::mutex> lock(GC::objs.mutex);
 
 			GC::ptr<T> ret(GC::no_init_t{});
 			ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
@@ -576,7 +567,7 @@ public: // -- ptr -- //
 		void swap(atomic_ptr &other)
 		{
 			// regardless of sources for either ptr, reference counts won't change so we can use a trivial swap
-			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 			std::swap(value.obj, other.value.obj);
 			std::swap(value.handle, other.value.handle);
 		}
@@ -928,11 +919,11 @@ public: // -- ptr allocation -- //
 		ptr<T> res(GC::no_init_t{});
 
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
-			__link(handle); // link the info object
+			GC::objs.__add(handle); // link the info object
 			res.__init(obj, handle); // initialize ptr with handle
-			handle->route(GC::__unroot); // claim this object's children
+			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
 		}
@@ -1012,14 +1003,14 @@ public: // -- ptr allocation -- //
 		ptr<T> res(GC::no_init_t{});
 
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
-			__link(handle); // link the info object
+			GC::objs.__add(handle); // link the info object
 
 			// initialize ptr with handle (the cast is safe because element_type is either scalar_type or bound array of scalar_type)
 			res.__init(reinterpret_cast<element_type*>(obj), handle);
 
-			handle->route(GC::__unroot); // claim this object's children
+			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
 		}
@@ -1080,11 +1071,11 @@ public: // -- ptr allocation -- //
 		ptr<T> res(GC::no_init_t{});
 
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
-			__link(handle); // link the info object
+			objs.__add(handle); // link the info object
 			res.__init(obj, handle); // initialize ptr with handle
-			handle->route(GC::__unroot); // claim this object's children
+			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
 		}
@@ -1137,11 +1128,11 @@ public: // -- ptr allocation -- //
 		ptr<T[]> res(GC::no_init_t{});
 
 		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
+			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
-			__link(handle); // link the info object
+			GC::objs.__add(handle); // link the info object
 			res.__init(obj, handle); // initialize ptr with handle
-			handle->route(GC::__unroot); // claim this object's children
+			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
 		}
@@ -1182,16 +1173,117 @@ public: // -- auto collection -- //
 	static sleep_time_t sleep_time();
 	static void sleep_time(sleep_time_t new_sleep_time);
 
+private: // -- database types -- //
+
+	// a synchronized container of info objects - implemented as a doubly-linked list
+	class objs_database
+	{
+	public: // -- data -- //
+
+		std::mutex mutex; // the synchronization mechanism
+
+		info *first; // pointer to the first object
+		info *last;  // pointer to the last object
+
+	public: // -- ctor / dtor / asgn -- //
+
+		objs_database() : first(nullptr), last(nullptr) {}
+
+		objs_database(const objs_database&) = delete;
+		objs_database &operator=(const objs_database&) = delete;
+
+	public: // -- access -- //
+
+		// adds obj to this database - und. if obj already belongs to one or more databases.
+		void add(info *obj);
+		// removes obj from this database - und. if obj does not belong to this database.
+		void remove(info *obj);
+
+		// as add() but not thread safe - you should first lock the mutex.
+		void __add(info *obj);
+		// as remove() but not thread safe - you should first lock the mutex.
+		void __remove(info *obj);
+
+	public: // -- management -- //
+
+		// adds 1 to obj's reference count.
+		void addref(info *obj);
+		// removes 1 from obj's reference count.
+		// returns true if you MUST call GC::handle_del_list afterwards.
+		bool delref(info *obj);
+
+		// as addref() but not thread safe - you should first lock the mutex.
+		void __addref(info *obj);
+		// as delref() but not thread safe - you should first lock the mutex.
+		bool __delref(info *obj);
+	};
+
+	class roots_database
+	{
+	public: // -- data -- //
+
+		std::mutex mutex; // the synchronization mechanism
+
+		std::unordered_set<info *const *> contents; // all the roots we hold
+
+	public: // -- ctor / dtor / asgn -- //
+
+		roots_database() = default;
+
+		roots_database(const roots_database&) = delete;
+		roots_database &operator=(const roots_database&) = delete;
+
+	public: // -- access -- //
+
+		std::size_t size() const { return this->contents.size(); }
+
+		// adds root to this database - und. if root already belongs to one or more databases.
+		void add(info *const &root);
+		void add(info *&&) = delete;
+
+		// removes root from this database - und. if root does not belong to this database.
+		void remove(info *const &root);
+		void remove(info *&&) = delete;
+	};
+
+	class del_list_database
+	{
+	public: // -- typedefs -- //
+
+		// type of container to use
+		typedef std::vector<info*> container_t;
+
+	public: // -- data -- //
+
+		std::mutex mutex; // the synchronization mechanism
+
+		container_t contents; // the del list contents
+
+	public: // -- ctor / dtor / asgn -- //
+
+		del_list_database() = default;
+
+		del_list_database(const del_list_database&) = delete;
+		del_list_database &operator=(const del_list_database&) = delete;
+
+	public: // -- access -- //
+
+		std::size_t size() const { return contents.size(); }
+
+		// adds obj to the del list - und. if obj is already part of one or more del list databases.
+		void add(info *obj);
+
+		// fetches the current database contents.
+		// contents is guaranteed to be empty after this call.
+		container_t fetch_all();
+	};
+
 private: // -- data -- //
 
-	static std::mutex mutex; // used to support thread-safety of gc operations
+	static objs_database objs; // the objects database for all threads
+	static roots_database roots; // the roots database for all threads
 
-	static info *first; // pointer to the first gc allocation
-	static info *last;  // pointer to the last gc allocation (not the same as the end iterator)
-
-	static std::unordered_set<info *const *> roots; // a database of all gc root handles - (references - do not delete)
-
-	static std::vector<info*> del_list; // list of handles that are scheduled for deletion (from __delref async calls)
+	static del_list_database del_list; // the del list database for all threads
 
 	// -----------------------------------------------
 
@@ -1226,29 +1318,6 @@ private: // -- private interface -- //
 	// starts with "__" = GC::mutex must be locked prior to invocation.
 	// otherwise = GC::mutex must not be locked prior to invocation.
 	// -----------------------------------------------------------------
-
-	// registers/unregisters a gc_info* as a root.
-	// safe to root if already rooted. safe to unroot if not rooted.
-	static void __root(info *const &handle);
-	static void __unroot(info *const &handle);
-
-	// for safety - ensures we can't pass root/unroot an rvalue
-	static void __root(info *&&handle) = delete;
-	static void __unroot(info *&&handle) = delete;
-
-	// links handle into the gc database.
-	// if is undefined behavior if handle is currently in the gc database.
-	static void __link(info *handle);
-	// unlinks handle from the gc database.
-	// it is undefined behavior if handle is not currently in the gc database.
-	static void __unlink(info *handle);
-
-	// adds a reference count to a garbage-collected object.
-	static void __addref(info *handle);
-	// removes a reference count from a garbage-collected object.
-	// instead of destroying the object immediately when the ref count reaches zero, adds it to del_list.
-	// returns true iff the object was scheduled for destruction in del_list.
-	static bool __delref(info *handle);
 	
 	// handles actual deletion of any objects scheduled for deletion if del_list.
 	static void handle_del_list();
@@ -1259,6 +1328,10 @@ private: // -- private interface -- //
 	// the first invocation of this function begins a new thread to perform timed garbage collection.
 	// all subsequent invocations do nothing.
 	static void __start_timed_collect();
+
+private: // -- utility router functions -- //
+
+	static void router_unroot(info *const &arc);
 
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 

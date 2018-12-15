@@ -330,7 +330,7 @@ std::string tostr(T &&v)
 
 
 
-int main()
+int main() try
 {
 	GC::strategy(GC::strategies::manual);
 
@@ -441,6 +441,11 @@ int main()
 
 	GC::ptr<std::unordered_multimap<int, GC::ptr<ListNode>>> merp = GC::make<std::unordered_multimap<int, GC::ptr<ListNode>>>();
 	
+	GC::ptr<ListNode> node_no_val;
+
+	GC::ptr<ptr_set> ptr_set_test = GC::make<ptr_set>();
+	GC::ptr<ListNode> node_test = GC::make<ListNode>();
+
 	merp->emplace(1, GC::make<ListNode>());
 	merp->emplace(2, GC::make<ListNode>());
 	merp->emplace(3, GC::make<ListNode>());
@@ -693,4 +698,9 @@ int main()
 
 	std::cin.get();
 	return 0;
+}
+catch (const std::exception &ex)
+{
+	std::cerr << "\nEXCEPTION!!\n\n" << ex.what() << "\n\n\n";
+	std::cin.get();
 }
