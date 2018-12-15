@@ -211,10 +211,15 @@ private:
 public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
     {
-        // modification of the mutable collection of GC::ptr and router must be mutually exclusive
-        std::lock_guard<std::mutex> lock(symbols_mutex);
-        
-        symbols[name] = new_value;
+		GC::ptr<TreeNode> safe_allocation_1 = GC::make<TreeNode>();
+
+		{
+			// modification of the mutable collection of GC::ptr and router must be mutually exclusive
+			std::lock_guard<std::mutex> lock(symbols_mutex);
+			symbols[name] = new_value;
+		}
+
+		GC::ptr<TreeNode> safe_allocation_2 = GC::make<TreeNode>();
     }
 };
 template<> struct GC::router<SymbolTable>
@@ -360,7 +365,7 @@ int main() try
 			auto arr = GC::make<alert_t[]>(4);
 			holder = arr.get(2);
 		}
-		std::cerr << "destroyed array\n";
+		std::cerr << "destroyed array - you should see dtors below:\n";
 	}
 	std::cerr << "----------------\n\n";;
 

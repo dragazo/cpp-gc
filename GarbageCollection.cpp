@@ -130,10 +130,11 @@ void GC::objs_database::delref(info *obj)
 	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
 	if (--obj->ref_count == 0 && !obj->destroying.test_and_set())
 	{
-		// add it to delete list
+		// add it to del list
 		del_list.add(obj);
 
-		// !! NEEDS THE CALL TO HANDLE_DEL_LIST() AND MUST BE THREAD SAFE !! //
+		// handle the del list
+		del_list.handle_all();
 	}
 }
 
