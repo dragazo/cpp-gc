@@ -121,28 +121,14 @@ void GC::objs_database::__remove(info *obj)
 
 void GC::objs_database::addref(info *obj)
 {
-	std::lock_guard<std::mutex> lock(this->mutex);
-	this->__addref(obj);
+	++obj->ref_count;
 }
 bool GC::objs_database::delref(info *obj)
 {
-	std::lock_guard<std::mutex> lock(this->mutex);
-	return this->__delref(obj);
-}
-
-void GC::objs_database::__addref(info *obj)
-{
-	++obj->ref_count;
-}
-bool GC::objs_database::__delref(info *obj)
-{
 	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
-	if (--obj->ref_count == 0 && !obj->destroying)
+	if (--obj->ref_count == 0 && !obj->destroying.test_and_set())
 	{
-		obj->destroying = true;
-
-		// unlink it and add it to delete list
-		objs.__remove(obj);
+		// add it to delete list
 		del_list.add(obj);
 
 		return true;
@@ -157,15 +143,21 @@ bool GC::objs_database::__delref(info *obj)
 
 // ----------------------------------- //
 
-void GC::roots_database::add(info *const &root)
+void GC::roots_database::add(const std::atomic<info*> &root)
 {
 	std::lock_guard<std::mutex> lock(this->mutex);
 	this->contents.insert(&root);
 }
-void GC::roots_database::remove(info *const &root)
+void GC::roots_database::remove(const std::atomic<info*> &root)
 {
 	std::lock_guard<std::mutex> lock(this->mutex);
 	this->contents.erase(&root);
+}
+
+void GC::roots_database::foreach(void(*func)(const std::atomic<info*>&))
+{
+	std::lock_guard<std::mutex> lock(this->mutex);
+	for (const std::atomic<info*> *i : this->contents) func(*i);
 }
 
 // -------------------------------------- //
@@ -204,13 +196,17 @@ void GC::handle_del_list()
 
 	// -- make sure we're not locked at this point - could block -- //
 
-	// destroy each entry
+	// for each delete entry
 	for (info *handle : del_list_cpy)
 	{
 		#if GC_SHOW_DELMSG
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
 		#endif
 
+		// unlink it
+		objs.remove(handle);
+		
+		// destroy it
 		handle->destroy();
 	}
 
@@ -234,10 +230,12 @@ void GC::__mark_sweep(info *handle)
 	handle->marked = true;
 
 	// for each outgoing arc
-	handle->route(+[](info *const &arc)
+	handle->route(+[](const std::atomic<info*> &arc)
 	{
+		info *raw = arc.load();
+
 		// if it hasn't been marked, recurse to it (only if non-null)
-		if (arc && !arc->marked) __mark_sweep(arc);
+		if (raw && !raw->marked) __mark_sweep(arc);
 	});
 }
 
@@ -279,7 +277,7 @@ void GC::collect()
 			std::lock_guard<std::mutex> lock(roots.mutex);
 
 			// for each root
-			for (info *const *i : roots.contents)
+			for (const std::atomic<info*> *i : roots.contents)
 			{
 				// perform a mark sweep from this root (if it points to something)
 				if (*i) __mark_sweep(*i);
@@ -295,12 +293,9 @@ void GC::collect()
 			_next = i->next;
 
 			// if it hasn't been marked and isn't currently being deleted
-			if (!i->marked && !i->destroying)
+			if (!i->marked && !i->destroying.test_and_set())
 			{
-				i->destroying = true;
-
-				// unlink it and add it to the delete list
-				objs.__remove(i);
+				// add it to the delete list
 				del_list.add(i);
 
 				#if GC_COLLECT_MSG
@@ -314,9 +309,9 @@ void GC::collect()
 		#endif
 	}
 
-	// -- make sure the mutex is unlocked before starting next step (could halt) -- //
+	// -- make sure the obj mutex is unlocked before starting next step (could halt) -- //
 
-	// handle the del list
+	// handle the delete list
 	handle_del_list();
 }
 
@@ -326,7 +321,7 @@ void GC::collect()
 
 // ------------------------------ //
 
-void GC::router_unroot(info *const &arc)
+void GC::router_unroot(const std::atomic<info*> &arc)
 {
 	roots.remove(arc);
 }

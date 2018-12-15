@@ -168,8 +168,8 @@ private: // -- private types -- //
 
 		const info_vtable *const vtable; // virtual function table to use
 
-		std::size_t ref_count = 1;      // the reference count for this allocation
-		bool        destroying = false; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
+		std::atomic<std::size_t> ref_count = 1;                 // the reference count for this allocation
+		std::atomic_flag         destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
 
 		bool marked; // only used for GC::collect() - otherwise undefined
 
@@ -200,13 +200,13 @@ public: // -- router function type definitions -- //
 	{
 	private: // -- contents hidden for security -- //
 
-		void(*const func)(info *const &); // raw function pointer to call
+		void(*const func)(const std::atomic<info*>&); // raw function pointer to call
 
-		router_fn(void(*_func)(info *const &)) : func(_func) {}
+		router_fn(void(*_func)(const std::atomic<info*>&)) : func(_func) {}
 		router_fn(std::nullptr_t) = delete;
 
-		void operator()(info *const &arg) { func(arg); }
-		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
+		void operator()(const std::atomic<info*> &arg) { func(arg); }
+		void operator()(std::atomic<info*>&&) = delete; // for safety - ensures we can't call with an rvalue
 
 		friend class GC;
 	};
@@ -215,13 +215,13 @@ public: // -- router function type definitions -- //
 	{
 	private: // -- contents hidden for security -- //
 
-		void(*const func)(info *const &); // raw function pointer to call
+		void(*const func)(const std::atomic<info*>&); // raw function pointer to call
 
-		mutable_router_fn(void(*_func)(info *const &)) : func(_func) {}
+		mutable_router_fn(void(*_func)(const std::atomic<info*>&)) : func(_func) {}
 		mutable_router_fn(std::nullptr_t) = delete;
 
-		void operator()(info *const &arg) { func(arg); }
-		void operator()(info *&&arg) = delete; // for safety - ensures we can't call with an rvalue
+		void operator()(const std::atomic<info*> &arg) { func(arg); }
+		void operator()(std::atomic<info*>&&) = delete; // for safety - ensures we can't call with an rvalue
 
 		friend class GC;
 	};
@@ -286,7 +286,7 @@ public: // -- ptr -- //
 
 		element_type *obj; // pointer to the object
 
-		GC::info *handle; // the handle to use for gc management functions.
+		std::atomic<info*> handle; // the handle to use for gc management functions.
 
 		friend class GC;
 
@@ -296,40 +296,27 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object of a compatible type (i.e. static or dynamic cast).
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list() AFTER THE LOCK ON GC::roots.mutex IS RELEASED.
-		bool __reset(element_type *_obj, GC::info *_handle)
+		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list().
+		bool reset(element_type *_obj, GC::info *_handle)
 		{
 			// repoint to the proper object
 			obj = _obj;
+			info *old_handle = handle.exchange(_handle);
 
 			// we only need to do anything else if we refer to different gc allocations
-			if (handle != _handle)
+			if (old_handle != _handle)
 			{
 				bool call_handle_del_list = false;
 
 				// drop our object
-				if (handle) call_handle_del_list = GC::objs.__delref(handle);
+				if (old_handle) call_handle_del_list = GC::objs.delref(old_handle);
 
 				// take on other's object
-				handle = _handle;
-				if (handle) GC::objs.__addref(handle);
+				if (_handle) GC::objs.addref(_handle);
 
 				return call_handle_del_list;
 			}
 			else return false;
-		}
-		// as __reset but begins by locking GC::mutex. additionally, internally handles the return value flag (see above).
-		// this operation is atomic.
-		void reset(element_type *_obj, GC::info *_handle)
-		{
-			bool call_handle_del_list = false;
-
-			{
-				std::lock_guard<std::mutex> lock(GC::objs.mutex);
-				call_handle_del_list = __reset(_obj, _handle);
-			}
-
-			if (call_handle_del_list) GC::handle_del_list();
 		}
 
 		// creates an empty ptr but does no elaborate initialization (e.g. DOES NOT ROOT THE INTERNAL HANDLE)
@@ -337,7 +324,6 @@ public: // -- ptr -- //
 		// must be used after the no_init_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE.
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, creates a valid, but empty ptr.
-		// GC::mutex must be locked prior to invocation.
 		// DOES NOT INC THE REF COUNT!!
 		void __init(element_type *_obj, GC::info *_handle)
 		{
@@ -373,7 +359,7 @@ public: // -- ptr -- //
 				std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
 				// if we have a handle, dec reference count
-				if (handle) call_handle_del_list = GC::objs.__delref(handle);
+				if (handle) call_handle_del_list = GC::objs.delref(handle);
 
 				// set handle to null - we must always point to a valid object or null
 				handle = nullptr;
@@ -385,18 +371,18 @@ public: // -- ptr -- //
 				GC::roots.remove(handle);
 			}
 
-			// after a call to __delref we must call handle_del_list()
+			// after a call to delref we must call handle_del_list()
 			if (call_handle_del_list) GC::handle_del_list();
 		}
 
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
-		ptr(const ptr &other) : obj(other.obj), handle(other.handle)
+		ptr(const ptr &other) : obj(other.obj), handle(other.handle.load())
 		{
 			GC::roots.add(handle); // register handle as a root
 			if (handle) GC::objs.addref(handle); // we're new - inc ref count
 		}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr(const ptr<J> &other) : obj(static_cast<element_type*>(other.obj)), handle(other.handle)
+		ptr(const ptr<J> &other) : obj(static_cast<element_type*>(other.obj)), handle(other.handle.load())
 		{
 			GC::roots.add(handle); // register handle as a root
 			if (handle) GC::objs.addref(handle); // we're new - inc ref count
@@ -470,10 +456,12 @@ public: // -- ptr -- //
 
 		void swap(ptr &other)
 		{
-			// regardless of sources for either ptr, reference counts won't change so we can use a trivial swap
-			std::lock_guard<std::mutex> lock(GC::objs.mutex);
-			std::swap(obj, other.obj);
-			std::swap(handle, other.handle);
+			// since we can't do an atomic swap, we need to do the usual swap algorithm
+			// this is to ensure there's never an object that isn't pointed to during an intermediate step
+
+			ptr temp = *this;
+			*this = other;
+			other = temp;
 		}
 		friend void swap(ptr &a, ptr &b) { a.swap(b); }
 	};
@@ -521,7 +509,7 @@ public: // -- ptr -- //
 				ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
 
 				// we can ignore this return value because ret is always null prior to this call
-				ret.__reset(value.obj, value.handle);
+				ret.reset(value.obj, value.handle);
 			}
 
 			return ret;
@@ -564,13 +552,7 @@ public: // -- ptr -- //
 
 	public: // -- swap -- //
 
-		void swap(atomic_ptr &other)
-		{
-			// regardless of sources for either ptr, reference counts won't change so we can use a trivial swap
-			std::lock_guard<std::mutex> lock(GC::objs.mutex);
-			std::swap(value.obj, other.value.obj);
-			std::swap(value.handle, other.value.handle);
-		}
+		void swap(atomic_ptr &other) { value.swap(other.value); }
 		friend void swap(atomic_ptr &a, atomic_ptr &b) { a.swap(b); }
 	};
 
@@ -1206,16 +1188,12 @@ private: // -- database types -- //
 
 	public: // -- management -- //
 
-		// adds 1 to obj's reference count.
+		// adds 1 to obj's reference count - does not use the mutex.
 		void addref(info *obj);
-		// removes 1 from obj's reference count.
+
+		// removes 1 from obj's reference count - does not use the mutex.
 		// returns true if you MUST call GC::handle_del_list afterwards.
 		bool delref(info *obj);
-
-		// as addref() but not thread safe - you should first lock the mutex.
-		void __addref(info *obj);
-		// as delref() but not thread safe - you should first lock the mutex.
-		bool __delref(info *obj);
 	};
 
 	class roots_database
@@ -1224,7 +1202,7 @@ private: // -- database types -- //
 
 		std::mutex mutex; // the synchronization mechanism
 
-		std::unordered_set<info *const *> contents; // all the roots we hold
+		std::unordered_set<const std::atomic<info*>*> contents; // all the roots we hold
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -1238,12 +1216,17 @@ private: // -- database types -- //
 		std::size_t size() const { return this->contents.size(); }
 
 		// adds root to this database - und. if root already belongs to one or more databases.
-		void add(info *const &root);
-		void add(info *&&) = delete;
+		void add(const std::atomic<info*> &root);
+		void add(std::atomic<info*>&&) = delete;
 
 		// removes root from this database - und. if root does not belong to this database.
-		void remove(info *const &root);
-		void remove(info *&&) = delete;
+		void remove(const std::atomic<info*> &root);
+		void remove(std::atomic<info*>&&) = delete;
+
+	public: // -- iteration -- //
+
+		// locks the container and calls func for each entry
+		void foreach(void(*func)(const std::atomic<info*>&));
 	};
 
 	class del_list_database
@@ -1331,7 +1314,7 @@ private: // -- private interface -- //
 
 private: // -- utility router functions -- //
 
-	static void router_unroot(info *const &arc);
+	static void router_unroot(const std::atomic<info*> &arc);
 
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 
