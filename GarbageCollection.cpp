@@ -36,6 +36,8 @@ GC::roots_database GC::roots;
 
 GC::del_list_database GC::del_list;
 
+std::atomic_flag GC::collect_flag = ATOMIC_FLAG_INIT;
+
 // ---------------------------------------
 
 std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
@@ -123,7 +125,7 @@ void GC::objs_database::addref(info *obj)
 {
 	++obj->ref_count;
 }
-bool GC::objs_database::delref(info *obj)
+void GC::objs_database::delref(info *obj)
 {
 	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
 	if (--obj->ref_count == 0 && !obj->destroying.test_and_set())
@@ -131,10 +133,8 @@ bool GC::objs_database::delref(info *obj)
 		// add it to delete list
 		del_list.add(obj);
 
-		return true;
+		// !! NEEDS THE CALL TO HANDLE_DEL_LIST() AND MUST BE THREAD SAFE !! //
 	}
-
-	return false;
 }
 
 // ----------------------------------- //
@@ -172,32 +172,19 @@ void GC::del_list_database::add(info *obj)
 	contents.push_back(obj);
 }
 
-GC::del_list_database::container_t GC::del_list_database::fetch_all()
+void GC::del_list_database::handle_all()
 {
-	std::lock_guard<std::mutex> lock(this->mutex);
-	
-	// get the current contents (soon to be old contents)
-	container_t old_contents = std::move(contents);
-	contents.clear(); // clear current contents just to be safe (not all containers do it for us on move)
-	
-	return old_contents;
-}
-
-// --------------- //
-
-// -- interface -- //
-
-// --------------- //
-
-void GC::handle_del_list()
-{
-	// fetch the del list contents (internally empties the database)
-	del_list_database::container_t del_list_cpy = del_list.fetch_all();
-
-	// -- make sure we're not locked at this point - could block -- //
+	// extract all the del list contents before beginning
+	// this is so calls to del list functions during this action won't deadlock
+	decltype(this->contents) contents_cpy;
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+		contents_cpy = std::move(this->contents);
+		this->contents.clear(); // clear the contents just to be sure (not all std containers do this on move)
+	}
 
 	// for each delete entry
-	for (info *handle : del_list_cpy)
+	for (info *handle : contents_cpy)
 	{
 		#if GC_SHOW_DELMSG
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
@@ -205,14 +192,14 @@ void GC::handle_del_list()
 
 		// unlink it
 		objs.remove(handle);
-		
+
 		// destroy it
 		handle->destroy();
 	}
 
 	// delete the handles
 	// this is done after calling all deleters so that the deletion func can access the handles (but not objects) safely
-	for (info *handle : del_list_cpy)
+	for (info *handle : contents_cpy)
 	{
 		handle->dealloc();
 	}
@@ -241,6 +228,11 @@ void GC::__mark_sweep(info *handle)
 
 void GC::collect()
 {
+	// construct the sentry and exit if we fail to obtain the flag.
+	// the logic behind this is that several back-to-back garbage collections would be pointless, so we can skip overlapping ones.
+	GC::atomic_flag_sentry sentry(GC::collect_flag);
+	if (!sentry) return;
+
 	#if GC_COLLECT_MSG
 	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
 	#endif
@@ -312,7 +304,7 @@ void GC::collect()
 	// -- make sure the obj mutex is unlocked before starting next step (could halt) -- //
 
 	// handle the delete list
-	handle_del_list();
+	GC::del_list.handle_all();
 }
 
 // ------------------------------ //

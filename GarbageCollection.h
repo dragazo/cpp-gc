@@ -110,8 +110,7 @@ public: // -- router functions -- //
 	// the mutable router function system is entirely a method for optimization and can safely be ignored if desired.
 
 	// this type represents the router function set for objects of type T.
-	// router functions must be static, named "route", return void, and take two arguments: const T& and a router function object (i.e. GC::router_fn or GC::mutable_router_fn).
-	// the router function object is guaranteed to be small and trivial - for efficiency, you should take it by value.
+	// router functions must be static, named "route", return void, and take two args: const T& and a router function object by value (i.e. GC::router_fn or GC::mutable_router_fn).
 	// if you don't care about the efficiency mechanism of mutable router functions, you can defined the function type as a template type paramter, but it must be deducible.
 	// the default implementation is no-op, which is suitable for any non-gc type.
 	// this should not be used directly for routing to owned objects - see the helper functions below.
@@ -130,7 +129,7 @@ public: // -- router functions -- //
 	static void route(const T &obj, F func)
 	{
 		// make sure the underlying router function is valid
-		static_assert(is_well_formed_router_function<T, F>::value, "underlying router function was ill-formed");
+		static_assert(GC::is_well_formed_router_function<T, F>::value, "underlying router function was ill-formed");
 
 		// call the underlying router function
 		GC::router<std::remove_cv_t<T>>::route(obj, func);
@@ -150,7 +149,7 @@ private: // -- private types -- //
 		void(*const destroy)(info&); // a function to destroy the object
 		void(*const dealloc)(info&); // a function to deallocate memory - called after destroy
 
-		void(*const route)(info&, router_fn);         // a router function to use for this object
+		void(*const route)(info&, router_fn);                 // a router function to use for this object
 		void(*const mutable_route)(info&, mutable_router_fn); // a mutable router function to use for this object
 
 		info_vtable(void(*_destroy)(info&), void(*_dealloc)(info&), void(*_route)(info&, router_fn), void(*_mutable_route)(info&, mutable_router_fn))
@@ -190,7 +189,7 @@ private: // -- private types -- //
 		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
 	};
 
-	// used to select a GC::ptr constructor that does not perform a GC::root operation
+	// used to select a GC::ptr constructor that does not perform normal implicit initialization
 	struct no_init_t {};
 
 public: // -- router function type definitions -- //
@@ -293,30 +292,29 @@ public: // -- ptr -- //
 	private: // -- helpers -- //
 
 		// changes what handle we should use, properly unlinking ourselves from the old one and linking to the new one.
-		// the new handle must come from a pre-existing ptr object of a compatible type (i.e. static or dynamic cast).
+		// the new handle must come from a pre-existing ptr object.
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list().
-		bool reset(element_type *_obj, GC::info *_handle)
+		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list() afterwards.
+		void reset(element_type *new_obj, GC::info *new_handle)
 		{
-			// repoint to the proper object
-			obj = _obj;
-			info *old_handle = handle.exchange(_handle);
+			// repoint to the proper object - handle change must be atomic for GC::collect() logic
+
+			obj = new_obj;
+			info *old_handle = handle.exchange(new_handle);
+
+			// the rest of this function doesn't need to be atomic because it's just reference count management.
+			// the collector doesn't care about reference counts - that's left to us.
 
 			// we only need to do anything else if we refer to different gc allocations
-			if (old_handle != _handle)
+			if (old_handle != new_handle)
 			{
-				bool call_handle_del_list = false;
-
-				// drop our object
-				if (old_handle) call_handle_del_list = GC::objs.delref(old_handle);
-
 				// take on other's object
-				if (_handle) GC::objs.addref(_handle);
+				if (new_handle) GC::objs.addref(new_handle);
 
-				return call_handle_del_list;
+				// drop our object - account for delref return value
+				if (old_handle) GC::objs.delref(old_handle);
 			}
-			else return false;
 		}
 
 		// creates an empty ptr but does no elaborate initialization (e.g. DOES NOT ROOT THE INTERNAL HANDLE)
@@ -353,26 +351,17 @@ public: // -- ptr -- //
 
 		~ptr()
 		{
-			bool call_handle_del_list = false;
+			// if we have a handle, dec reference count
+			if (handle) GC::objs.delref(handle);
 
-			{
-				std::lock_guard<std::mutex> lock(GC::objs.mutex);
+			// set handle to null - we must always point to a valid object or null
+			handle = nullptr;
 
-				// if we have a handle, dec reference count
-				if (handle) call_handle_del_list = GC::objs.delref(handle);
+			// set obj to null (better to get nullptr exceptions than segfaults)
+			obj = nullptr;
 
-				// set handle to null - we must always point to a valid object or null
-				handle = nullptr;
-
-				// set obj to null (better to get nullptr exceptions than segfaults)
-				obj = nullptr;
-
-				// unregister handle as a root
-				GC::roots.remove(handle);
-			}
-
-			// after a call to delref we must call handle_del_list()
-			if (call_handle_del_list) GC::handle_del_list();
+			// unregister handle as a root
+			GC::roots.remove(handle);
 		}
 
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
@@ -1193,7 +1182,7 @@ private: // -- database types -- //
 
 		// removes 1 from obj's reference count - does not use the mutex.
 		// returns true if you MUST call GC::handle_del_list afterwards.
-		bool delref(info *obj);
+		void delref(info *obj);
 	};
 
 	class roots_database
@@ -1256,9 +1245,35 @@ private: // -- database types -- //
 		// adds obj to the del list - und. if obj is already part of one or more del list databases.
 		void add(info *obj);
 
-		// fetches the current database contents.
-		// contents is guaranteed to be empty after this call.
-		container_t fetch_all();
+		// handles all the scheduled deletions - this database is guaranteed to be empty after this action
+		void handle_all();
+	};
+
+private: // -- sentries -- //
+
+	// a sentry for an atomic flag.
+	// on construction, sets the flag and gets the previous value; on destruction, clears the flag if it was successfully taken.
+	// conversion of the sentry to bool gets if the flag was successfully taken (i.e. if it was previously false)
+	struct atomic_flag_sentry
+	{
+	private: // -- data -- //
+
+		std::atomic_flag &_flag;
+		bool _value;
+
+	public: // -- interface -- //
+
+		explicit atomic_flag_sentry(std::atomic_flag &flag) : _flag(flag)
+		{
+			_value = _flag.test_and_set();
+		}
+		~atomic_flag_sentry()
+		{
+			if (!_value) _flag.clear();
+		}
+
+		explicit operator bool() const noexcept { return !_value; }
+		bool operator!() const noexcept { return _value; }
 	};
 
 private: // -- data -- //
@@ -1267,6 +1282,8 @@ private: // -- data -- //
 	static roots_database roots; // the roots database for all threads
 
 	static del_list_database del_list; // the del list database for all threads
+
+	static std::atomic_flag collect_flag; // flag that marks if a collection is in progress
 
 	// -----------------------------------------------
 
@@ -1302,9 +1319,6 @@ private: // -- private interface -- //
 	// otherwise = GC::mutex must not be locked prior to invocation.
 	// -----------------------------------------------------------------
 	
-	// handles actual deletion of any objects scheduled for deletion if del_list.
-	static void handle_del_list();
-
 	// performs a mark sweep operation from the given handle.
 	static void __mark_sweep(info *handle);
 
