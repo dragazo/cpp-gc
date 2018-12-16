@@ -221,6 +221,11 @@ public:
 
 		GC::ptr<TreeNode> safe_allocation_2 = GC::make<TreeNode>();
     }
+	void clear()
+	{
+		std::lock_guard<std::mutex> lock(symbols_mutex);
+		symbols.clear();
+	}
 };
 template<> struct GC::router<SymbolTable>
 {
@@ -524,7 +529,7 @@ int main() try
 		GC::collect();
 		std::cerr << "\n\n";
 	}
-
+	
 	sse_t t;
 	t.d[4] = '6';
 	std::cerr << "max align: " << alignof(std::max_align_t) << "\n\n";
@@ -636,6 +641,7 @@ int main() try
 		{
 			while (1)
 			{
+				/*
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*atomic_gc_ptr = GC::make<atomic_container>();
@@ -672,11 +678,13 @@ int main() try
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*atomic_gc_ptr = GC::make<atomic_container>();
-
+				*/
 				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
 
 				for (int i = 0; i < 128; ++i)
 					table->update(tostr(i), GC::make<TreeNode>());
+
+				table->clear();
 
 			}
 		});
