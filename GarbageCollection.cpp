@@ -153,22 +153,32 @@ void GC::objs_database::delref(info *obj)
 
 void GC::roots_database::add(const std::atomic<info*> &root)
 {
-	std::lock_guard<std::mutex> lock(this->mutex);
-	this->contents.insert(&root);
+	std::lock_guard<std::mutex> lock(this->queues_mutex);
+	
+	remove_queue.erase(&root);
+	add_queue.insert(&root);
 }
 void GC::roots_database::remove(const std::atomic<info*> &root)
 {
-	std::lock_guard<std::mutex> lock(this->mutex);
-	this->contents.erase(&root);
+	std::lock_guard<std::mutex> lock(this->queues_mutex);
+	
+	add_queue.erase(&root);
+	remove_queue.insert(&root);
 }
 
-void GC::roots_database::__add(const std::atomic<info*> &root)
+void GC::roots_database::__update_content()
 {
-	this->contents.insert(&root);
-}
-void GC::roots_database::__remove(const std::atomic<info*> &root)
-{
-	this->contents.erase(&root);
+	std::lock_guard<std::mutex> add_queue_lock(queues_mutex);
+
+	// we assume we have a lock on the content mutex
+
+	// perform all the queued add operations - then empty the container
+	for (const auto &i : add_queue) content.insert(i);
+	add_queue.clear();
+
+	// perform all the queued remove operations - then empty the container
+	for (const auto &i : remove_queue) content.erase(i);
+	remove_queue.clear();
 }
 
 // -------------------------------------- //
@@ -305,33 +315,28 @@ void GC::collect()
 
 		// this can happen because e.g. a ptr<T> was added to a std::vector<ptr<T>> and thus was not unrooted by GC::make() after construction
 
+		// for each object in the gc database
+		for (info *i = objs.first; i; i = i->next)
 		{
-			// we need a lock on the roots database for the process of unrooting handles and performing the mark sweep
-			std::lock_guard<std::mutex> root_lock(roots.mutex);
+			// clear its marked flag
+			i->marked = false;
 
-			#if GC_COLLECT_MSG
-			std::cerr << "collecting - current roots: " << roots.contents.size() << " -> ";
-			#endif
+			// claim its children (see above comment)
+			// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
+			i->mutable_route(GC::router_unroot);
+		}
 
-			// for each object in the gc database
-			for (info *i = objs.first; i; i = i->next)
-			{
-				// clear its marked flag
-				i->marked = false;
+		// -- mark and sweep -- //
 
-				// claim its children (see above comment)
-				// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
-				i->mutable_route(GC::router_unroot_unsafe);
-			}
+		{
+			// we're about to use the roots content set, so we need to lock its mutex
+			std::lock_guard<std::mutex> root_lock(roots.content_mutex);
 
-			// -- mark and sweep -- //
-
-			#if GC_COLLECT_MSG
-			std::cerr << roots.contents.size() << '\n';
-			#endif
+			// now we need to update the roots content set to apply the changes
+			roots.__update_content();
 
 			// for each root
-			for (const std::atomic<info*> *i : roots.contents)
+			for (const std::atomic<info*> *i : roots.content)
 			{
 				info *raw = i->load();
 
@@ -381,11 +386,6 @@ void GC::router_unroot(const std::atomic<info*> &arc)
 {
 	roots.remove(arc);
 }
-void GC::router_unroot_unsafe(const std::atomic<info*> &arc)
-{
-	roots.__remove(arc);
-}
-
 
 // --------------------- //
 

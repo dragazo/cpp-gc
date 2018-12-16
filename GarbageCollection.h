@@ -1191,9 +1191,13 @@ private: // -- database types -- //
 	{
 	public: // -- data -- //
 
-		std::mutex mutex; // the synchronization mechanism
+		std::mutex content_mutex; // mutex for using the content set
+		std::mutex queues_mutex;  // mutex for using the queue sets - YOU SHOULD NEVER LOCK THIS EXPLICITLY
 
-		std::unordered_set<const std::atomic<info*>*> contents; // all the roots we hold
+		std::unordered_set<const std::atomic<info*>*> content; // all the roots we hold
+		
+		std::unordered_set<const std::atomic<info*>*> add_queue;    // the set of queued root add operations
+		std::unordered_set<const std::atomic<info*>*> remove_queue; // the set of queued root remove operations
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -1212,13 +1216,10 @@ private: // -- database types -- //
 		void remove(const std::atomic<info*> &root);
 		void remove(std::atomic<info*>&&) = delete;
 
-		// as add() but not thread safe - you should lock the mutex first
-		void __add(const std::atomic<info*> &root);
-		void __add(std::atomic<info*>&&) = delete;
+	public: // -- external management -- //
 
-		// as remove() but not thread safe - you should lock the mutex first
-		void __remove(const std::atomic<info*> &root);
-		void __remove(std::atomic<info*>&&) = delete;
+		// processes the add/remove queues - you must have content_mutex locked, but you must not have queue_mutex locked
+		void __update_content();
 	};
 
 	class del_list_database
@@ -1355,7 +1356,6 @@ private: // -- private interface -- //
 private: // -- utility router functions -- //
 
 	static void router_unroot(const std::atomic<info*> &arc);
-	static void router_unroot_unsafe(const std::atomic<info*> &arc);
 
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 
