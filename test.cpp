@@ -212,7 +212,7 @@ public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
     {
 		GC::ptr<TreeNode> safe_allocation_1 = GC::make<TreeNode>();
-
+		
 		{
 			// modification of the mutable collection of GC::ptr and router must be mutually exclusive
 			std::lock_guard<std::mutex> lock(symbols_mutex);
@@ -343,7 +343,7 @@ std::string tostr(T &&v)
 int main() try
 {
 	GC::strategy(GC::strategies::manual);
-
+	/*
 
 	GC::ptr<atomic_container> atomic_container_obj = GC::make<atomic_container>();
 
@@ -406,7 +406,7 @@ int main() try
 	assert(std::is_same<decltype(arr_test_3.get()) COMMA int(*)[5][6]>::value);
 	assert(std::is_same<decltype(arr_test_4.get()) COMMA int(*)>::value);
 
-	/**/
+	
 	GC::ptr<std::stack<int>> stack_ptr = GC::make<std::stack<int>>();
 	GC::ptr<std::queue<int>> queue_ptr = GC::make<std::queue<int>>();
 	GC::ptr<std::priority_queue<int>> priority_queue_ptr = GC::make<std::priority_queue<int>>();
@@ -417,7 +417,7 @@ int main() try
 		queue_ptr->push(i);
 		priority_queue_ptr->push(i);
 	}
-	/**/
+	
 
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
@@ -497,14 +497,7 @@ int main() try
 	atomic_test_0.swap(atomic_test_1);
 	swap(atomic_test_0, atomic_test_1);
 
-	/*merp->push_back(GC::make<ListNode>());
-	merp->push_back(GC::make<ListNode>());
-	merp->emplace_back(GC::make<ListNode>());
-	merp->emplace_back(GC::make<ListNode>());
-	merp->push_back(GC::make<ListNode>());
-	merp->push_back(GC::make<ListNode>());
-	merp->emplace_back(GC::make<ListNode>());
-	merp->emplace_back(GC::make<ListNode>());*/
+
 	GC::collect();
 	std::cerr << "\n\n";
 
@@ -682,30 +675,35 @@ int main() try
 				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
 
 				for (int i = 0; i < 128; ++i)
-					table->update(tostr(i), GC::make<TreeNode>());
+				{
+					GC::ptr<TreeNode> tree = GC::make<TreeNode>();
+					tree->left = GC::make<TreeNode>();
+					tree->right = GC::make<TreeNode>();
+					table->update(tostr(i), tree);
+				}
 
 				table->clear();
 
 			}
 		});
-		std::thread t2([]()
-		{
+		//std::thread t2([]()
+		//{
 			int i = 0;
 			while (1)
 			{
-				*atomic_gc_ptr = GC::make<atomic_container>();
+				//*atomic_gc_ptr = GC::make<atomic_container>();
 
 
 
 				std::cerr << "collecting pass " << ++i << '\n';
 				GC::collect();
 
-				*atomic_gc_ptr = GC::make<atomic_container>();
+				//*atomic_gc_ptr = GC::make<atomic_container>();
 			}
-		});
+		//});
 		
 		t1.join();
-		t2.join();
+		//t2.join();
 	}
 	/**/
 

@@ -36,8 +36,6 @@ GC::roots_database GC::roots;
 
 GC::del_list_database GC::del_list;
 
-std::atomic_flag GC::collect_flag = ATOMIC_FLAG_INIT;
-
 // ---------------------------------------
 
 std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
@@ -130,11 +128,20 @@ void GC::objs_database::delref(info *obj)
 	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
 	if (--obj->ref_count == 0 && !obj->destroying.test_and_set())
 	{
-		// add it to del list
-		del_list.add(obj);
+		// add obj to the del list
+		GC::del_list.add(obj);
 
-		// handle the del list
-		del_list.handle_all();
+		// if we're the collector thread
+		if (GC::collection_deadlock_protector::this_is_collector_thread())
+		{
+			// the (synchronous) call to GC::collect() will handle del list, so we don't need to do anything else
+		}
+		// otherwise we're not the collector thread
+		else
+		{
+			// in this case it's fine for us to block on the call to handle del list
+			//GC::del_list.handle_all();
+		}
 	}
 }
 
@@ -155,10 +162,13 @@ void GC::roots_database::remove(const std::atomic<info*> &root)
 	this->contents.erase(&root);
 }
 
-void GC::roots_database::foreach(void(*func)(const std::atomic<info*>&))
+void GC::roots_database::__add(const std::atomic<info*> &root)
 {
-	std::lock_guard<std::mutex> lock(this->mutex);
-	for (const std::atomic<info*> *i : this->contents) func(*i);
+	this->contents.insert(&root);
+}
+void GC::roots_database::__remove(const std::atomic<info*> &root)
+{
+	this->contents.erase(&root);
 }
 
 // -------------------------------------- //
@@ -170,6 +180,10 @@ void GC::roots_database::foreach(void(*func)(const std::atomic<info*>&))
 void GC::del_list_database::add(info *obj)
 {
 	std::lock_guard<std::mutex> lock(this->mutex);
+	contents.push_back(obj);
+}
+void GC::del_list_database::__add(info *obj)
+{
 	contents.push_back(obj);
 }
 
@@ -195,7 +209,7 @@ void GC::del_list_database::handle_all()
 		objs.remove(handle);
 
 		// destroy it
-		handle->destroy();
+		if (!handle->destroy_completed) handle->destroy();
 	}
 
 	// delete the handles
@@ -204,6 +218,45 @@ void GC::del_list_database::handle_all()
 	{
 		handle->dealloc();
 	}
+}
+
+// ----------------------------------- //
+
+// -- collection deadlock protector -- //
+
+// ----------------------------------- //
+
+std::mutex GC::collection_deadlock_protector::internal_mutex;
+
+std::thread::id GC::collection_deadlock_protector::collector_thread;
+
+bool GC::collection_deadlock_protector::begin_collection()
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// if there's already a collector thread, fail
+	if (collector_thread != std::thread::id()) return false;
+
+	// otherwise mark the calling thread as the collector thread
+	collector_thread = std::this_thread::get_id();
+
+	return true;
+}
+
+void GC::collection_deadlock_protector::end_collection()
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// mark that there is no longer a collector thread
+	collector_thread = std::thread::id();
+}
+
+bool GC::collection_deadlock_protector::this_is_collector_thread()
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// return true iff the calling thread is the collector thread
+	return collector_thread == std::this_thread::get_id();
 }
 
 // ---------------- //
@@ -229,51 +282,61 @@ void GC::__mark_sweep(info *handle)
 
 void GC::collect()
 {
-	// construct the sentry and exit if we fail to obtain the flag.
-	// the logic behind this is that several back-to-back garbage collections would be pointless, so we can skip overlapping ones.
-	GC::atomic_flag_sentry sentry(GC::collect_flag);
-	if (!sentry) return;
-
-	#if GC_COLLECT_MSG
-	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
-	#endif
-
 	{
-		std::lock_guard<std::mutex> lock(objs.mutex);
+		// begin a collection action - if that fails early exit.
+		// the logic behind this is that several back-to-back garbage collections would be pointless, so we can skip overlapping ones.
+		if (!GC::collection_deadlock_protector::begin_collection()) return;
+		// also make a sentry object to end the collection action in case we forget or somehow trigger an exception
+		struct collection_ender_t
+		{
+			~collection_ender_t() { GC::collection_deadlock_protector::end_collection(); }
+		} collection_ender;
+
+		// we'll hold a long-running lock on the objects database - it would be very bad if someone changed it at any point in this process
+		std::lock_guard<std::mutex> obj_lock(objs.mutex);
+
+		// -------------------------------------------------------------------
+
+		#if GC_COLLECT_MSG
+		std::size_t collect_count = 0; // number of objects that we scheduled for deletion
+		#endif
 
 		// -- recalculate root claims for each object -- //
 
 		// this can happen because e.g. a ptr<T> was added to a std::vector<ptr<T>> and thus was not unrooted by GC::make() after construction
 
-		#if GC_COLLECT_MSG
-		std::cerr << "collecting - current roots: " << roots.size() << " -> ";
-		#endif
-		
-		// for each object in hte gc database
-		for (info *i = objs.first; i; i = i->next)
 		{
-			// clear its marked flag
-			i->marked = false;
+			// we need a lock on the roots database for the process of unrooting handles and performing the mark sweep
+			std::lock_guard<std::mutex> root_lock(roots.mutex);
 
-			// claim its children (see above comment)
-			// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
-			i->mutable_route(GC::router_unroot);
-		}
+			#if GC_COLLECT_MSG
+			std::cerr << "collecting - current roots: " << roots.contents.size() << " -> ";
+			#endif
 
-		// -- mark and sweep -- //
+			// for each object in the gc database
+			for (info *i = objs.first; i; i = i->next)
+			{
+				// clear its marked flag
+				i->marked = false;
 
-		#if GC_COLLECT_MSG
-		std::cerr << roots.size() << '\n';
-		#endif
+				// claim its children (see above comment)
+				// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
+				i->mutable_route(GC::router_unroot_unsafe);
+			}
 
-		{
-			std::lock_guard<std::mutex> lock(roots.mutex);
+			// -- mark and sweep -- //
+
+			#if GC_COLLECT_MSG
+			std::cerr << roots.contents.size() << '\n';
+			#endif
 
 			// for each root
 			for (const std::atomic<info*> *i : roots.contents)
 			{
+				info *raw = i->load();
+
 				// perform a mark sweep from this root (if it points to something)
-				if (*i) __mark_sweep(*i);
+				if (raw) __mark_sweep(raw);
 			}
 		}
 
@@ -318,6 +381,11 @@ void GC::router_unroot(const std::atomic<info*> &arc)
 {
 	roots.remove(arc);
 }
+void GC::router_unroot_unsafe(const std::atomic<info*> &arc)
+{
+	roots.__remove(arc);
+}
+
 
 // --------------------- //
 

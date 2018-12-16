@@ -146,8 +146,8 @@ private: // -- private types -- //
 	// the virtual function table type for info objects.
 	struct info_vtable
 	{
-		void(*const destroy)(info&); // a function to destroy the object
-		void(*const dealloc)(info&); // a function to deallocate memory - called after destroy
+		void(*const destroy)(info&); // a function to destroy the object - allowed to deallocate obj's memory but must not deallocate the info object's memory.
+		void(*const dealloc)(info&); // a function to deallocate memory - called after destroy - must not call anything but deallocation functions (e.g. no destructors).
 
 		void(*const route)(info&, router_fn);                 // a router function to use for this object
 		void(*const mutable_route)(info&, mutable_router_fn); // a mutable router function to use for this object
@@ -168,7 +168,9 @@ private: // -- private types -- //
 		const info_vtable *const vtable; // virtual function table to use
 
 		std::atomic<std::size_t> ref_count = 1;                 // the reference count for this allocation
-		std::atomic_flag         destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
+		
+		std::atomic_flag destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
+		bool             destroy_completed = false;     // marks if destruction completed
 
 		bool marked; // only used for GC::collect() - otherwise undefined
 
@@ -1202,8 +1204,6 @@ private: // -- database types -- //
 
 	public: // -- access -- //
 
-		std::size_t size() const { return this->contents.size(); }
-
 		// adds root to this database - und. if root already belongs to one or more databases.
 		void add(const std::atomic<info*> &root);
 		void add(std::atomic<info*>&&) = delete;
@@ -1212,10 +1212,13 @@ private: // -- database types -- //
 		void remove(const std::atomic<info*> &root);
 		void remove(std::atomic<info*>&&) = delete;
 
-	public: // -- iteration -- //
+		// as add() but not thread safe - you should lock the mutex first
+		void __add(const std::atomic<info*> &root);
+		void __add(std::atomic<info*>&&) = delete;
 
-		// locks the container and calls func for each entry
-		void foreach(void(*func)(const std::atomic<info*>&));
+		// as remove() but not thread safe - you should lock the mutex first
+		void __remove(const std::atomic<info*> &root);
+		void __remove(std::atomic<info*>&&) = delete;
 	};
 
 	class del_list_database
@@ -1240,12 +1243,13 @@ private: // -- database types -- //
 
 	public: // -- access -- //
 
-		std::size_t size() const { return contents.size(); }
-
 		// adds obj to the del list - und. if obj is already part of one or more del list databases.
 		void add(info *obj);
+		// as add() but not threadsafe - you should first lock the mutex
+		void __add(info *obj);
 
-		// handles all the scheduled deletions - this database is guaranteed to be empty after this action
+		// handles all the scheduled deletions - this database is emptied after this action.
+		// if used during a garbage collection pass, does nothing.
 		void handle_all();
 	};
 
@@ -1276,15 +1280,37 @@ private: // -- sentries -- //
 		bool operator!() const noexcept { return _value; }
 	};
 
+private: // -- collection deadlock protector -- //
+
+	class collection_deadlock_protector
+	{
+	private: // -- data -- //
+
+		static std::mutex internal_mutex; // mutex used only for internal synchronization
+
+		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
+
+	public: // -- interface -- //
+
+		// begins a collection action.
+		// if there is already a collection action in progress, does nothing and returns false.
+		// otherwise the calling thread is marked as the collector thread and returns true.
+		static bool begin_collection();
+
+		// ends a collection action.
+		static void end_collection();
+
+		// returns true iff the calling thread is the current collector thread
+		static bool this_is_collector_thread();
+	};
+
 private: // -- data -- //
 
 	static objs_database objs; // the objects database for all threads
 	static roots_database roots; // the roots database for all threads
 
 	static del_list_database del_list; // the del list database for all threads
-
-	static std::atomic_flag collect_flag; // flag that marks if a collection is in progress
-
+	
 	// -----------------------------------------------
 
 	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
@@ -1329,6 +1355,7 @@ private: // -- private interface -- //
 private: // -- utility router functions -- //
 
 	static void router_unroot(const std::atomic<info*> &arc);
+	static void router_unroot_unsafe(const std::atomic<info*> &arc);
 
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 
