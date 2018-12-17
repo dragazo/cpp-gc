@@ -123,7 +123,10 @@ The following types have well-formed `GC::router` specializations pre-defined fo
 * `std::multimap<Key, T, Compare, Allocator>`
 * `std::multiset<Key, Compare, Allocator>`
 * `std::pair<T1, T2>`
+* `std::priority_queue<T, Container, Compare>`
+* `std::queue<T, Container>`
 * `std::set<Key, Compare, Allocator>`
+* `std::stack<T, Container>`
 * `std::tuple<Types...>`
 * `std::unique_ptr<T, Deleter>`
 * `std::unordered_map<Key, T, Hash, KeyEqual, Allocator>`
@@ -135,10 +138,7 @@ The following types have well-formed `GC::router` specializations pre-defined fo
 The following types have ill-formed `GC::router` specializations pre-defined for safety. This is typically because there is no way to route to said type's contents for one reason or another. It is a compile error to use any of these, which should help limit confusion on usage.
 
 * `T[]`
-* `std::atomic<T>` (where T is not a GC::ptr)
-* `std::priority_queue<T, Container, Compare>`
-* `std::queue<T, Container>`
-* `std::stack<T, Container>`
+* `std::atomic<T>` (where T is not a `GC::ptr`)
 
 ## Example Structs and Router Functions
 

@@ -191,8 +191,40 @@ private: // -- private types -- //
 		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
 	};
 
-	// used to select a GC::ptr constructor that does not perform normal implicit initialization
-	struct no_init_t {};
+	// used to select constructor paths that lack the addref step
+	struct no_addref_t {};
+
+	class smart_handle
+	{
+	private: // -- data -- //
+
+		info *handle; // the raw handle to manage
+
+	public: // -- ctor / dtor / asgn -- //
+
+		// initializes the info handle with the specified value.
+		// additionally roots the internal handle - the roots database must not already be locked by the calling thread.
+		// if init is non-null, increments the reference count.
+		explicit smart_handle(info *init = nullptr);
+
+		// initializes the info handle with the specified value
+		smart_handle(info *init, no_addref_t);
+
+		// unroots the internal handle - the roots database must not already be locked by the calling thread.
+		// if non-null, decrements the reference count.
+		~smart_handle();
+
+		smart_handle(const smart_handle&) = delete;
+		smart_handle &operator=(const smart_handle&) = delete;
+
+	public: // -- interface -- //
+
+		// gets the underlying raw handle - this is const because unsafe modification could result in premature deallocations
+		info *const &raw_handle() const;
+
+		// safely points the underlying raw handle at the new handle.
+		void reset(info *new_handle = nullptr);
+	};
 
 public: // -- router function type definitions -- //
 
@@ -201,13 +233,13 @@ public: // -- router function type definitions -- //
 	{
 	private: // -- contents hidden for security -- //
 
-		void(*const func)(const std::atomic<info*>&); // raw function pointer to call
+		void(*const func)(const smart_handle&); // raw function pointer to call
 
-		router_fn(void(*_func)(const std::atomic<info*>&)) : func(_func) {}
+		router_fn(void(*_func)(const smart_handle&)) : func(_func) {}
 		router_fn(std::nullptr_t) = delete;
 
-		void operator()(const std::atomic<info*> &arg) { func(arg); }
-		void operator()(std::atomic<info*>&&) = delete; // for safety - ensures we can't call with an rvalue
+		void operator()(const smart_handle &arg) { func(arg); }
+		void operator()(smart_handle&&) = delete; // for safety - ensures we can't call with an rvalue
 
 		friend class GC;
 	};
@@ -216,13 +248,13 @@ public: // -- router function type definitions -- //
 	{
 	private: // -- contents hidden for security -- //
 
-		void(*const func)(const std::atomic<info*>&); // raw function pointer to call
+		void(*const func)(const smart_handle&); // raw function pointer to call
 
-		mutable_router_fn(void(*_func)(const std::atomic<info*>&)) : func(_func) {}
+		mutable_router_fn(void(*_func)(const smart_handle&)) : func(_func) {}
 		mutable_router_fn(std::nullptr_t) = delete;
 
-		void operator()(const std::atomic<info*> &arg) { func(arg); }
-		void operator()(std::atomic<info*>&&) = delete; // for safety - ensures we can't call with an rvalue
+		void operator()(const smart_handle &arg) { func(arg); }
+		void operator()(smart_handle&&) = delete; // for safety - ensures we can't call with an rvalue
 
 		friend class GC;
 	};
@@ -285,9 +317,11 @@ public: // -- ptr -- //
 
 	private: // -- data -- //
 
-		element_type *obj; // pointer to the object
+		// pointer to the object - this is only used for object access and is entirely unimportant as far a gc is concerned
+		element_type *obj;
 
-		std::atomic<info*> handle; // the handle to use for gc management functions.
+		// the raw handle wraper - this is where all the important gc logic takes place
+		smart_handle handle;
 
 		friend class GC;
 
@@ -297,92 +331,52 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object.
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		// RETURNS TRUE IFF YOU MUST CALL GC::handle_del_list() afterwards.
 		void reset(element_type *new_obj, GC::info *new_handle)
 		{
-			// repoint to the proper object - handle change must be atomic for GC::collect() logic
-
 			obj = new_obj;
-			info *old_handle = handle.exchange(new_handle);
-
-			// the rest of this function doesn't need to be atomic because it's just reference count management.
-			// the collector doesn't care about reference counts - that's left to us.
-
-			// we only need to do anything else if we refer to different gc allocations
-			if (old_handle != new_handle)
-			{
-				// take on other's object
-				if (new_handle) GC::objs.addref(new_handle);
-
-				// drop our object - account for delref return value
-				if (old_handle) GC::objs.delref(old_handle);
-			}
-		}
-
-		// creates an empty ptr but does no elaborate initialization (e.g. DOES NOT ROOT THE INTERNAL HANDLE)
-		explicit ptr(GC::no_init_t) : obj(nullptr), handle(nullptr) {}
-		// must be used after the no_init_t ctor - ROOTS INTERNAL HANDLE AND SETS HANDLE.
-		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
-		// if _handle (and _obj) is null, creates a valid, but empty ptr.
-		// DOES NOT INC THE REF COUNT!!
-		void __init(element_type *_obj, GC::info *_handle)
-		{
-			// initialize pointers before rooting so we always point at something valid while under gc control
-			obj = _obj;
-			handle = _handle;
-
-			GC::roots.add(handle);
+			handle.reset(new_handle);
 		}
 
 		// constructs a new ptr instance with the specified obj and handle.
 		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
 		// INCREMENTS THE REF COUNT on handle (if non-null).
-		ptr(element_type *_obj, info *_handle) : obj(_obj), handle(_handle)
-		{
-			GC::roots.add(handle);
-			if (handle) GC::objs.addref(handle);
-		}
+		ptr(element_type *_obj, info *_handle) : obj(_obj), handle(_handle) {}
+
+		// constructs a new ptr instance with the specified obj and handle.
+		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
+		// DOES NOT INCREMENT THE REF COUNT on handle.
+		ptr(element_type *_obj, info *_handle, GC::no_addref_t) : obj(_obj), handle(_handle, GC::no_addref_t{}) {}
 
 	public: // -- ctor / dtor / asgn -- //
 
 		// creates an empty ptr (null)
-		ptr(std::nullptr_t = nullptr) : obj(nullptr), handle(nullptr)
-		{
-			GC::roots.add(handle);
-		}
+		ptr(std::nullptr_t = nullptr) : obj(nullptr), handle(nullptr) {}
 
 		~ptr()
 		{
-			// if we have a handle, dec reference count
-			if (handle) GC::objs.delref(handle);
-
-			// set handle to null - we must always point to a valid object or null
-			handle = nullptr;
-
 			// set obj to null (better to get nullptr exceptions than segfaults)
 			obj = nullptr;
-
-			// unregister handle as a root
-			GC::roots.remove(handle);
 		}
 
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
-		ptr(const ptr &other) : obj(other.obj), handle(other.handle.load())
-		{
-			GC::roots.add(handle); // register handle as a root
-			if (handle) GC::objs.addref(handle); // we're new - inc ref count
-		}
+		ptr(const ptr &other) : obj(other.obj), handle(other.handle.raw_handle())
+		{}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr(const ptr<J> &other) : obj(static_cast<element_type*>(other.obj)), handle(other.handle.load())
-		{
-			GC::roots.add(handle); // register handle as a root
-			if (handle) GC::objs.addref(handle); // we're new - inc ref count
-		}
+		ptr(const ptr<J> &other) : obj(static_cast<element_type*>(other.obj)), handle(other.handle.raw_handle())
+		{}
 
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
-		ptr &operator=(const ptr &other) { reset(other.obj, other.handle); return *this; }
+		ptr &operator=(const ptr &other)
+		{
+			reset(other.obj, other.handle.raw_handle()); // !! THIS PROBEBLY NEEDS MORE ATOMICNESS
+			return *this;
+		}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
-		ptr &operator=(const ptr<J> &other) { reset(static_cast<element_type*>(other.obj), other.handle); return *this; }
+		ptr &operator=(const ptr<J> &other)
+		{
+			reset(static_cast<element_type*>(other.obj), other.handle.raw_handle()); // !! THIS PROBABLY NEEDS MORE ATOMICNESS
+			return *this;
+		}
 
 		ptr &operator=(std::nullptr_t) { reset(nullptr, nullptr); return *this; }
 
@@ -409,16 +403,6 @@ public: // -- ptr -- //
 		// undefined behavior if index is out of bounds.
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
 		ptr<element_type> get(std::ptrdiff_t index) const { return {get() + index, handle}; }
-
-	public: // -- misc -- //
-
-		// returns the number of references to the current object.
-		// if this object is not pointing at any object, returns 0.
-		std::size_t use_count() const
-		{
-			std::lock_guard<std::mutex> lock(GC::mutex);
-			return handle ? handle->ref_count : 0;
-		}
 
 	public: // -- comparison -- //
 
@@ -456,6 +440,10 @@ public: // -- ptr -- //
 		}
 		friend void swap(ptr &a, ptr &b) { a.swap(b); }
 	};
+
+	// !!!!!!!!!!!!!!!!!!
+	// ATOMIC_PTR NEEDS SOME MAJOR CHANGES NOW THAT THE ENTIRE SYSTEM HAS BEEN CHANGED
+	// !!!!!!!!!!!!!!!!!!
 
 	// defines an atomic gc ptr
 	template<typename T>
@@ -889,20 +877,17 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		ptr<T> res(GC::no_init_t{});
-
 		{
 			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
 			GC::objs.__add(handle); // link the info object
-			res.__init(obj, handle); // initialize ptr with handle
+			ptr<T> res(obj, handle, GC::no_addref_t{}); // initialize ptr with handle - no addref (already starts at 1)
 			handle->route(GC::router_unroot); // claim this object's children
-
+			
 			__start_timed_collect(); // begin timed collect
-		}
 
-		// return the created ptr
-		return res;
+			return res;
+		}
 	}
 
 	// creates a new dynamic array of T that is bound to a ptr.
@@ -973,22 +958,20 @@ public: // -- ptr allocation -- //
 		
 		// -- do the garbage collection aspects -- //
 
-		ptr<T> res(GC::no_init_t{});
-
 		{
 			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
 			GC::objs.__add(handle); // link the info object
 
-			// initialize ptr with handle (the cast is safe because element_type is either scalar_type or bound array of scalar_type)
-			res.__init(reinterpret_cast<element_type*>(obj), handle);
+			// initialize ptr with handle (the cast is safe because element_type is either scalar_type or bound array of scalar_type) - no addref (already starts at 1)
+			ptr<T> res(reinterpret_cast<element_type*>(obj), handle, GC::no_addref_t{});
 
 			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
-		}
 
-		return res;
+			return res;
+		}
 	}
 
 	// creates a new dynamic instance of T that is bound to a ptr.
@@ -1041,20 +1024,17 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		ptr<T> res(GC::no_init_t{});
-
 		{
 			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
 			objs.__add(handle); // link the info object
-			res.__init(obj, handle); // initialize ptr with handle
+			ptr<T> res(obj, handle, GC::no_addref_t{}); // initialize ptr with handle - no addref (already starts at 1)
 			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
-		}
 
-		// return the created ptr
-		return res;
+			return res;
+		}
 	}
 
 	// adopts a pre-existing dynamic array of T that is, after this call, bount to a ptr.
@@ -1098,20 +1078,17 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		ptr<T[]> res(GC::no_init_t{});
-
 		{
 			std::lock_guard<std::mutex> lock(GC::objs.mutex);
 
 			GC::objs.__add(handle); // link the info object
-			res.__init(obj, handle); // initialize ptr with handle
+			ptr<T[]> res(obj, handle, GC::no_addref_t{}); // initialize ptr with handle - no addref (already starts at 1)
 			handle->route(GC::router_unroot); // claim this object's children
 
 			__start_timed_collect(); // begin timed collect
-		}
 
-		// return the created ptr
-		return res;
+			return res;
+		}
 	}
 
 	// triggers a full garbage collection pass.
@@ -1194,10 +1171,10 @@ private: // -- database types -- //
 		std::mutex content_mutex; // mutex for using the content set
 		std::mutex queues_mutex;  // mutex for using the queue sets - YOU SHOULD NEVER LOCK THIS EXPLICITLY
 
-		std::unordered_set<const std::atomic<info*>*> content; // all the roots we hold
+		std::unordered_set<const smart_handle*> content; // all the roots we hold
 		
-		std::unordered_set<const std::atomic<info*>*> add_queue;    // the set of queued root add operations
-		std::unordered_set<const std::atomic<info*>*> remove_queue; // the set of queued root remove operations
+		std::unordered_set<const smart_handle*> add_queue;    // the set of queued root add operations
+		std::unordered_set<const smart_handle*> remove_queue; // the set of queued root remove operations
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -1208,14 +1185,12 @@ private: // -- database types -- //
 
 	public: // -- access -- //
 
-		// adds root to this database - und. if root already belongs to one or more databases.
-		void add(const std::atomic<info*> &root);
-		void add(std::atomic<info*>&&) = delete;
+		// adds root to this database
+		void add(const smart_handle &root);
 
-		// removes root from this database - und. if root does not belong to this database.
-		void remove(const std::atomic<info*> &root);
-		void remove(std::atomic<info*>&&) = delete;
-
+		// removes root from this database
+		void remove(const smart_handle &root);
+		
 	public: // -- external management -- //
 
 		// processes the add/remove queues - you must have content_mutex locked, but you must not have queue_mutex locked
@@ -1283,26 +1258,37 @@ private: // -- sentries -- //
 
 private: // -- collection deadlock protector -- //
 
-	class collection_deadlock_protector
+	class collection_synchronizer
 	{
 	private: // -- data -- //
 
 		static std::mutex internal_mutex; // mutex used only for internal synchronization
 
-		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
+		static std::thread::id collector_thread;     // the thread id of the collector - none implies no collection is currently processing
+		static std::size_t     handle_repoint_count; // the number of handle repoint actions currently in progress
+
+		
 
 	public: // -- interface -- //
 
-		// begins a collection action.
+		// begins a collection action - this must be performed before any collection pass (and before any long-running mutexes are locked)
 		// if there is already a collection action in progress, does nothing and returns false.
 		// otherwise the calling thread is marked as the collector thread and returns true.
+		// if there are any handle repointing actions in queue, waits for them to complete, but does not allow any others.
 		static bool begin_collection();
-
-		// ends a collection action.
+		// ends a collection action - SHOULD ONLY BE CALLED IF BEGIN COLLECTION RETURNED TRUE
 		static void end_collection();
 
 		// returns true iff the calling thread is the current collector thread
 		static bool this_is_collector_thread();
+
+		// begins a handle repoint action - this must be performed before any raw handles (i.e. not smart_handle) can be repointed.
+		// returns true if it is safe to repoint the handle (i.e. no collection action in progress).
+		// additionally, ensures no collection action can begin until the matching call to end_handle_repoint() is made.
+		// returns false if there is currently a collection action in progress, which means a repoint would be illegal.
+		static bool begin_handle_repoint();
+		// ends a handle repoint action - SHOULD ONLY BE CALLED IF BEGIN HANDLE REPOINT RETURNED TRUE
+		static void end_handle_repoint();
 	};
 
 private: // -- data -- //
@@ -1312,6 +1298,8 @@ private: // -- data -- //
 
 	static del_list_database del_list; // the del list database for all threads
 	
+	static std::mutex collect_mutex; // the mutex that controls collection-dependent behavior
+
 	// -----------------------------------------------
 
 	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
@@ -1355,7 +1343,7 @@ private: // -- private interface -- //
 
 private: // -- utility router functions -- //
 
-	static void router_unroot(const std::atomic<info*> &arc);
+	static void router_unroot(const smart_handle &arc);
 
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 

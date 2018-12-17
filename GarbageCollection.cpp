@@ -36,6 +36,8 @@ GC::roots_database GC::roots;
 
 GC::del_list_database GC::del_list;
 
+std::mutex GC::collect_mutex;
+
 // ---------------------------------------
 
 std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
@@ -76,6 +78,38 @@ void GC::aligned_free(void *ptr)
 {
 	// free the raw pointer (freeing nullptr does nothing)
 	if (ptr) std::free(*(void**)((char*)ptr - sizeof(void*)));
+}
+
+// -------------------------------- //
+
+// -- info handle implementation -- //
+
+// -------------------------------- //
+
+GC::smart_handle::smart_handle(info *init) : handle(init)
+{
+	GC::roots.add(*this);
+
+	if (handle) GC::objs.addref(handle);
+}
+GC::smart_handle::smart_handle(info *init, no_addref_t) : handle(init)
+{
+	GC::roots.add(*this);
+}
+
+GC::smart_handle::~smart_handle()
+{
+	GC::roots.remove(*this);
+}
+
+GC::info *const &GC::smart_handle::raw_handle() const
+{
+	return handle;
+}
+
+void GC::smart_handle::reset(info *new_handle)
+{
+	#error finish this
 }
 
 // ------------------------------------ //
@@ -132,7 +166,7 @@ void GC::objs_database::delref(info *obj)
 		GC::del_list.add(obj);
 
 		// if we're the collector thread
-		if (GC::collection_deadlock_protector::this_is_collector_thread())
+		if (GC::collection_synchronizer::this_is_collector_thread())
 		{
 			// the (synchronous) call to GC::collect() will handle del list, so we don't need to do anything else
 		}
@@ -151,14 +185,14 @@ void GC::objs_database::delref(info *obj)
 
 // ----------------------------------- //
 
-void GC::roots_database::add(const std::atomic<info*> &root)
+void GC::roots_database::add(const smart_handle &root)
 {
 	std::lock_guard<std::mutex> lock(this->queues_mutex);
 	
 	remove_queue.erase(&root);
 	add_queue.insert(&root);
 }
-void GC::roots_database::remove(const std::atomic<info*> &root)
+void GC::roots_database::remove(const smart_handle &root)
 {
 	std::lock_guard<std::mutex> lock(this->queues_mutex);
 	
@@ -236,11 +270,12 @@ void GC::del_list_database::handle_all()
 
 // ----------------------------------- //
 
-std::mutex GC::collection_deadlock_protector::internal_mutex;
+std::mutex GC::collection_synchronizer::internal_mutex;
 
-std::thread::id GC::collection_deadlock_protector::collector_thread;
+std::thread::id GC::collection_synchronizer::collector_thread;
+std::size_t GC::collection_synchronizer::handle_repoint_count;
 
-bool GC::collection_deadlock_protector::begin_collection()
+bool GC::collection_synchronizer::begin_collection()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -253,7 +288,7 @@ bool GC::collection_deadlock_protector::begin_collection()
 	return true;
 }
 
-void GC::collection_deadlock_protector::end_collection()
+void GC::collection_synchronizer::end_collection()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -261,12 +296,25 @@ void GC::collection_deadlock_protector::end_collection()
 	collector_thread = std::thread::id();
 }
 
-bool GC::collection_deadlock_protector::this_is_collector_thread()
+bool GC::collection_synchronizer::this_is_collector_thread()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// return true iff the calling thread is the collector thread
 	return collector_thread == std::this_thread::get_id();
+}
+
+bool GC::collection_synchronizer::begin_handle_repoint()
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// if there's a collect action, fail and return false
+	if (collector_thread != std::thread::id()) return false;
+
+	// otherwise inc the handle repoint count
+	++handle_repoint_count;
+
+	return true;
 }
 
 // ---------------- //
@@ -295,11 +343,11 @@ void GC::collect()
 	{
 		// begin a collection action - if that fails early exit.
 		// the logic behind this is that several back-to-back garbage collections would be pointless, so we can skip overlapping ones.
-		if (!GC::collection_deadlock_protector::begin_collection()) return;
+		if (!GC::collection_synchronizer::begin_collection()) return;
 		// also make a sentry object to end the collection action in case we forget or somehow trigger an exception
 		struct collection_ender_t
 		{
-			~collection_ender_t() { GC::collection_deadlock_protector::end_collection(); }
+			~collection_ender_t() { GC::collection_synchronizer::end_collection(); }
 		} collection_ender;
 
 		// we'll hold a long-running lock on the objects database - it would be very bad if someone changed it at any point in this process
@@ -336,9 +384,9 @@ void GC::collect()
 			roots.__update_content();
 
 			// for each root
-			for (const std::atomic<info*> *i : roots.content)
+			for (const smart_handle *i : roots.content)
 			{
-				info *raw = i->load();
+				info *raw = i->raw_handle();
 
 				// perform a mark sweep from this root (if it points to something)
 				if (raw) __mark_sweep(raw);
@@ -382,7 +430,7 @@ void GC::collect()
 
 // ------------------------------ //
 
-void GC::router_unroot(const std::atomic<info*> &arc)
+void GC::router_unroot(const smart_handle &arc)
 {
 	roots.remove(arc);
 }
