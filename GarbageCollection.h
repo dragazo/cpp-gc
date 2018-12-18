@@ -198,7 +198,10 @@ private: // -- private types -- //
 	{
 	private: // -- data -- //
 
-		info *handle; // the raw handle to manage
+		// the raw handle to manage.
+		// after construction, this must never be modified directly.
+		// all modification actions should be delegated to one of the collection_synchronizer repoint cache functions.
+		info *handle;
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -219,11 +222,13 @@ private: // -- private types -- //
 
 	public: // -- interface -- //
 
-		// gets the underlying raw handle - this is const because unsafe modification could result in premature deallocations
+		// gets the underlying raw handle - this must be const because any modification is illegal (see above)
 		info *const &raw_handle() const;
 
 		// safely points the underlying raw handle at the new handle.
-		void reset(info *new_handle = nullptr);
+		void reset(const smart_handle &new_value);
+		// safely points the underlying raw handle at nothing (null).
+		void reset();
 	};
 
 public: // -- router function type definitions -- //
@@ -331,7 +336,7 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object.
 		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
 		// if _handle (and _obj) is null, the resulting state is empty.
-		void reset(element_type *new_obj, GC::info *new_handle)
+		void reset(element_type *new_obj, const smart_handle &new_handle)
 		{
 			obj = new_obj;
 			handle.reset(new_handle);
@@ -368,13 +373,13 @@ public: // -- ptr -- //
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
 		ptr &operator=(const ptr &other)
 		{
-			reset(other.obj, other.handle.raw_handle()); // !! THIS PROBEBLY NEEDS MORE ATOMICNESS
+			reset(other.obj, other.handle);
 			return *this;
 		}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
 		ptr &operator=(const ptr<J> &other)
 		{
-			reset(static_cast<element_type*>(other.obj), other.handle.raw_handle()); // !! THIS PROBABLY NEEDS MORE ATOMICNESS
+			reset(static_cast<element_type*>(other.obj), other.handle);
 			return *this;
 		}
 
@@ -1264,17 +1269,18 @@ private: // -- collection deadlock protector -- //
 
 		static std::mutex internal_mutex; // mutex used only for internal synchronization
 
-		static std::thread::id collector_thread;     // the thread id of the collector - none implies no collection is currently processing
-		static std::size_t     handle_repoint_count; // the number of handle repoint actions currently in progress
+		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
 
-		
+		// cache used to support non-blocking handle repoint actions.
+		// it is structured such that M[&raw_handle] is what it should be repointed to.
+		static std::unordered_map<info**, info*> handle_repoint_cache; 
 
 	public: // -- interface -- //
 
 		// begins a collection action - this must be performed before any collection pass (and before any long-running mutexes are locked)
 		// if there is already a collection action in progress, does nothing and returns false.
 		// otherwise the calling thread is marked as the collector thread and returns true.
-		// if there are any handle repointing actions in queue, waits for them to complete, but does not allow any others.
+		// on success (return value true), applies all changes from the handle repoint cache.
 		static bool begin_collection();
 		// ends a collection action - SHOULD ONLY BE CALLED IF BEGIN COLLECTION RETURNED TRUE
 		static void end_collection();
@@ -1282,13 +1288,13 @@ private: // -- collection deadlock protector -- //
 		// returns true iff the calling thread is the current collector thread
 		static bool this_is_collector_thread();
 
-		// begins a handle repoint action - this must be performed before any raw handles (i.e. not smart_handle) can be repointed.
-		// returns true if it is safe to repoint the handle (i.e. no collection action in progress).
-		// additionally, ensures no collection action can begin until the matching call to end_handle_repoint() is made.
-		// returns false if there is currently a collection action in progress, which means a repoint would be illegal.
-		static bool begin_handle_repoint();
-		// ends a handle repoint action - SHOULD ONLY BE CALLED IF BEGIN HANDLE REPOINT RETURNED TRUE
-		static void end_handle_repoint();
+		// schedules a handle repoint action.
+		// raw_handle shall eventually be repointed to new_value before the next collection action.
+		// new_value is the address of an info* - null represents repointing raw_handle to null.
+		// if raw_handle is destroyed, it must first be removed from this cache via unschedule_handle().
+		static void schedule_handle_repoint(info *&raw_handle, info *const *new_value);
+		// removes a handle repoint action from the cache.
+		static void unschedule_handle(info *&raw_handle);
 	};
 
 private: // -- data -- //

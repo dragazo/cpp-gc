@@ -99,7 +99,8 @@ GC::smart_handle::smart_handle(info *init, no_addref_t) : handle(init)
 
 GC::smart_handle::~smart_handle()
 {
-	GC::roots.remove(*this);
+	GC::roots.remove(*this); // unroot this handle
+	collection_synchronizer::unschedule_handle(handle); // unschedule any repoint actions
 }
 
 GC::info *const &GC::smart_handle::raw_handle() const
@@ -107,9 +108,15 @@ GC::info *const &GC::smart_handle::raw_handle() const
 	return handle;
 }
 
-void GC::smart_handle::reset(info *new_handle)
+void GC::smart_handle::reset(const smart_handle &new_value)
 {
-	#error finish this
+	// schedule a repoint action to new_value's handle
+	collection_synchronizer::schedule_handle_repoint(handle, &new_value.handle);
+}
+void GC::smart_handle::reset()
+{
+	// schedule a repoint action to null
+	collection_synchronizer::schedule_handle_repoint(handle, nullptr);
 }
 
 // ------------------------------------ //
@@ -273,7 +280,8 @@ void GC::del_list_database::handle_all()
 std::mutex GC::collection_synchronizer::internal_mutex;
 
 std::thread::id GC::collection_synchronizer::collector_thread;
-std::size_t GC::collection_synchronizer::handle_repoint_count;
+
+std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
 
 bool GC::collection_synchronizer::begin_collection()
 {
@@ -284,6 +292,14 @@ bool GC::collection_synchronizer::begin_collection()
 
 	// otherwise mark the calling thread as the collector thread
 	collector_thread = std::this_thread::get_id();
+
+	// apply all the scheduled handle repoint actions from the cache
+	for (const auto &entry : handle_repoint_cache)
+	{
+		*entry.first = entry.second;
+	}
+	// we can now empty the cache (from an algorithmic perspective this step doesn't matter, but it frees up resources)
+	handle_repoint_cache.clear();
 
 	return true;
 }
@@ -304,17 +320,33 @@ bool GC::collection_synchronizer::this_is_collector_thread()
 	return collector_thread == std::this_thread::get_id();
 }
 
-bool GC::collection_synchronizer::begin_handle_repoint()
+void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, info *const *new_value)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// if there's a collect action, fail and return false
-	if (collector_thread != std::thread::id()) return false;
+	info *target; // the target info object
 
-	// otherwise inc the handle repoint count
-	++handle_repoint_count;
+	// if new_value is non-null, we need to look it up
+	if (new_value)
+	{
+		// find new_value's repoint target from the cache
+		auto new_value_iter = handle_repoint_cache.find(const_cast<info**>(new_value)); // the const cast is safe because we won't be modifying it - just for compiler's sake
 
-	return true;
+		// get the target (if it's in the repoint cache, get the repoint target, otherwise use it raw)
+		target = new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : *new_value;
+	}
+	// otherwise the target is null
+	else target = nullptr;
+
+	// assign this as raw_handle's repoint target in the cache
+	handle_repoint_cache[&raw_handle] = target;
+}
+void GC::collection_synchronizer::unschedule_handle(info *&raw_handle)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// just remove that entry from the repoint cache
+	handle_repoint_cache.erase(&raw_handle);
 }
 
 // ---------------- //
@@ -329,12 +361,12 @@ void GC::__mark_sweep(info *handle)
 	handle->marked = true;
 
 	// for each outgoing arc
-	handle->route(+[](const std::atomic<info*> &arc)
+	handle->route(+[](const smart_handle &arc)
 	{
-		info *raw = arc.load();
+		info *raw = arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
-		if (raw && !raw->marked) __mark_sweep(arc);
+		if (raw && !raw->marked) __mark_sweep(raw);
 	});
 }
 
