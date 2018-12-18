@@ -222,8 +222,8 @@ private: // -- private types -- //
 
 	public: // -- interface -- //
 
-		// gets the underlying raw handle - this must be const because any modification is illegal (see above)
-		info *const &raw_handle() const;
+		// gets the raw handle
+		info *const &raw_handle() const noexcept { return handle; }
 
 		// safely points the underlying raw handle at the new handle.
 		void reset(const smart_handle &new_value);
@@ -1169,39 +1169,6 @@ private: // -- database types -- //
 		void delref(info *obj);
 	};
 
-	class roots_database
-	{
-	public: // -- data -- //
-
-		std::mutex content_mutex; // mutex for using the content set
-		std::mutex queues_mutex;  // mutex for using the queue sets - YOU SHOULD NEVER LOCK THIS EXPLICITLY
-
-		std::unordered_set<const smart_handle*> content; // all the roots we hold
-		
-		std::unordered_set<const smart_handle*> add_queue;    // the set of queued root add operations
-		std::unordered_set<const smart_handle*> remove_queue; // the set of queued root remove operations
-
-	public: // -- ctor / dtor / asgn -- //
-
-		roots_database() = default;
-
-		roots_database(const roots_database&) = delete;
-		roots_database &operator=(const roots_database&) = delete;
-
-	public: // -- access -- //
-
-		// adds root to this database
-		void add(const smart_handle &root);
-
-		// removes root from this database
-		void remove(const smart_handle &root);
-		
-	public: // -- external management -- //
-
-		// processes the add/remove queues - you must have content_mutex locked, but you must not have queue_mutex locked
-		void __update_content();
-	};
-
 	class del_list_database
 	{
 	public: // -- typedefs -- //
@@ -1271,36 +1238,76 @@ private: // -- collection deadlock protector -- //
 
 		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
 
+		static std::unordered_set<info *const*> roots; // the set of all root handles
+		static std::unordered_set<info *const*> roots_remove_cache; // the scheduled unroot operations
+
 		// cache used to support non-blocking handle repoint actions.
 		// it is structured such that M[&raw_handle] is what it should be repointed to.
 		static std::unordered_map<info**, info*> handle_repoint_cache; 
 
-	public: // -- interface -- //
+	public: // -- types -- //
 
-		// begins a collection action - this must be performed before any collection pass (and before any long-running mutexes are locked)
-		// if there is already a collection action in progress, does nothing and returns false.
-		// otherwise the calling thread is marked as the collector thread and returns true.
-		// on success (return value true), applies all changes from the handle repoint cache.
-		static bool begin_collection();
-		// ends a collection action - SHOULD ONLY BE CALLED IF BEGIN COLLECTION RETURNED TRUE
-		static void end_collection();
+		// a sentry object that manages synchronization of a collect action, as well as granting access to the data to act on.
+		// you should (default) construct an object of this type before beginning a collect action (and before acquiring any long-running mutexes).
+		// you must then ensure the operation was successful (i.e. operator bool() = true).
+		// if it is successful, you can continue the collect action, otherwise you must abort the collection without raising an error.
+		class collection_sentry
+		{
+		private: // -- data -- //
+
+			bool success; // the success flag (if we successfully began a collection action)
+
+		public: // -- ctor / dtor / asgn / etc -- //
+
+			collection_sentry(const collection_sentry&) = delete;
+			collection_sentry &operator=(const collection_sentry&) = delete;
+
+			// begins a collection action - this must be performed before any collection pass.
+			// if there is already a collection action in progress, marks as failure.
+			// otherwise the calling thread is marked as the collector thread, all cached database modifications are applied, and marks as success.
+			// the success/failure flag can be checked via operator bool (true is success).
+			// if this operation does not succeed, it is undefined behavior to continue the collection pass.
+			collection_sentry();
+
+			// ends a collection action - this must be performed after any collection pass.
+			// this must be called regardless of if the sentry construction resulted in a valid collection action (i.e. operator bool).
+			~collection_sentry();
+
+			// returns true iff the sentry construction was successful and the collection action can continue.
+			explicit operator bool() const noexcept { return success; }
+			// returns true iff the sentry construction failed and the collection action cannot be continued.
+			bool operator!() const noexcept { return !success; }
+
+		public: // -- data access -- //
+
+			// gets the roots database - must not be modified.
+			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
+			const auto &get_roots() const { return collection_synchronizer::roots; }
+		};
+
+	public: // -- interface -- //
 
 		// returns true iff the calling thread is the current collector thread
 		static bool this_is_collector_thread();
+
+		// schedules a handle creation action - marks the handle as a root.
+		static void schedule_handle_create(info *&raw_handle);
+		// schedules a handle deletion action - unroots the handle and purges it from the handle repoint cache.
+		static void schedule_handle_destroy(info *&raw_handle);
+
+		// schedules a handle unroot operation - unmarks handle as a root.
+		static void schedule_handle_unroot(info *const &raw_handle);
 
 		// schedules a handle repoint action.
 		// raw_handle shall eventually be repointed to new_value before the next collection action.
 		// new_value is the address of an info* - null represents repointing raw_handle to null.
 		// if raw_handle is destroyed, it must first be removed from this cache via unschedule_handle().
 		static void schedule_handle_repoint(info *&raw_handle, info *const *new_value);
-		// removes a handle repoint action from the cache.
-		static void unschedule_handle(info *&raw_handle);
 	};
 
 private: // -- data -- //
 
 	static objs_database objs; // the objects database for all threads
-	static roots_database roots; // the roots database for all threads
 
 	static del_list_database del_list; // the del list database for all threads
 	

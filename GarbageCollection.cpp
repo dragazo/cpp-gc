@@ -32,7 +32,6 @@
 // ---------- //
 
 GC::objs_database GC::objs;
-GC::roots_database GC::roots;
 
 GC::del_list_database GC::del_list;
 
@@ -88,34 +87,24 @@ void GC::aligned_free(void *ptr)
 
 GC::smart_handle::smart_handle(info *init) : handle(init)
 {
-	GC::roots.add(*this);
-
-	if (handle) GC::objs.addref(handle);
+	collection_synchronizer::schedule_handle_create(handle);
 }
 GC::smart_handle::smart_handle(info *init, no_addref_t) : handle(init)
 {
-	GC::roots.add(*this);
+	collection_synchronizer::schedule_handle_create(handle);
 }
 
 GC::smart_handle::~smart_handle()
 {
-	GC::roots.remove(*this); // unroot this handle
-	collection_synchronizer::unschedule_handle(handle); // unschedule any repoint actions
-}
-
-GC::info *const &GC::smart_handle::raw_handle() const
-{
-	return handle;
+	collection_synchronizer::schedule_handle_destroy(handle);
 }
 
 void GC::smart_handle::reset(const smart_handle &new_value)
 {
-	// schedule a repoint action to new_value's handle
 	collection_synchronizer::schedule_handle_repoint(handle, &new_value.handle);
 }
 void GC::smart_handle::reset()
 {
-	// schedule a repoint action to null
 	collection_synchronizer::schedule_handle_repoint(handle, nullptr);
 }
 
@@ -162,10 +151,11 @@ void GC::objs_database::__remove(info *obj)
 
 void GC::objs_database::addref(info *obj)
 {
-	++obj->ref_count;
+	//++obj->ref_count;
 }
 void GC::objs_database::delref(info *obj)
 {
+	/*
 	// dec ref count - if ref count is now zero and it's not already being destroyed, destroy it
 	if (--obj->ref_count == 0 && !obj->destroying.test_and_set())
 	{
@@ -184,42 +174,8 @@ void GC::objs_database::delref(info *obj)
 			//GC::del_list.handle_all();
 		}
 	}
-}
-
-// ----------------------------------- //
-
-// -- roots database implementation -- //
-
-// ----------------------------------- //
-
-void GC::roots_database::add(const smart_handle &root)
-{
-	std::lock_guard<std::mutex> lock(this->queues_mutex);
-	
-	remove_queue.erase(&root);
-	add_queue.insert(&root);
-}
-void GC::roots_database::remove(const smart_handle &root)
-{
-	std::lock_guard<std::mutex> lock(this->queues_mutex);
-	
-	add_queue.erase(&root);
-	remove_queue.insert(&root);
-}
-
-void GC::roots_database::__update_content()
-{
-	std::lock_guard<std::mutex> add_queue_lock(queues_mutex);
-
-	// we assume we have a lock on the content mutex
-
-	// perform all the queued add operations - then empty the container
-	for (const auto &i : add_queue) content.insert(i);
-	add_queue.clear();
-
-	// perform all the queued remove operations - then empty the container
-	for (const auto &i : remove_queue) content.erase(i);
-	remove_queue.clear();
+	}
+	*/
 }
 
 // -------------------------------------- //
@@ -281,14 +237,19 @@ std::mutex GC::collection_synchronizer::internal_mutex;
 
 std::thread::id GC::collection_synchronizer::collector_thread;
 
+std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots;
+std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_remove_cache;
+
 std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
 
-bool GC::collection_synchronizer::begin_collection()
+// ---------------------------------------------------------------------
+
+GC::collection_synchronizer::collection_sentry::collection_sentry()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// if there's already a collector thread, fail
-	if (collector_thread != std::thread::id()) return false;
+	if (collector_thread != std::thread::id()) { success = false; return; }
 
 	// otherwise mark the calling thread as the collector thread
 	collector_thread = std::this_thread::get_id();
@@ -298,18 +259,27 @@ bool GC::collection_synchronizer::begin_collection()
 	{
 		*entry.first = entry.second;
 	}
-	// we can now empty the cache (from an algorithmic perspective this step doesn't matter, but it frees up resources)
 	handle_repoint_cache.clear();
 
-	return true;
-}
+	// apply all the scheduled unroot actions
+	for (const auto &i : roots_remove_cache)
+	{
+		roots.erase(i);
+	}
+	roots_remove_cache.clear();
 
-void GC::collection_synchronizer::end_collection()
+	success = true;
+}
+GC::collection_synchronizer::collection_sentry::~collection_sentry()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// mark that there is no longer a collector thread
-	collector_thread = std::thread::id();
+	// only do this if the construction was successful
+	if (success)
+	{
+		// mark that there is no longer a collector thread
+		collector_thread = std::thread::id();
+	}
 }
 
 bool GC::collection_synchronizer::this_is_collector_thread()
@@ -318,6 +288,32 @@ bool GC::collection_synchronizer::this_is_collector_thread()
 
 	// return true iff the calling thread is the collector thread
 	return collector_thread == std::this_thread::get_id();
+}
+
+void GC::collection_synchronizer::schedule_handle_create(info *&raw_handle)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// remove that entry from the repoint cache
+	handle_repoint_cache.erase(&raw_handle);
+}
+void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// add it to the roots remove cache
+	roots_remove_cache.insert(&raw_handle);
+
+	// purge it from the repoint cache
+	handle_repoint_cache.erase(&raw_handle);
+}
+
+void GC::collection_synchronizer::schedule_handle_unroot(info *const &raw_handle)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// add it to the roots remove cache
+	roots_remove_cache.insert(&raw_handle);
 }
 
 void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, info *const *new_value)
@@ -340,13 +336,6 @@ void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, inf
 
 	// assign this as raw_handle's repoint target in the cache
 	handle_repoint_cache[&raw_handle] = target;
-}
-void GC::collection_synchronizer::unschedule_handle(info *&raw_handle)
-{
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
-	// just remove that entry from the repoint cache
-	handle_repoint_cache.erase(&raw_handle);
 }
 
 // ---------------- //
@@ -374,18 +363,11 @@ void GC::collect()
 {
 	{
 		// begin a collection action - if that fails early exit.
-		// the logic behind this is that several back-to-back garbage collections would be pointless, so we can skip overlapping ones.
-		if (!GC::collection_synchronizer::begin_collection()) return;
-		// also make a sentry object to end the collection action in case we forget or somehow trigger an exception
-		struct collection_ender_t
-		{
-			~collection_ender_t() { GC::collection_synchronizer::end_collection(); }
-		} collection_ender;
-
+		collection_synchronizer::collection_sentry sentry;
+		if (!sentry) return;
+		
 		// we'll hold a long-running lock on the objects database - it would be very bad if someone changed it at any point in this process
 		std::lock_guard<std::mutex> obj_lock(objs.mutex);
-
-		// -------------------------------------------------------------------
 
 		#if GC_COLLECT_MSG
 		std::size_t collect_count = 0; // number of objects that we scheduled for deletion
@@ -408,21 +390,11 @@ void GC::collect()
 
 		// -- mark and sweep -- //
 
+		// for each root
+		for (auto i : sentry.get_roots())
 		{
-			// we're about to use the roots content set, so we need to lock its mutex
-			std::lock_guard<std::mutex> root_lock(roots.content_mutex);
-
-			// now we need to update the roots content set to apply the changes
-			roots.__update_content();
-
-			// for each root
-			for (const smart_handle *i : roots.content)
-			{
-				info *raw = i->raw_handle();
-
-				// perform a mark sweep from this root (if it points to something)
-				if (raw) __mark_sweep(raw);
-			}
+			// perform a mark sweep from this root (if it points to something)
+			if (*i) __mark_sweep(*i);
 		}
 
 		// -- clean anything not marked -- //
@@ -464,7 +436,7 @@ void GC::collect()
 
 void GC::router_unroot(const smart_handle &arc)
 {
-	roots.remove(arc);
+	collection_synchronizer::schedule_handle_unroot(arc.raw_handle());
 }
 
 // --------------------- //
