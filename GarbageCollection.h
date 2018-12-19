@@ -184,12 +184,16 @@ private: // -- private types -- //
 
 		// -- helpers -- //
 
-		void destroy() { vtable->destroy(*this); }
-		void dealloc() { vtable->dealloc(*this); }
+		void destroy() { std::cerr << "dtor " << this << ' '; vtable->destroy(*this); }
+		void dealloc() { std::cerr << "dloc " << this << ' '; vtable->dealloc(*this); }
 
 		void route(router_fn func) { vtable->route(*this, func); }
 		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
 	};
+
+	// used to select constructor paths that lack normal initialization steps.
+	// if this is used, the ctor comments will tell you how to properly initialize the object later.
+	struct no_init_t {};
 
 	// used to select constructor paths that lack the addref step
 	struct no_addref_t {};
@@ -206,6 +210,35 @@ private: // -- private types -- //
 		info **handle;
 
 	public: // -- ctor / dtor / asgn -- //
+
+		// performs no initialization - must call __init() to initialize later.
+		explicit smart_handle(no_init_t) {}
+		// used to initialize an uninitialized smart_handle.
+		// this must have been created via the no_init_t constructor and not modified since.
+		// new_obj must be an object not already in the gc object database.
+		// the object is added to the obj database and this handle is initialized to point at it.
+		void __init(info *new_obj)
+		{
+			{
+				std::lock_guard<std::mutex> sync_lock(GC::collection_synchronizer::internal_mutex);
+
+				// initialize our handle to point at it
+				handle = new info*(new_obj);
+
+				// perform the root operation (unsafe version since we own the mutex)
+				GC::collection_synchronizer::__schedule_handle_create(*handle);
+			}
+
+			{
+				std::lock_guard<std::mutex> obj_lock(GC::objs.mutex);
+
+				// add the object to the obj database (unsafe version since we own the mutex)
+				objs.__add(new_obj);
+
+				// we still hold the obj mutex, so we can call the router function
+				new_obj->route(GC::router_unroot);
+			}
+		}
 
 		// initializes the info handle with the specified value.
 		// additionally roots the internal handle - the roots database must not already be locked by the calling thread.
@@ -344,15 +377,20 @@ public: // -- ptr -- //
 			handle.reset(new_handle);
 		}
 
-		// constructs a new ptr instance with the specified obj and handle.
-		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
-		// INCREMENTS THE REF COUNT on handle (if non-null).
-		ptr(element_type *_obj, info *_handle) : obj(_obj), handle(_handle) {}
+		// performs no initialization - must call __init() to properly construct
+		ptr(no_init_t) : handle(no_init_t{}) {}
+		// used to initialize a ptr created via the no_init_t constructor.
+		// this must not have been modified since said construction.
+		// init_obj is the user-level object to point to - it is assigned directly.
+		// new_gc_obj is the new gc object to link and refer to - it is passed to smart_handle::__init().
+		void __init(element_type *init_obj, info *new_gc_obj)
+		{
+			// point at the right user-level object
+			obj = init_obj;
 
-		// constructs a new ptr instance with the specified obj and handle.
-		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
-		// DOES NOT INCREMENT THE REF COUNT on handle.
-		ptr(element_type *_obj, info *_handle, GC::no_addref_t) : obj(_obj), handle(_handle, GC::no_addref_t{}) {}
+			// initialize the handle
+			handle.__init(new_gc_obj);
+		}
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -857,8 +895,8 @@ public: // -- ptr allocation -- //
 		auto router_set = [](info &handle, auto func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); };
 
 		static const info_vtable _vtable(
-			[](info &handle) { reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
-			[](info &handle) { allocator_t::dealloc(handle.obj); },
+			[](info &handle) { std::cerr << "dtor " << &handle << '\n'; reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
+			[](info &handle) { std::cerr << "dloc " << &handle << '\n'; allocator_t::dealloc(handle.obj); },
 			router_set,
 			router_set
 		);
@@ -884,17 +922,17 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		{
-			std::lock_guard<std::mutex> lock(GC::objs.mutex);
+		// create the ptr object - no initialization
+		ptr<T> res(GC::no_init_t{});
 
-			GC::objs.__add(handle); // link the info object
-			ptr<T> res(obj, handle, GC::no_addref_t{}); // initialize ptr with handle - no addref (already starts at 1)
-			handle->route(GC::router_unroot); // claim this object's children
-			
-			__start_timed_collect(); // begin timed collect
+		// perform the initialization phase
+		res.__init(obj, handle);
 
-			return res;
-		}
+		// begin timed collection (if it's not already)
+		GC::start_timed_collect();
+
+		// return the now-initialized ptr
+		return res;
 	}
 
 	// creates a new dynamic array of T that is bound to a ptr.
@@ -965,20 +1003,18 @@ public: // -- ptr allocation -- //
 		
 		// -- do the garbage collection aspects -- //
 
-		{
-			std::lock_guard<std::mutex> lock(GC::objs.mutex);
+		// create the ptr object - no initialization
+		ptr<T> res(GC::no_init_t{});
 
-			GC::objs.__add(handle); // link the info object
+		// perform the initialization phase
+		// the cast is safe because element_type is either scalar_type or bound array of scalar_type
+		res.__init(reinterpret_cast<element_type*>(obj), handle);
 
-			// initialize ptr with handle (the cast is safe because element_type is either scalar_type or bound array of scalar_type) - no addref (already starts at 1)
-			ptr<T> res(reinterpret_cast<element_type*>(obj), handle, GC::no_addref_t{});
+		// begin timed collection (if it's not already)
+		GC::start_timed_collect();
 
-			handle->route(GC::router_unroot); // claim this object's children
-
-			__start_timed_collect(); // begin timed collect
-
-			return res;
-		}
+		// return the now-initialized ptr
+		return res;
 	}
 
 	// creates a new dynamic instance of T that is bound to a ptr.
@@ -1031,17 +1067,17 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		{
-			std::lock_guard<std::mutex> lock(GC::objs.mutex);
+		// create the ptr object - no initialization
+		ptr<T> res(GC::no_init_t{});
 
-			objs.__add(handle); // link the info object
-			ptr<T> res(obj, handle, GC::no_addref_t{}); // initialize ptr with handle - no addref (already starts at 1)
-			handle->route(GC::router_unroot); // claim this object's children
+		// perform the initialization phase
+		res.__init(obj, handle);
 
-			__start_timed_collect(); // begin timed collect
+		// begin timed collection (if it's not already)
+		GC::start_timed_collect();
 
-			return res;
-		}
+		// return the now-initialized ptr
+		return res;
 	}
 
 	// adopts a pre-existing dynamic array of T that is, after this call, bount to a ptr.
@@ -1085,17 +1121,17 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
-		{
-			std::lock_guard<std::mutex> lock(GC::objs.mutex);
+		// create the ptr object - no initialization
+		ptr<T[]> res(GC::no_init_t{});
 
-			GC::objs.__add(handle); // link the info object
-			ptr<T[]> res(obj, handle, GC::no_addref_t{}); // initialize ptr with handle - no addref (already starts at 1)
-			handle->route(GC::router_unroot); // claim this object's children
+		// perform the initialization phase
+		res.__init(obj, handle);
 
-			__start_timed_collect(); // begin timed collect
+		// begin timed collection (if it's not already)
+		GC::start_timed_collect();
 
-			return res;
-		}
+		// return the now-initialized ptr
+		return res;
 	}
 
 	// triggers a full garbage collection pass.
@@ -1193,7 +1229,8 @@ private: // -- database types -- //
 
 	public: // -- access -- //
 
-		// adds obj to the del list - und. if obj is already part of one or more del list databases.
+		// adds obj to the del list.
+		// obj must not be simultaneously in the obj database and the del list.
 		void add(info *obj);
 		// as add() but not threadsafe - you should first lock the mutex
 		void __add(info *obj);
@@ -1234,6 +1271,10 @@ private: // -- collection deadlock protector -- //
 
 	class collection_synchronizer
 	{
+	private: // -- friends -- //
+
+		friend class smart_handle;
+
 	private: // -- data -- //
 
 		static std::mutex internal_mutex; // mutex used only for internal synchronization
@@ -1312,6 +1353,14 @@ private: // -- collection deadlock protector -- //
 		// new_value is the address of an info* - null represents repointing raw_handle to null.
 		// if raw_handle is destroyed, it must first be removed from this cache via unschedule_handle().
 		static void schedule_handle_repoint(info *&raw_handle, info *const *new_value);
+
+	private: // -- private interface (unsafe) -- //
+
+		// as schedule_handle_create() but not thread safe - you should first lock internal_mutex
+		static void __schedule_handle_create(info *&raw_handle);
+
+		// as schedule_handle_unroot() but not thread safe - you should first lock internal_mutex
+		static void __schedule_handle_unroot(info *const &raw_handle);
 	};
 
 private: // -- data -- //
@@ -1361,7 +1410,7 @@ private: // -- private interface -- //
 
 	// the first invocation of this function begins a new thread to perform timed garbage collection.
 	// all subsequent invocations do nothing.
-	static void __start_timed_collect();
+	static void start_timed_collect();
 
 private: // -- utility router functions -- //
 

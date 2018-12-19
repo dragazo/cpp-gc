@@ -216,14 +216,11 @@ void GC::del_list_database::handle_all()
 		std::cerr << "\ngc deleting " << handle->obj << '\n';
 		#endif
 
-		// unlink it
-		objs.remove(handle);
-
-		// destroy it
-		if (!handle->destroy_completed) handle->destroy();
+		// destroy the stored object
+		handle->destroy();
 	}
 
-	// delete the handles
+	// deallocate memory
 	// this is done after calling all deleters so that the deletion func can access the handles (but not objects) safely
 	for (info *handle : contents_cpy)
 	{
@@ -315,12 +312,16 @@ bool GC::collection_synchronizer::this_is_collector_thread()
 void GC::collection_synchronizer::schedule_handle_create(info *&raw_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
+	__schedule_handle_create(raw_handle);
+}
+void GC::collection_synchronizer::__schedule_handle_create(info *&raw_handle)
+{
 	// add it to the root add cache
 	roots_add_cache.insert(&raw_handle);
 	// remove it from the root remove cache
 	roots_remove_cache.erase(&raw_handle);
 }
+
 void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
@@ -340,7 +341,10 @@ void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
 void GC::collection_synchronizer::schedule_handle_unroot(info *const &raw_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
+	__schedule_handle_unroot(raw_handle);
+}
+void GC::collection_synchronizer::__schedule_handle_unroot(info *const &raw_handle)
+{
 	// add it to the roots remove cache
 	roots_remove_cache.insert(&raw_handle);
 	// remove it from the roots add cache
@@ -379,6 +383,8 @@ void GC::__mark_sweep(info *handle)
 {
 	// mark this handle
 	handle->marked = true;
+
+	std::cerr << "sweeping " << handle << '\n';
 
 	// for each outgoing arc
 	handle->route(+[](const smart_handle &arc)
@@ -421,9 +427,13 @@ void GC::collect()
 
 		// -- mark and sweep -- //
 
+		std::cerr << "beginning sweep\n";
+
 		// for each root
 		for (info *const *i : sentry.get_roots())
 		{
+			std::cerr << "root sweep: " << i << '\n';
+
 			// perform a mark sweep from this root (if it points to something)
 			if (*i) __mark_sweep(*i);
 		}
@@ -439,8 +449,18 @@ void GC::collect()
 			// if it hasn't been marked and isn't currently being deleted
 			if (!i->marked && !i->destroying.test_and_set())
 			{
+				// unlink it - doing this later can result in undefined accesses
+				// e.g. on back-to-back collect passes before the del list has time to finish
+				objs.__remove(i);
+
 				// add it to the delete list
 				del_list.add(i);
+
+				for (auto root : sentry.get_roots())
+					if (*root == i)
+					{
+						std::cerr << "UHOH SOMETHING BAD HAPPENED !!!!!\n";
+					}
 
 				#if GC_COLLECT_MSG
 				++collect_count;
@@ -482,13 +502,9 @@ void GC::strategy(strategies new_strategy) { _strategy = new_strategy; }
 GC::sleep_time_t GC::sleep_time() { return _sleep_time; }
 void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time = new_sleep_time; }
 
-void GC::__start_timed_collect()
+void GC::start_timed_collect()
 {
-	// pointer to the thread
-	static std::thread *thread = nullptr;
-
-	// if it's null, create it
-	if (!thread) thread = new std::thread(__timed_collect_func);
+	static std::thread *thread = new std::thread(__timed_collect_func);
 }
 
 // ---------------------------------------------------

@@ -211,7 +211,7 @@ private:
 public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
     {
-		GC::ptr<TreeNode> safe_allocation_1 = GC::make<TreeNode>();
+		//GC::ptr<TreeNode> safe_allocation_1 = GC::make<TreeNode>();
 		
 		{
 			// modification of the mutable collection of GC::ptr and router must be mutually exclusive
@@ -219,7 +219,7 @@ public:
 			symbols[name] = new_value;
 		}
 
-		GC::ptr<TreeNode> safe_allocation_2 = GC::make<TreeNode>();
+		//GC::ptr<TreeNode> safe_allocation_2 = GC::make<TreeNode>();
     }
 	void clear()
 	{
@@ -682,20 +682,23 @@ int main() try
 					tree->right = GC::make<TreeNode>();
 					table->update(tostr(i), tree);
 				}
+
+				std::cerr << "printy\n";
 			}
 		});
 		//std::thread t2([]()
 		//{
-			int i = 0;
-			while (1)
-			{
-				//*atomic_gc_ptr = GC::make<atomic_container>();
 
-				std::cerr << "collecting pass " << ++i << '\n';
-				GC::collect();
+		int i = 0;
+		while (1)
+		{
+			//*atomic_gc_ptr = GC::make<atomic_container>();
 
-				//*atomic_gc_ptr = GC::make<atomic_container>();
-			}
+			//std::cerr << "collecting pass " << ++i << '\n';
+			GC::collect();
+
+			//*atomic_gc_ptr = GC::make<atomic_container>();
+		}
 		//});
 		
 		t1.join();
