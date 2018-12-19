@@ -238,6 +238,8 @@ std::mutex GC::collection_synchronizer::internal_mutex;
 std::thread::id GC::collection_synchronizer::collector_thread;
 
 std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots;
+
+std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_add_cache;
 std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_remove_cache;
 
 std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
@@ -254,19 +256,26 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 	// otherwise mark the calling thread as the collector thread
 	collector_thread = std::this_thread::get_id();
 
+	// apply all the scheduled root actions
+	for (auto i : roots_add_cache)
+	{
+		roots.insert(i);
+	}
+	roots_add_cache.clear();
+
+	// apply all the scheduled unroot actions
+	for (auto i : roots_remove_cache)
+	{
+		roots.erase(i);
+	}
+	roots_remove_cache.clear();
+
 	// apply all the scheduled handle repoint actions from the cache
 	for (const auto &entry : handle_repoint_cache)
 	{
 		*entry.first = entry.second;
 	}
 	handle_repoint_cache.clear();
-
-	// apply all the scheduled unroot actions
-	for (const auto &i : roots_remove_cache)
-	{
-		roots.erase(i);
-	}
-	roots_remove_cache.clear();
 
 	success = true;
 }
@@ -294,8 +303,10 @@ void GC::collection_synchronizer::schedule_handle_create(info *&raw_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// remove that entry from the repoint cache
-	handle_repoint_cache.erase(&raw_handle);
+	// add it to the root add cache
+	roots_add_cache.insert(&raw_handle);
+	// remove it from the root remove cache
+	roots_remove_cache.erase(&raw_handle);
 }
 void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
 {
@@ -303,6 +314,8 @@ void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
 
 	// add it to the roots remove cache
 	roots_remove_cache.insert(&raw_handle);
+	// remove it from the roots add cache
+	roots_add_cache.erase(&raw_handle);
 
 	// purge it from the repoint cache
 	handle_repoint_cache.erase(&raw_handle);
@@ -314,6 +327,8 @@ void GC::collection_synchronizer::schedule_handle_unroot(info *const &raw_handle
 
 	// add it to the roots remove cache
 	roots_remove_cache.insert(&raw_handle);
+	// remove it from the roots add cache
+	roots_add_cache.erase(&raw_handle);
 }
 
 void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, info *const *new_value)
@@ -389,6 +404,8 @@ void GC::collect()
 		}
 
 		// -- mark and sweep -- //
+
+		std::cerr << "roots " << sentry.get_roots().size() << '\n';
 
 		// for each root
 		for (auto i : sentry.get_roots())

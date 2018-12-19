@@ -1238,7 +1238,9 @@ private: // -- collection deadlock protector -- //
 
 		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
 
-		static std::unordered_set<info *const*> roots; // the set of all root handles
+		static std::unordered_set<info *const*> roots; // the set of all root handles - must not be modified directly
+
+		static std::unordered_set<info *const*> roots_add_cache; // the scheduled root operations
 		static std::unordered_set<info *const*> roots_remove_cache; // the scheduled unroot operations
 
 		// cache used to support non-blocking handle repoint actions.
