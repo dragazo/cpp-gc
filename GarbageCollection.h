@@ -201,7 +201,9 @@ private: // -- private types -- //
 		// the raw handle to manage.
 		// after construction, this must never be modified directly.
 		// all modification actions should be delegated to one of the collection_synchronizer repoint cache functions.
-		info *handle;
+		// all actions on handles are non-blocking, including the destructor - because of this handle must be dynamic.
+		// this ensures that it'll still be accessible after the smart_handle is destroyed (other logic will delete it).
+		info **handle;
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -222,8 +224,8 @@ private: // -- private types -- //
 
 	public: // -- interface -- //
 
-		// gets the raw handle
-		info *const &raw_handle() const noexcept { return handle; }
+		// gets the raw handle - guaranteed to outlive the object during a gc cycle.
+		info *const &raw_handle() const noexcept { return *handle; }
 
 		// safely points the underlying raw handle at the new handle.
 		void reset(const smart_handle &new_value);
@@ -1246,6 +1248,11 @@ private: // -- collection deadlock protector -- //
 		// cache used to support non-blocking handle repoint actions.
 		// it is structured such that M[&raw_handle] is what it should be repointed to.
 		static std::unordered_map<info**, info*> handle_repoint_cache; 
+
+		// all actions on handles are non-blocking, including the destructor which unroots it.
+		// but during a gc cycle, the handle must stay alive, so it must be a dynamic allocation.
+		// upon calling schedule_handle_destroy(), it's added to this list for eventual deletion.
+		static std::vector<info**> handle_dealloc_list;
 
 	public: // -- types -- //
 

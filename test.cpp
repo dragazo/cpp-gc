@@ -673,7 +673,15 @@ int main() try
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*/
 				
+				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
 
+				for (int i = 0; i < 128; ++i)
+				{
+					GC::ptr<TreeNode> tree = GC::make<TreeNode>();
+					tree->left = GC::make<TreeNode>();
+					tree->right = GC::make<TreeNode>();
+					table->update(tostr(i), tree);
+				}
 			}
 		});
 		//std::thread t2([]()
@@ -685,25 +693,6 @@ int main() try
 
 				std::cerr << "collecting pass " << ++i << '\n';
 				GC::collect();
-
-				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
-
-				GC::collect();
-
-				for (int i = 0; i < 128; ++i)
-				{
-					GC::ptr<TreeNode> tree = GC::make<TreeNode>();
-					tree->left = GC::make<TreeNode>();
-					tree->right = GC::make<TreeNode>();
-					table->update(tostr(i), tree);
-				}
-
-				//table->clear();
-
-				
-				GC::collect();
-
-				std::cin.get();
 
 				//*atomic_gc_ptr = GC::make<atomic_container>();
 			}

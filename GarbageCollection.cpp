@@ -85,27 +85,31 @@ void GC::aligned_free(void *ptr)
 
 // -------------------------------- //
 
-GC::smart_handle::smart_handle(info *init) : handle(init)
+GC::smart_handle::smart_handle(info *init)
 {
-	collection_synchronizer::schedule_handle_create(handle);
+	handle = new info*(init);
+
+	collection_synchronizer::schedule_handle_create(*handle);
 }
-GC::smart_handle::smart_handle(info *init, no_addref_t) : handle(init)
+GC::smart_handle::smart_handle(info *init, no_addref_t)
 {
-	collection_synchronizer::schedule_handle_create(handle);
+	handle = new info*(init);
+
+	collection_synchronizer::schedule_handle_create(*handle);
 }
 
 GC::smart_handle::~smart_handle()
 {
-	collection_synchronizer::schedule_handle_destroy(handle);
+	collection_synchronizer::schedule_handle_destroy(*handle);
 }
 
 void GC::smart_handle::reset(const smart_handle &new_value)
 {
-	collection_synchronizer::schedule_handle_repoint(handle, &new_value.handle);
+	collection_synchronizer::schedule_handle_repoint(*handle, new_value.handle);
 }
 void GC::smart_handle::reset()
 {
-	collection_synchronizer::schedule_handle_repoint(handle, nullptr);
+	collection_synchronizer::schedule_handle_repoint(*handle, nullptr);
 }
 
 // ------------------------------------ //
@@ -244,6 +248,8 @@ std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_remove_c
 
 std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
 
+std::vector<GC::info**> GC::collection_synchronizer::handle_dealloc_list;
+
 // ---------------------------------------------------------------------
 
 GC::collection_synchronizer::collection_sentry::collection_sentry()
@@ -256,14 +262,14 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 	// otherwise mark the calling thread as the collector thread
 	collector_thread = std::this_thread::get_id();
 
-	// apply all the scheduled root actions
+	// apply all the scheduled root add actions
 	for (auto i : roots_add_cache)
 	{
 		roots.insert(i);
 	}
 	roots_add_cache.clear();
 
-	// apply all the scheduled unroot actions
+	// apply all the scheduled root remove actions
 	for (auto i : roots_remove_cache)
 	{
 		roots.erase(i);
@@ -276,6 +282,13 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 		*entry.first = entry.second;
 	}
 	handle_repoint_cache.clear();
+
+	// delete everything in the handle dealloc list
+	for (info **i : handle_dealloc_list)
+	{
+		delete i;
+	}
+	handle_dealloc_list.clear();
 
 	success = true;
 }
@@ -319,6 +332,9 @@ void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
 
 	// purge it from the repoint cache
 	handle_repoint_cache.erase(&raw_handle);
+
+	// add it to the dynamic handle deletion list
+	handle_dealloc_list.push_back(&raw_handle);
 }
 
 void GC::collection_synchronizer::schedule_handle_unroot(info *const &raw_handle)
@@ -405,10 +421,8 @@ void GC::collect()
 
 		// -- mark and sweep -- //
 
-		std::cerr << "roots " << sentry.get_roots().size() << '\n';
-
 		// for each root
-		for (auto i : sentry.get_roots())
+		for (info *const *i : sentry.get_roots())
 		{
 			// perform a mark sweep from this root (if it points to something)
 			if (*i) __mark_sweep(*i);
