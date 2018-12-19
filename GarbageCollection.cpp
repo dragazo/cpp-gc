@@ -33,10 +33,6 @@
 
 GC::objs_database GC::objs;
 
-GC::del_list_database GC::del_list;
-
-std::mutex GC::collect_mutex;
-
 // ---------------------------------------
 
 std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
@@ -79,28 +75,36 @@ void GC::aligned_free(void *ptr)
 	if (ptr) std::free(*(void**)((char*)ptr - sizeof(void*)));
 }
 
+GC::no_addref_t GC::no_addref;
+
 // -------------------------------- //
 
 // -- info handle implementation -- //
 
 // -------------------------------- //
 
-GC::smart_handle::smart_handle(info *init)
+GC::smart_handle::smart_handle(info *init) : handle(new info*(init))
 {
-	handle = new info*(init);
-
 	collection_synchronizer::schedule_handle_create(*handle);
 }
-GC::smart_handle::smart_handle(info *init, no_addref_t)
+GC::smart_handle::smart_handle(info *init, no_addref_t) : handle(new info*(init))
 {
-	handle = new info*(init);
-
 	collection_synchronizer::schedule_handle_create(*handle);
 }
 
 GC::smart_handle::~smart_handle()
 {
 	collection_synchronizer::schedule_handle_destroy(*handle);
+}
+
+GC::smart_handle::smart_handle(const smart_handle &other) : handle(new info*(nullptr))
+{
+	collection_synchronizer::schedule_handle_create_alias(*handle, *other.handle);
+}
+GC::smart_handle &GC::smart_handle::operator=(const smart_handle &other)
+{
+	reset(other);
+	return *this;
 }
 
 void GC::smart_handle::reset(const smart_handle &new_value)
@@ -182,63 +186,21 @@ void GC::objs_database::delref(info *obj)
 	*/
 }
 
-// -------------------------------------- //
+// ----------------------------- //
 
-// -- del list database implementation -- //
+// -- collection synchronizer -- //
 
-// -------------------------------------- //
+// ----------------------------- //
 
-void GC::del_list_database::add(info *obj)
-{
-	std::lock_guard<std::mutex> lock(this->mutex);
-	contents.push_back(obj);
-}
-void GC::del_list_database::__add(info *obj)
-{
-	contents.push_back(obj);
-}
+std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots;
 
-void GC::del_list_database::handle_all()
-{
-	// extract all the del list contents before beginning
-	// this is so calls to del list functions during this action won't deadlock
-	decltype(this->contents) contents_cpy;
-	{
-		std::lock_guard<std::mutex> lock(this->mutex);
-		contents_cpy = std::move(this->contents);
-		this->contents.clear(); // clear the contents just to be sure (not all std containers do this on move)
-	}
+std::vector<GC::info*> GC::collection_synchronizer::del_list;
 
-	// for each delete entry
-	for (info *handle : contents_cpy)
-	{
-		#if GC_SHOW_DELMSG
-		std::cerr << "\ngc deleting " << handle->obj << '\n';
-		#endif
-
-		// destroy the stored object
-		handle->destroy();
-	}
-
-	// deallocate memory
-	// this is done after calling all deleters so that the deletion func can access the handles (but not objects) safely
-	for (info *handle : contents_cpy)
-	{
-		handle->dealloc();
-	}
-}
-
-// ----------------------------------- //
-
-// -- collection deadlock protector -- //
-
-// ----------------------------------- //
+// ---------------------------------------------------------------------
 
 std::mutex GC::collection_synchronizer::internal_mutex;
 
 std::thread::id GC::collection_synchronizer::collector_thread;
-
-std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots;
 
 std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_add_cache;
 std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_remove_cache;
@@ -291,13 +253,36 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 }
 GC::collection_synchronizer::collection_sentry::~collection_sentry()
 {
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
 	// only do this if the construction was successful
 	if (success)
 	{
-		// mark that there is no longer a collector thread
-		collector_thread = std::thread::id();
+		// destroy objects
+		for (info *handle : del_list)
+		{
+			#if GC_SHOW_DELMSG
+			std::cerr << "\ngc deleting " << handle->obj << '\n';
+			#endif
+
+			handle->destroy();
+		}
+
+		// deallocate memory
+		// done after calling deleters so that the deletion func can access the handles (but not objects) safely
+		for (info *handle : del_list)
+		{
+			handle->dealloc();
+		}
+
+		// clear the del list
+		del_list.clear();
+
+		// end the collection action
+		{
+			std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+			// mark that there is no longer a collector thread
+			collector_thread = std::thread::id();
+		}
 	}
 }
 
@@ -320,6 +305,20 @@ void GC::collection_synchronizer::__schedule_handle_create(info *&raw_handle)
 	roots_add_cache.insert(&raw_handle);
 	// remove it from the root remove cache
 	roots_remove_cache.erase(&raw_handle);
+}
+
+void GC::collection_synchronizer::schedule_handle_create_alias(info *&raw_handle, info *&src_handle)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// create the handle
+	__schedule_handle_create(raw_handle);
+
+	// since we're creating the handle, it's not already in the handle database
+	// thus we can assign the value immediately
+
+	// repoint it to the current target of src_handle
+	raw_handle = __get_current_target(&src_handle);
 }
 
 void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
@@ -354,9 +353,19 @@ void GC::collection_synchronizer::__schedule_handle_unroot(info *const &raw_hand
 void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, info *const *new_value)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	__schedule_handle_repoint(raw_handle, new_value);
+}
+void GC::collection_synchronizer::__schedule_handle_repoint(info *&raw_handle, info *const *new_value)
+{
+	// get the current target object
+	info *target = __get_current_target(new_value);
 
-	info *target; // the target info object
+	// assign this as raw_handle's repoint target in the cache
+	handle_repoint_cache[&raw_handle] = target;
+}
 
+GC::info *GC::collection_synchronizer::__get_current_target(info *const *new_value)
+{
 	// if new_value is non-null, we need to look it up
 	if (new_value)
 	{
@@ -364,13 +373,10 @@ void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, inf
 		auto new_value_iter = handle_repoint_cache.find(const_cast<info**>(new_value)); // the const cast is safe because we won't be modifying it - just for compiler's sake
 
 		// get the target (if it's in the repoint cache, get the repoint target, otherwise use it raw)
-		target = new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : *new_value;
+		return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : *new_value;
 	}
 	// otherwise the target is null
-	else target = nullptr;
-
-	// assign this as raw_handle's repoint target in the cache
-	handle_repoint_cache[&raw_handle] = target;
+	else return nullptr;
 }
 
 // ---------------- //
@@ -389,6 +395,7 @@ void GC::__mark_sweep(info *handle)
 	// for each outgoing arc
 	handle->route(+[](const smart_handle &arc)
 	{
+		// get the current arc value - this is only safe because we're in a gc cycle
 		info *raw = arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
@@ -398,11 +405,12 @@ void GC::__mark_sweep(info *handle)
 
 void GC::collect()
 {
+	// begin a collection action - if that fails early exit.
+	// this is in an outer scope because all mutexes must be unlocked prior to this object's destructor.
+	collection_synchronizer::collection_sentry sentry;
+	if (!sentry) return;
+
 	{
-		// begin a collection action - if that fails early exit.
-		collection_synchronizer::collection_sentry sentry;
-		if (!sentry) return;
-		
 		// we'll hold a long-running lock on the objects database - it would be very bad if someone changed it at any point in this process
 		std::lock_guard<std::mutex> obj_lock(objs.mutex);
 
@@ -454,13 +462,7 @@ void GC::collect()
 				objs.__remove(i);
 
 				// add it to the delete list
-				del_list.add(i);
-
-				for (auto root : sentry.get_roots())
-					if (*root == i)
-					{
-						std::cerr << "UHOH SOMETHING BAD HAPPENED !!!!!\n";
-					}
+				sentry.mark_delete(i);
 
 				#if GC_COLLECT_MSG
 				++collect_count;
@@ -472,11 +474,6 @@ void GC::collect()
 		std::cerr << "collecting - deleting: " << collect_count << '\n';
 		#endif
 	}
-
-	// -- make sure the obj mutex is unlocked before starting next step (could halt) -- //
-
-	// handle the delete list
-	GC::del_list.handle_all();
 }
 
 // ------------------------------ //
