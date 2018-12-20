@@ -194,6 +194,9 @@ private: // -- private types -- //
 	// used to select constructor paths that lack the addref step
 	static struct no_addref_t {} no_addref;
 
+	// used to select constructor paths that bind a new object
+	static struct bind_new_obj_t {} bind_new_obj;
+
 	class smart_handle
 	{
 	private: // -- data -- //
@@ -207,15 +210,13 @@ private: // -- private types -- //
 
 	public: // -- ctor / dtor / asgn -- //
 
-		// initializes the info handle with the specified value.
-		// additionally roots the internal handle - the roots database must not already be locked by the calling thread.
-		// if init is non-null, increments the reference count.
-		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
-		explicit smart_handle(info *init = nullptr);
+		// initializes the info handle to null and marks it as a root.
+		smart_handle(std::nullptr_t = nullptr);
 
-		// initializes the info handle with the specified value.
+		// initializes the info handle with the specified value and marks it as a root.
+		// the init object is added to the objects database in the same atomic step as the handle initialization.
 		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
-		smart_handle(info *init, no_addref_t);
+		smart_handle(info *init, bind_new_obj_t);
 
 		// unroots the internal handle - the roots database must not already be locked by the calling thread.
 		// if non-null, decrements the reference count.
@@ -348,15 +349,9 @@ public: // -- ptr -- //
 
 		// constructs a new ptr instance with the specified obj and handle.
 		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
-		// INCREMENTS THE REF COUNT on handle (if non-null).
+		// _handle is automatically added to the gc database.
 		// _handle must not have been sourced via handle.raw_handle().
-		ptr(element_type *_obj, info *_handle) : obj(_obj), handle(_handle) {}
-
-		// constructs a new ptr instance with the specified obj and handle.
-		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
-		// DOES NOT INCREMENT THE REF COUNT on handle.
-		// _handle must not have been sourced via handle.raw_handle().
-		ptr(element_type *_obj, info *_handle, GC::no_addref_t) : obj(_obj), handle(_handle, GC::no_addref) {}
+		ptr(element_type *_obj, info *_handle, bind_new_obj_t) : obj(_obj), handle(_handle, GC::bind_new_obj) {}
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -888,15 +883,14 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
+		// claim its children
+		handle->route(GC::router_unroot);
+
 		// create the ptr first - this roots obj
-		ptr<T> res(obj, handle, GC::no_addref);
+		ptr<T> res(obj, handle, GC::bind_new_obj);
 
-		{
-			std::lock_guard<std::mutex> obj_lock(GC::objs.mutex);
-
-			objs.__add(handle); // add it to the obj database (after rooting it to ensure no early deletion)
-			handle->route(GC::router_unroot); // claim all its children
-		}
+		assert(collection_synchronizer::is_rooted(res.handle.raw_handle()));
+		assert(collection_synchronizer::get_current_target(&res.handle.raw_handle()) == handle);
 
 		// begin timed collection (if it's not already)
 		GC::start_timed_collect();
@@ -974,15 +968,11 @@ public: // -- ptr allocation -- //
 		
 		// -- do the garbage collection aspects -- //
 
+		// claim its children
+		handle->route(GC::router_unroot);
+
 		// create the ptr first - this roots obj
-		ptr<T> res(reinterpret_cast<element_type*>(obj), handle, GC::no_addref);
-
-		{
-			std::lock_guard<std::mutex> obj_lock(GC::objs.mutex);
-
-			objs.__add(handle); // add it to the obj database (after rooting it to ensure no early deletion)
-			handle->route(GC::router_unroot); // claim all its children
-		}
+		ptr<T> res(reinterpret_cast<element_type*>(obj), handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
 		GC::start_timed_collect();
@@ -1041,15 +1031,11 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
+		// claim its children
+		handle->route(GC::router_unroot);
+
 		// create the ptr first - this roots obj
-		ptr<T> res(obj, handle, GC::no_addref);
-
-		{
-			std::lock_guard<std::mutex> obj_lock(GC::objs.mutex);
-
-			objs.__add(handle); // add it to the obj database (after rooting it to ensure no early deletion)
-			handle->route(GC::router_unroot); // claim all its children
-		}
+		ptr<T> res(obj, handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
 		GC::start_timed_collect();
@@ -1099,15 +1085,11 @@ public: // -- ptr allocation -- //
 
 		// -- do the garbage collection aspects -- //
 
+		// claim its children
+		handle->route(GC::router_unroot);
+
 		// create the ptr first - this roots obj
-		ptr<T[]> res(obj, handle, GC::no_addref);
-
-		{
-			std::lock_guard<std::mutex> obj_lock(GC::objs.mutex);
-
-			objs.__add(handle); // add it to the obj database (after rooting it to ensure no early deletion)
-			handle->route(GC::router_unroot); // claim all its children
-		}
+		ptr<T[]> res(obj, handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
 		GC::start_timed_collect();
@@ -1148,45 +1130,40 @@ public: // -- auto collection -- //
 	static sleep_time_t sleep_time();
 	static void sleep_time(sleep_time_t new_sleep_time);
 
-private: // -- database types -- //
+private: // -- containers -- //
 
-	// a synchronized container of info objects - implemented as a doubly-linked list
-	class objs_database
+	// a container of info objects - implemented as a doubly-linked list for fast removal from the middle.
+	// this container has no internal synchronization and is thus not thread safe.
+	class obj_list
 	{
-	public: // -- data -- //
-
-		std::mutex mutex; // the synchronization mechanism
+	private: // -- data -- //
 
 		info *first; // pointer to the first object
 		info *last;  // pointer to the last object
 
 	public: // -- ctor / dtor / asgn -- //
 
-		objs_database() : first(nullptr), last(nullptr) {}
+		// creates an empty obj list
+		obj_list();
 
-		objs_database(const objs_database&) = delete;
-		objs_database &operator=(const objs_database&) = delete;
+		obj_list(const obj_list&) = delete;
+		obj_list &operator=(const obj_list&) = delete;
 
 	public: // -- access -- //
+
+		// gets the first info object - null if there is none.
+		// this is supplied for enabling iteration - any non-null value is a valid node.
+		info *front() const { return first; }
 
 		// adds obj to this database - und. if obj already belongs to one or more databases.
 		void add(info *obj);
 		// removes obj from this database - und. if obj does not belong to this database.
 		void remove(info *obj);
 
-		// as add() but not thread safe - you should first lock the mutex.
-		void __add(info *obj);
-		// as remove() but not thread safe - you should first lock the mutex.
-		void __remove(info *obj);
-
-	public: // -- management -- //
-
-		// adds 1 to obj's reference count - does not use the mutex.
-		void addref(info *obj);
-
-		// removes 1 from obj's reference count - does not use the mutex.
-		// returns true if you MUST call GC::handle_del_list afterwards.
-		void delref(info *obj);
+		// merges the contents of other with the contents of this.
+		// if other refers to this object, does nothing.
+		// otherwise, other is guaranteed to be empty after this operation.
+		void merge(obj_list &&other);
 	};
 
 private: // -- sentries -- //
@@ -1220,11 +1197,9 @@ private: // -- collection deadlock protector -- //
 
 	class collection_synchronizer
 	{
-	private: // -- friends -- //
-
-		friend class smart_handle;
-
 	private: // -- collector-only resources -- //
+
+		static obj_list objs; // the list of all objects under gc consideration
 
 		static std::unordered_set<info *const*> roots; // the set of all root handles - must not be modified directly
 
@@ -1235,6 +1210,8 @@ private: // -- collection deadlock protector -- //
 		static std::mutex internal_mutex; // mutex used only for internal synchronization
 
 		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
+
+		static obj_list objs_add_cache; // the scheduled obj add operations
 
 		static std::unordered_set<info *const*> roots_add_cache; // the scheduled root operations
 		static std::unordered_set<info *const*> roots_remove_cache; // the scheduled unroot operations
@@ -1284,14 +1261,22 @@ private: // -- collection deadlock protector -- //
 
 		public: // -- data access -- //
 
-			// gets the roots database - must not be modified.
+			// gets the objs database.
 			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			const auto &get_roots() const { return collection_synchronizer::roots; }
+			auto &get_objs() { return collection_synchronizer::objs; }
+
+			// gets the roots database.
+			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
+			auto &get_roots() { return collection_synchronizer::roots; }
 
 			// marks obj for deletion - obj must not have already been marked for deletion.
-			// this does not remove obj from the obj database - you should do that prior to calling this.
+			// this automatically removes obj from the obj database.
 			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			void mark_delete(info *obj) { del_list.push_back(obj); }
+			void mark_delete(info *obj)
+			{
+				objs.remove(obj);
+				del_list.push_back(obj);
+			}
 		};
 
 	public: // -- interface -- //
@@ -1299,8 +1284,13 @@ private: // -- collection deadlock protector -- //
 		// returns true iff the calling thread is the current collector thread
 		static bool this_is_collector_thread();
 
-		// schedules a handle creation action - marks the handle as a root.
-		static void schedule_handle_create(info *&raw_handle);
+		// schedules a handle creation action that points to null.
+		// raw_handle need not be initialized prior to this call - it will be immedately repointed to null.
+		static void schedule_handle_create_null(info *&raw_handle);
+		// schedules a handle creation action that points to a new object - inserts new_obj into the obj database.
+		// raw_handle need not be initialized prior to this call - it will be immediately repointed to src_handle.
+		// new_obj must not already exist in the gc database.
+		static void schedule_handle_create_bind_new_obj(info *&raw_handle, info *new_obj);
 		// schedules a handle creation action that points at a pre-existing handle - marks the new handle as a root.
 		// raw_handle need not be initialized prior to this call - it will be immediately repointed to src_handle.
 		static void schedule_handle_create_alias(info *&raw_handle, info *&src_handle);
@@ -1319,28 +1309,38 @@ private: // -- collection deadlock protector -- //
 
 	private: // -- private interface (unsafe) -- //
 
-		// as schedule_handle_create() but not thread safe - you should first lock internal_mutex
-		static void __schedule_handle_create(info *&raw_handle);
+		// as schedule_handle_root() but not thread safe - you should first lock internal_mutex
+		static void __schedule_handle_root(info *&raw_handle);
 
 		// as schedule_handle_unroot() but not thread safe - you should first lock internal_mutex
 		static void __schedule_handle_unroot(info *const &raw_handle);
 
 		// as schedule_handle_repoint() but not thread safe - you should lock internal_mutex
 		static void __schedule_handle_repoint(info *&raw_handle, info *const *new_value);
+		
 
+
+
+	public:
 		// gets the current target info object of new_value.
 		// if new_value is null, returns null.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of new_value.
-		// THIS IS NOT THREAD SAFE - you should first lock internal_mutex.
+		static info *get_current_target(info *const *new_value);
+		// as get_current_target() but not thread safe - you should first lock internal_mutex.
 		static info *__get_current_target(info *const *new_value);
+
+
+		public: 
+			static bool is_rooted(info *const &inf)
+			{
+				std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+				return roots.find(&inf) != roots.end() || roots_add_cache.find(&inf) != roots_add_cache.end();
+			}
 	};
 
 private: // -- data -- //
-
-	static objs_database objs; // the objects database for all threads
-
-	// -----------------------------------------------
 
 	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
 
@@ -1349,12 +1349,6 @@ private: // -- data -- //
 private: // -- misc -- //
 
 	GC() = delete; // not instantiatable
-
-	// if T is a polymorphic type, returns a pointer to the most-derived object pointed by <ptr>; otherwise, returns <ptr>.
-	template<typename T, std::enable_if_t<std::is_polymorphic<T>::value, int> = 0>
-	void *get_polymorphic_root(T *ptr) { return dynamic_cast<void*>(ptr); }
-	template<typename T, std::enable_if_t<!std::is_polymorphic<T>::value, int> = 0>
-	void *get_polymorphic_root(T *ptr) { return ptr; }
 
 	// allocates space and returns a pointer to at least <size> bytes which is aligned to <align>.
 	// it is undefined behavior if align is not a power of 2.
