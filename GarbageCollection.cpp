@@ -374,11 +374,6 @@ void GC::collection_synchronizer::__schedule_handle_repoint(info *&raw_handle, i
 	handle_repoint_cache[&raw_handle] = __get_current_target(new_value);
 }
 
-GC::info *GC::collection_synchronizer::get_current_target(info *const *new_value)
-{
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-	return __get_current_target(new_value);
-}
 GC::info *GC::collection_synchronizer::__get_current_target(info *const *new_value)
 {
 	// if new_value is non-null, we need to look it up
@@ -404,8 +399,6 @@ void GC::__mark_sweep(info *handle)
 {
 	// mark this handle
 	handle->marked = true;
-
-	std::cerr << "sweeping " << handle << '\n';
 
 	// for each outgoing arc
 	handle->route(+[](const smart_handle &arc)
@@ -447,13 +440,9 @@ void GC::collect()
 
 		// -- mark and sweep -- //
 
-		std::cerr << "beginning sweep\n";
-
 		// for each root
 		for (info *const *i : sentry.get_roots())
 		{
-			std::cerr << "root sweep: " << i << '\n';
-
 			// perform a mark sweep from this root (if it points to something)
 			if (*i) __mark_sweep(*i);
 		}

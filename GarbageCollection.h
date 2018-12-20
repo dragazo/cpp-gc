@@ -184,8 +184,8 @@ private: // -- private types -- //
 
 		// -- helpers -- //
 
-		void destroy() { std::cerr << "dtor " << this << ' '; vtable->destroy(*this); }
-		void dealloc() { std::cerr << "dloc " << this << ' '; vtable->dealloc(*this); }
+		void destroy() { vtable->destroy(*this); }
+		void dealloc() { vtable->dealloc(*this); }
 
 		void route(router_fn func) { vtable->route(*this, func); }
 		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
@@ -856,8 +856,8 @@ public: // -- ptr allocation -- //
 		auto router_set = [](info &handle, auto func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); };
 
 		static const info_vtable _vtable(
-			[](info &handle) { std::cerr << "dtor " << &handle << '\n'; reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
-			[](info &handle) { std::cerr << "dloc " << &handle << '\n'; allocator_t::dealloc(handle.obj); },
+			[](info &handle) { reinterpret_cast<element_type*>(handle.obj)->~element_type(); },
+			[](info &handle) { allocator_t::dealloc(handle.obj); },
 			router_set,
 			router_set
 		);
@@ -888,9 +888,6 @@ public: // -- ptr allocation -- //
 
 		// create the ptr first - this roots obj
 		ptr<T> res(obj, handle, GC::bind_new_obj);
-
-		assert(collection_synchronizer::is_rooted(res.handle.raw_handle()));
-		assert(collection_synchronizer::get_current_target(&res.handle.raw_handle()) == handle);
 
 		// begin timed collection (if it's not already)
 		GC::start_timed_collect();
@@ -1263,17 +1260,26 @@ private: // -- collection deadlock protector -- //
 
 			// gets the objs database.
 			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			auto &get_objs() { return collection_synchronizer::objs; }
+			auto &get_objs()
+			{
+				assert(success);
+				return collection_synchronizer::objs;
+			}
 
 			// gets the roots database.
 			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			auto &get_roots() { return collection_synchronizer::roots; }
+			auto &get_roots()
+			{
+				assert(success);
+				return collection_synchronizer::roots;
+			}
 
 			// marks obj for deletion - obj must not have already been marked for deletion.
 			// this automatically removes obj from the obj database.
 			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
 			void mark_delete(info *obj)
 			{
+				assert(success);
 				objs.remove(obj);
 				del_list.push_back(obj);
 			}
@@ -1318,26 +1324,11 @@ private: // -- collection deadlock protector -- //
 		// as schedule_handle_repoint() but not thread safe - you should lock internal_mutex
 		static void __schedule_handle_repoint(info *&raw_handle, info *const *new_value);
 		
-
-
-
-	public:
 		// gets the current target info object of new_value.
 		// if new_value is null, returns null.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of new_value.
-		static info *get_current_target(info *const *new_value);
-		// as get_current_target() but not thread safe - you should first lock internal_mutex.
 		static info *__get_current_target(info *const *new_value);
-
-
-		public: 
-			static bool is_rooted(info *const &inf)
-			{
-				std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
-				return roots.find(&inf) != roots.end() || roots_add_cache.find(&inf) != roots_add_cache.end();
-			}
 	};
 
 private: // -- data -- //

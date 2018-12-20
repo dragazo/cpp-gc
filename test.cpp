@@ -673,13 +673,11 @@ int main() try
 				*atomic_gc_ptr = GC::make<atomic_container>();
 				*/
 				
-				/**
+				/**/
 				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
 
 				for (int i = 0; i < 128; ++i)
 				{
-					std::cerr << "making " << i << '\n';
-
 					GC::ptr<TreeNode> tree = GC::make<TreeNode>();
 					tree->left = GC::make<TreeNode>();
 					tree->right = GC::make<TreeNode>();
