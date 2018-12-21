@@ -164,6 +164,9 @@ void GC::obj_list::merge(obj_list &&other)
 		// do an actual splice
 		last->next = other.first;
 		other.first->prev = last;
+
+		// repoint the last pointer
+		last = other.last;
 	}
 
 	// empty other

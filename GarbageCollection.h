@@ -317,6 +317,8 @@ public: // -- ptr -- //
 	// a self-managed garbage-collected pointer to type T.
 	// if T is an unbound array, it is considered the "array" form, otherwise it is the "scalar" form.
 	// scalar and array forms may offer different interfaces.
+	// this type is not internally synchronized (i.e. not thread safe).
+	// thus read/writes from several threads to the same ptr are undefined behavior (see atomic_ptr).
 	template<typename T>
 	struct ptr
 	{
@@ -346,6 +348,10 @@ public: // -- ptr -- //
 			obj = new_obj;
 			handle.reset(new_handle);
 		}
+
+		// constructs a new ptr instance with the specified obj and pre-existing handle.
+		// this is equivalent to reset() but done at construction time for efficiency.
+		ptr(element_type *new_obj, const smart_handle &new_handle) : obj(new_obj), handle(new_handle) {}
 
 		// constructs a new ptr instance with the specified obj and handle.
 		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
@@ -447,17 +453,16 @@ public: // -- ptr -- //
 		friend void swap(ptr &a, ptr &b) { a.swap(b); }
 	};
 
-	// !!!!!!!!!!!!!!!!!!
-	// ATOMIC_PTR NEEDS SOME MAJOR CHANGES NOW THAT THE ENTIRE SYSTEM HAS BEEN CHANGED
-	// !!!!!!!!!!!!!!!!!!
-
-	// defines an atomic gc ptr
+	// defines an atomic gc ptr.
+	// as ptr, but read/writes are synchronized and thus thread safe.
 	template<typename T>
 	struct atomic_ptr
 	{
 	private: // -- data -- //
 
 		GC::ptr<T> value;
+
+		mutable std::mutex mutex;
 
 		friend struct GC::router<atomic_ptr<T>>;
 
@@ -475,28 +480,19 @@ public: // -- ptr -- //
 		atomic_ptr(const GC::ptr<T> &desired) : value(desired) {}
 		atomic_ptr &operator=(const GC::ptr<T> &desired)
 		{
-			// assignment calls reset(), which is already atomic due to locking GC::mutex
-			value = desired;
+			store(desired);
 			return *this;
 		}
 
 		void store(const GC::ptr<T> &desired)
 		{
-			// assignment calls reset(), which is already atomic due to locking GC::mutex
+			std::lock_guard<std::mutex> lock(this->mutex);
 			value = desired;
 		}
 		GC::ptr<T> load() const
 		{
-			GC::ptr<T> ret(GC::no_init_t{});
-
-			{
-				std::lock_guard<std::mutex> lock(GC::objs.mutex);
-				ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
-
-				// we can ignore this return value because ret is always null prior to this call
-				ret.reset(value.obj, value.handle);
-			}
-
+			std::lock_guard<std::mutex> lock(this->mutex);
+			GC::ptr<T> ret = value;
 			return ret;
 		}
 
@@ -509,22 +505,11 @@ public: // -- ptr -- //
 
 		GC::ptr<T> exchange(const GC::ptr<T> &desired)
 		{
-			// not using lock_guard because we need special lock behavior - see below
-			std::unique_lock<std::mutex> lock(GC::objs.mutex);
+			std::lock_guard<std::mutex> lock(this->mutex);
 
-			GC::ptr<T> ret(GC::no_init_t{});
-			ret.__init(nullptr, nullptr); // initialize - not in same step as below because __init doesn't inc ref count
-
-			/*                       */ ret.__reset(value.obj, value.handle); // we can ignore this return value because ret is always null prior to this call
-			bool call_handle_del_list = value.__reset(desired.obj, desired.handle);
-
-			// unlock early because we need to do other stuff like call GC::handle_del_list() and ptr ctors/dtors
-			lock.unlock();
-
-			// handle __reset return value flag (see __reset() comments).
-			if (call_handle_del_list) GC::handle_del_list();
-
-			return ret;
+			ptr<T> old = value;
+			value = desired;
+			return old;
 		}
 
 		// !! add compare exchange stuff !! //
@@ -579,12 +564,15 @@ public: // -- core router specializations -- //
 
 	// an appropriate specialization for atomic_ptr (does not use any calls to gc functions - see generic std::atomic<T> ill-formed construction)
 	template<typename T>
-	struct router<atomic_ptr<GC::ptr<T>>>
+	struct router<atomic_ptr<T>>
 	{
 		template<typename F> static void route(const atomic_ptr<T> &atomic, F func)
 		{
 			// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
-			// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
+			// locking is safe because all ptr operations are non-blocking and thus this can never result in a deadlock.
+
+			std::lock_guard<std::mutex> lock(atomic.mutex);
+
 			GC::route(atomic.value, func);
 		}
 	};
@@ -767,9 +755,9 @@ public: // -- std adapter routers -- //
 	template<typename T, typename Container>
 	struct router<std::queue<T, Container>>
 	{
-		template<typename F> static void route(const std::queue<T, Container> &stack, F func)
+		template<typename F> static void route(const std::queue<T, Container> &queue, F func)
 		{
-			const auto &container = __get_adapter_container(stack);
+			const auto &container = __get_adapter_container(queue);
 			route_range(container.begin(), container.end(), func);
 		}
 	};
@@ -777,9 +765,9 @@ public: // -- std adapter routers -- //
 	template<typename T, typename Container, typename Compare>
 	struct router<std::priority_queue<T, Container, Compare>>
 	{
-		template<typename F> static void route(const std::priority_queue<T, Container, Compare> &stack, F func)
+		template<typename F> static void route(const std::priority_queue<T, Container, Compare> &pqueue, F func)
 		{
-			const auto &container = __get_adapter_container(stack);
+			const auto &container = __get_adapter_container(pqueue);
 			route_range(container.begin(), container.end(), func);
 		}
 	};
@@ -1190,7 +1178,7 @@ private: // -- sentries -- //
 		bool operator!() const noexcept { return _value; }
 	};
 
-private: // -- collection deadlock protector -- //
+private: // -- collection synchronizer -- //
 
 	class collection_synchronizer
 	{
@@ -1388,7 +1376,8 @@ struct std::hash<GC::ptr<T>>
 	std::size_t operator()(const GC::ptr<T> &p) const { return std::hash<T*>()(p.get()); }
 };
 
-// standard wrapper for atomic_ptr
+// standard wrapper for atomic_ptr.
+// it might be faster to use atomic_ptr directly (depending on compiler).
 template<typename T>
 struct std::atomic<GC::ptr<T>>
 {
@@ -1441,8 +1430,6 @@ struct GC::router<std::atomic<GC::ptr<T>>>
 {
 	template<typename F> static void route(const std::atomic<GC::ptr<T>> &atomic, F func)
 	{
-		// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
-		// this is safe because the synchronization mechanism inside atomic is to lock GC::mutex, and routers already assume it's locked anyway.
 		GC::route(atomic.value, func);
 	}
 };

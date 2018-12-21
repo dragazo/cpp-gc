@@ -343,7 +343,7 @@ std::string tostr(T &&v)
 int main() try
 {
 	GC::strategy(GC::strategies::manual);
-	/*
+	
 
 	GC::ptr<atomic_container> atomic_container_obj = GC::make<atomic_container>();
 
@@ -370,9 +370,9 @@ int main() try
 			auto arr = GC::make<alert_t[]>(4);
 			holder = arr.get(2);
 		}
-		std::cerr << "destroyed array - you should see dtors below:\n";
+		std::cerr << "destroyed array\n";
 	}
-	std::cerr << "----------------\n\n";;
+	std::cerr << "----------------\n\n";
 
 
 	GC::ptr<int[6]> arr_test_0;
@@ -683,6 +683,9 @@ int main() try
 					tree->right = GC::make<TreeNode>();
 					table->update(tostr(i), tree);
 				}
+
+				std::cerr << "phase1\n";
+
 				/**/
 
 				GC::ptr<int> pi;
@@ -708,6 +711,8 @@ int main() try
 
 			//std::cerr << "collecting pass " << ++i << '\n';
 			GC::collect();
+
+			//std::this_thread::sleep_for(std::chrono::seconds(2));
 
 			//*atomic_gc_ptr = GC::make<atomic_container>();
 		}
