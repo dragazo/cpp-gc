@@ -418,7 +418,8 @@ int main() try
 		priority_queue_ptr->push(i);
 	}
 	
-
+	GC::unique_ptr<int> gc_uint(new int(77));
+	
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
     {

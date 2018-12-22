@@ -77,11 +77,11 @@ public: // -- router functions -- //
 	// at any point in time, the owned object is considered to be part of its owner (i.e. as if it were a by-value member).
 
 	// the simplest form of ownership is a by-value member.
-	// another common category of owned object is a by-value container (e.g. std::vector, std::list, std::set, etc.).
-	// another case is a uniquely-owning pointer or reference - e.g. std::unique_ptr, or any other (potentially-smart) pointer/reference to an object you know you own uniquely.
+	// another common category of owned object is a by-value container (e.g. the contents of std::vector, std::list, std::set, etc.).
+	// another case is a uniquely-owning pointer or reference - e.g. pointed-to object of std::unique_ptr, or any other (potentially-smart) pointer/reference to an object you know you own uniquely.
 	// of course, these cases can be mixed - e.g. a by-value member std::unique_ptr which is a uniquely-owning pointer to a by-value container std::vector of a gc type.
 	
-	// it is important to remember that a container type like std::vector<T> is a gc type if T is a gc type.
+	// it is important to remember that a container type like std::vector<T> is a gc type if T is a gc type (because it thus contains or "owns" gc objects).
 
 	// object reachability traversals are performed by router functions.
 	// for a gc type T, its router functions route a function-like object to its owned gc objects recursively.
@@ -90,6 +90,7 @@ public: // -- router functions -- //
 	// routing to anything you don't own is undefined behavior.
 	// thus, although it is legal to route to the "contents" of an owned object (i.e. owned object of an owned object), it is typically dangerous to do so.
 	// in general, you should just route to all your by-value members - it is their responsibility to properly route the message the rest of the way.
+	// thus, if you own a std::vector<T> where T is a gc type, you should just route to the vector itself, which has its own router functions to route the message to its contents.
 
 	// if you are the owner of a gc type object, it is undefined behavior not to route to it (except in the special case of a mutable router function - see below).
 
@@ -103,6 +104,15 @@ public: // -- router functions -- //
 
 	// it should be noted that re-pointing a GC::ptr, GC::atomic_ptr, or std::atomic<GC::ptr> is not a mutating action for the purposes of classifying a "mutable" owned gc object.
 	// this is due to the fact that you would never route to its pointed-to contents due to it being a shared resource.
+
+	// the following is critical and easily forgotten:
+	// all mutating actions in a mutable gc object (e.g. adding items to a std::vector<GC::ptr<T>>) must occurr in a manner mutually exclusive with the object's router function.
+	// this is because any thread may at any point make routing requests to any number of objects under gc management in any order and for any purpose.
+	// thus, if you have e.g. a std::vector<GC::ptr<T>>, you should also have a mutex to guard it on insertion/deletion/reordering of an element and for the router function.
+	// this would likely need to be encapsulated by methods of your class to ensure external code can't violate this requirement (it is undefined behavior to violate this).
+
+	// on the bright side, cpp-gc has wrappers for all standard containers that internally apply all of this logic without the need to remember it.
+	// so, you could use a GC::vector<GC::ptr<T>> instead of a std::vector<GC::ptr<T>> and avoid the need to be careful or encapsulate anything.
 
 	// the following requirements pertain to router functions:
 	// for a normal router function (i.e. GC::router_fn) this must at least route to all owned gc objects.
@@ -1114,6 +1124,195 @@ public: // -- auto collection -- //
 	// note: only used if the timed strategy flag is set.
 	static sleep_time_t sleep_time();
 	static void sleep_time(sleep_time_t new_sleep_time);
+
+public: // -- mutable std wrappers -- //
+
+	// a wrapper for std::unique_ptr that has an internally-synchronized router function (i.e. ready-to-go for gc).
+	// note - this type is not thread safe - only locks enough to satisfy the requirements of a router function for a mutable gc type (see intro comments).
+	template<typename T, typename Deleter = std::default_delete<T>>
+	class unique_ptr
+	{
+	private: // -- data -- //
+
+		std::unique_ptr<T, Deleter> wrapped; // the wrapped object
+
+		mutable std::mutex mutex; // router synchronizer
+
+		friend struct GC::router<GC::unique_ptr<T, Deleter>>;
+
+	public: // -- types -- //
+
+		typedef typename decltype(wrapped)::pointer pointer;
+
+		typedef typename decltype(wrapped)::element_type element_type;
+
+		typedef typename decltype(wrapped)::deleter_type deleter_type;
+
+	public: // -- ctor / dtor -- //
+
+		constexpr unique_ptr() noexcept : wrapped() {}
+		constexpr unique_ptr(std::nullptr_t) noexcept : wrapped(nullptr) {}
+
+		explicit unique_ptr(pointer p) noexcept : wrapped(p) {}
+
+		// !! ADD DELETER OBJ CTORS (3-4) https://en.cppreference.com/w/cpp/memory/unique_ptr/unique_ptr
+
+		unique_ptr(unique_ptr &&u) noexcept : wrapped(std::move(u.wrapped)) {}
+		unique_ptr(std::unique_ptr<T, Deleter> &&u) noexcept : wrapped(std::move(u)) {}
+
+		template<typename U, typename E>
+		unique_ptr(unique_ptr<U, E> &&u) noexcept : wrapped(std::move(u.wrapped)) {}
+		template<typename U, typename E>
+		unique_ptr(std::unique_ptr<U, E> &&u) noexcept : wrapped(std::move(u)) {}
+
+		~unique_ptr() = default;
+
+	public: // -- asgn -- //
+
+		unique_ptr &operator=(unique_ptr &&r) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = std::move(r.wrapped);
+			return *this;
+		}
+		unique_ptr &operator=(std::unique_ptr<T, Deleter> &&r) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = std::move(r);
+			return *this;
+		}
+
+		template<typename U, typename E>
+		unique_ptr &operator=(unique_ptr<U, E> &&r) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = std::move(r.wrapped);
+			return *this;
+		}
+		template<typename U, typename E>
+		unique_ptr &operator=(std::unique_ptr<U, E> &&r) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = std::move(r);
+			return *this;
+		}
+
+		unique_ptr &operator=(std::nullptr_t) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = nullptr;
+			return *this;
+		}
+
+	public: // -- management -- //
+
+		pointer release() noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.release();
+		}
+
+		void reset(pointer ptr = pointer()) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.reset(ptr);
+		}
+
+		template<typename U, typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
+		void reset(U u) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.reset(u);
+		}
+
+		template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
+		void reset(std::nullptr_t = nullptr) noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.reset(nullptr);
+		}
+
+		void swap(unique_ptr &other) noexcept
+		{
+			// equivalent to std::scoped_lock from C++17
+			std::lock(this->mutex, other.mutex);
+			std::lock_guard<std::mutex> lock1(this->mutex, std::adopt_lock);
+			std::lock_guard<std::mutex> lock2(other.mutex, std::adopt_lock);
+
+			wrapped.swap(other);
+		}
+		friend void swap(unique_ptr &a, unique_ptr *b) { a.swap(b); }
+
+	public: // -- obj access -- //
+
+		pointer get() const noexcept { return wrapped.get(); }
+
+		Deleter &get_deleter() noexcept { return wrapped.get_deleter(); }
+		const Deleter &get_deleter() const noexcept { return wrapped.get_deleter(); }
+
+		explicit operator bool() const noexcept { return static_cast<bool>(wrapped); }
+
+		decltype(auto) operator*() const { return *wrapped; }
+		decltype(auto) operator->() const noexcept { return wrapped.operator->(); }
+
+		template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
+		T &operator[](std::size_t i) const { return wrapped[i]; }
+
+	public: // -- cmp -- //
+
+		template<typename T1, typename D1, typename T2, typename D2>
+		friend bool operator==(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped == b.wrapped; }
+		template<typename T1, typename D1, typename T2, typename D2>
+		friend bool operator!=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped != b.wrapped; }
+		template<typename T1, typename D1, typename T2, typename D2>
+		friend bool operator<(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped < b.wrapped; }
+		template<typename T1, typename D1, typename T2, typename D2>
+		friend bool operator<=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped <= b.wrapped; }
+		template<typename T1, typename D1, typename T2, typename D2>
+		friend bool operator>(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped > b.wrapped; }
+		template<typename T1, typename D1, typename T2, typename D2>
+		friend bool operator>=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped >= b.wrapped; }
+
+		template<typename T1, typename D1>
+		friend bool operator==(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x == nullptr; }
+		template<typename T1, typename D1>
+		friend bool operator==(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr == x; }
+
+		template<typename T1, typename D1>
+		friend bool operator!=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x != nullptr; }
+		template<typename T1, typename D1>
+		friend bool operator!=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr != x; }
+
+		template<typename T1, typename D1>
+		friend bool operator<(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x < nullptr; }
+		template<typename T1, typename D1>
+		friend bool operator<(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr < x; }
+
+		template<typename T1, typename D1>
+		friend bool operator<=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x <= nullptr; }
+		template<typename T1, typename D1>
+		friend bool operator<=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr <= x; }
+
+		template<typename T1, typename D1>
+		friend bool operator>(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x > nullptr; }
+		template<typename T1, typename D1>
+		friend bool operator>(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr > x; }
+
+		template<typename T1, typename D1>
+		friend bool operator>=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x >= nullptr; }
+		template<typename T1, typename D1>
+		friend bool operator>=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr >= x; }
+	};
+	template<typename T, typename Deleter>
+	struct router<GC::unique_ptr<T, Deleter>>
+	{
+		template<typename F>
+		void route(const GC::unique_ptr<T, Deleter> &obj, F func)
+		{
+			std::lock_guard<std::mutex> lock(obj.mutex);
+			GC::route(*obj, func);
+		}
+	};
 
 private: // -- containers -- //
 
