@@ -322,6 +322,72 @@ private: // -- array typing helpers -- //
 	template<typename T> using remove_unbound_extent_t = typename remove_unbound_extent<T>::type;
 	template<typename T> using remove_bound_extent_t = typename remove_bound_extent<T>::type;
 
+public: // -- mutex helpers -- //
+
+	// equivalent to std::scoped_lock - included here because it's handy and is otherwise only available in C++17 and up
+	template<typename ...Lockable>
+	class scoped_lock
+	{
+	private: // -- data -- //
+
+		// an array of unlocker data (one per lockable) - consists of pairs of an unlocker function and an argument for said function (an untyped pointer to the unlock target).
+		std::pair<void(*)(void*), void*> unlockers[sizeof...(Lockable)];
+
+	public: // -- ctor / dtor / asgn -- //
+
+		explicit scoped_lock(Lockable &...lockable) : unlockers{ std::pair<void(*)(void*), void*>([](void *raw) { reinterpret_cast<Lockable*>(raw)->unlock(); }, std::addressof(lockable))... }
+		{
+			std::lock(lockable...);
+		}
+		scoped_lock(std::adopt_lock_t, Lockable &...lockable) : unlockers{ std::pair<void(*)(void*), void*>([](void *raw) { reinterpret_cast<Lockable*>(raw)->unlock(); }, std::addressof(lockable))... }
+		{}
+
+		~scoped_lock()
+		{
+			for (const auto &i : unlockers) i.first(i.second);
+		}
+
+		scoped_lock(const scoped_lock&) = delete;
+		scoped_lock &operator=(const scoped_lock&) = delete;
+	};
+	template<typename Lockable>
+	class scoped_lock<Lockable>
+	{
+	private: // -- data -- //
+
+		Lockable &lock; // the (single) lockable object
+
+	public: // -- ctor / dtor / asgn -- //
+
+		explicit scoped_lock(Lockable &lockable) : lock(lockable)
+		{
+			lockable.lock();
+		}
+		scoped_lock(std::adopt_lock_t, Lockable &lockable) : lock(lockable)
+		{}
+
+		~scoped_lock()
+		{
+			lock.unlock();
+		}
+
+		scoped_lock(const scoped_lock&) = delete;
+		scoped_lock &operator=(const scoped_lock&) = delete;
+	};
+	template<>
+	class scoped_lock<>
+	{
+	public: // -- ctor / dtor / asgn -- //
+
+		explicit scoped_lock() = default;
+		scoped_lock(std::adopt_lock_t) {}
+
+		~scoped_lock() = default;
+
+		scoped_lock(const scoped_lock&) = delete;
+		scoped_lock &operator=(const scoped_lock&) = delete;
+	};
+
 public: // -- ptr -- //
 
 	// a self-managed garbage-collected pointer to type T.
@@ -532,7 +598,11 @@ public: // -- ptr -- //
 
 	public: // -- swap -- //
 
-		void swap(atomic_ptr &other) { value.swap(other.value); }
+		void swap(atomic_ptr &other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			value.swap(other.value);
+		}
 		friend void swap(atomic_ptr &a, atomic_ptr &b) { a.swap(b); }
 	};
 
@@ -1150,50 +1220,58 @@ public: // -- mutable std wrappers -- //
 
 	public: // -- ctor / dtor -- //
 
-		constexpr unique_ptr() noexcept : wrapped() {}
+		constexpr unique_ptr() noexcept {}
 		constexpr unique_ptr(std::nullptr_t) noexcept : wrapped(nullptr) {}
 
 		explicit unique_ptr(pointer p) noexcept : wrapped(p) {}
 
 		// !! ADD DELETER OBJ CTORS (3-4) https://en.cppreference.com/w/cpp/memory/unique_ptr/unique_ptr
 
-		unique_ptr(unique_ptr &&u) noexcept : wrapped(std::move(u.wrapped)) {}
-		unique_ptr(std::unique_ptr<T, Deleter> &&u) noexcept : wrapped(std::move(u)) {}
+		unique_ptr(unique_ptr &&other) noexcept
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			wrapped = std::move(other.wrapped);
+		}
+		unique_ptr(std::unique_ptr<T, Deleter> &&other) noexcept : wrapped(std::move(other)) {}
 
 		template<typename U, typename E>
-		unique_ptr(unique_ptr<U, E> &&u) noexcept : wrapped(std::move(u.wrapped)) {}
+		unique_ptr(unique_ptr<U, E> &&other) noexcept
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			wrapped = std::move(other.wrapped);
+		}
 		template<typename U, typename E>
-		unique_ptr(std::unique_ptr<U, E> &&u) noexcept : wrapped(std::move(u)) {}
+		unique_ptr(std::unique_ptr<U, E> &&other) noexcept : wrapped(std::move(other)) {}
 
 		~unique_ptr() = default;
 
 	public: // -- asgn -- //
 
-		unique_ptr &operator=(unique_ptr &&r) noexcept
+		unique_ptr &operator=(unique_ptr &&other) noexcept
 		{
-			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped = std::move(r.wrapped);
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped = std::move(other.wrapped);
 			return *this;
 		}
-		unique_ptr &operator=(std::unique_ptr<T, Deleter> &&r) noexcept
+		unique_ptr &operator=(std::unique_ptr<T, Deleter> &&other) noexcept
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped = std::move(r);
+			wrapped = std::move(other);
 			return *this;
 		}
 
 		template<typename U, typename E>
-		unique_ptr &operator=(unique_ptr<U, E> &&r) noexcept
+		unique_ptr &operator=(unique_ptr<U, E> &&other) noexcept
 		{
-			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped = std::move(r.wrapped);
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped = std::move(other.wrapped);
 			return *this;
 		}
 		template<typename U, typename E>
-		unique_ptr &operator=(std::unique_ptr<U, E> &&r) noexcept
+		unique_ptr &operator=(std::unique_ptr<U, E> &&other) noexcept
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped = std::move(r);
+			wrapped = std::move(other);
 			return *this;
 		}
 
@@ -1219,10 +1297,10 @@ public: // -- mutable std wrappers -- //
 		}
 
 		template<typename U, typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
-		void reset(U u) noexcept
+		void reset(U other) noexcept
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped.reset(u);
+			wrapped.reset(other); // std::unique_ptr doesn't know about cpp-gc stuff, so there's no way this can go wrong mutex-wise
 		}
 
 		template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
@@ -1234,12 +1312,8 @@ public: // -- mutable std wrappers -- //
 
 		void swap(unique_ptr &other) noexcept
 		{
-			// equivalent to std::scoped_lock from C++17
-			std::lock(this->mutex, other.mutex);
-			std::lock_guard<std::mutex> lock1(this->mutex, std::adopt_lock);
-			std::lock_guard<std::mutex> lock2(other.mutex, std::adopt_lock);
-
-			wrapped.swap(other);
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped.swap(other.wrapped);
 		}
 		friend void swap(unique_ptr &a, unique_ptr *b) { a.swap(b); }
 
@@ -1247,8 +1321,8 @@ public: // -- mutable std wrappers -- //
 
 		pointer get() const noexcept { return wrapped.get(); }
 
-		Deleter &get_deleter() noexcept { return wrapped.get_deleter(); }
-		const Deleter &get_deleter() const noexcept { return wrapped.get_deleter(); }
+		decltype(auto) get_deleter() noexcept { return wrapped.get_deleter(); }
+		decltype(auto) get_deleter() const noexcept { return wrapped.get_deleter(); }
 
 		explicit operator bool() const noexcept { return static_cast<bool>(wrapped); }
 
@@ -1256,7 +1330,7 @@ public: // -- mutable std wrappers -- //
 		decltype(auto) operator->() const noexcept { return wrapped.operator->(); }
 
 		template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
-		T &operator[](std::size_t i) const { return wrapped[i]; }
+		decltype(auto) operator[](std::size_t i) const { return wrapped[i]; }
 
 	public: // -- cmp -- //
 
@@ -1312,6 +1386,65 @@ public: // -- mutable std wrappers -- //
 			std::lock_guard<std::mutex> lock(obj.mutex);
 			GC::route(*obj, func);
 		}
+	};
+
+	template<typename T, typename Allocator = std::allocator<T>>
+	class vector
+	{
+	private: // -- data -- //
+
+		std::vector<T, Allocator> wrapped; // the actual wrapped container
+
+		mutable std::mutex mutex; // router synchronizer
+
+		friend struct GC::router<GC::vector<T, Allocator>>;
+
+	public: // -- typedefs -- //
+
+		typedef typename decltype(wrapped)::value_type value_type;
+		typedef typename decltype(wrapped)::allocator_type allocator_type;
+
+		typedef typename decltype(wrapped)::size_type size_type;
+		typedef typename decltype(wrapped)::difference_type difference_type;
+
+		typedef typename decltype(wrapped)::reference reference;
+		typedef typename decltype(wrapped)::const_reference const_reference;
+
+		typedef typename decltype(wrapped)::pointer pointer;
+		typedef typename decltype(wrapped)::const_pointer const_pointer;
+
+		typedef typename decltype(wrapped)::iterator iterator;
+		typedef typename decltype(wrapped)::const_iterator const_iterator;
+
+		typedef typename decltype(wrapped)::reverse_iterator reverse_iterator;
+		typedef typename decltype(wrapped)::const_reverse_iterator const_reverse_iterator;
+
+	public: // -- ctor / dtor -- //
+
+		vector() : wrapped() {}
+		explicit vector(const Allocator &alloc) : wrapped(alloc) {}
+
+		vector(size_type count, const T& value = T(), const Allocator &alloc = Allocator()) : wrapped(count, value, alloc) {}
+
+		explicit vector(size_type count) : wrapped(count) {}
+		explicit vector(size_type count, const Allocator &alloc = Allocator()) : wrapped(count, alloc) {}
+
+		template<typename InputIt>
+		vector(InputIt first, InputIt last, const Allocator &alloc = Allocator()) : wrapped(first, last, alloc) {}
+
+		vector(const vector &other) : wrapped(other.wrapped) {}
+		vector(const std::vector<T, Allocator> &other) : wrapped(other) {}
+
+		vector(const vector &other, const Allocator &alloc) : wrapped(other.wrapped, alloc) {}
+		vector(const std::vector<T, Allocator> &other, Allocator &alloc) : wrapped(other, alloc) {}
+
+		vector(vector &&other) : wrapped(std::move(other.wrapped)) {}
+		vector(std::vector<T, Allocator> &&other) : wrapped(std::move(other)) {}
+
+		vector(vector &&other, const Allocator &alloc) : wrapped(std::move(other.wrapped), alloc) {}
+		vector(std::vector<T, Allocator> &&other, const Allocator &alloc) : wrapped(std::move(other), alloc) {}
+
+		vector(std::initializer_list<T> init, const Allocator &alloc = Allocator()) : wrapped(init, alloc) {}
 	};
 
 private: // -- containers -- //

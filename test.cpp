@@ -422,6 +422,29 @@ int main() try
 	
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
+
+	{
+		std::mutex mutex1, mutex2, mutex3, mutex4;
+
+		{
+			GC::scoped_lock<std::mutex, std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3, mutex4);
+		}
+		{
+			GC::scoped_lock<std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3);
+		}
+		{
+			GC::scoped_lock<std::mutex, std::mutex> scoped_loq(mutex1, mutex2);
+		}
+		{
+			GC::scoped_lock<std::mutex> scoped_loq(mutex1);
+		}
+		{
+			GC::scoped_lock<> scoped_loq;
+		}
+	}
+
+
+
     {
         auto i1 = GC::make<TreeNode>();
         auto i2 = GC::make<SymbolTable>();    
