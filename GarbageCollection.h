@@ -2141,6 +2141,432 @@ public: // -- mutable std wrappers -- //
 		}
 	};
 
+	template<typename T, typename Allocator = std::allocator<T>>
+	class forward_list
+	{
+	private: // -- data -- //
+
+		typedef std::forward_list<T, Allocator> wrapped_t; // the wrapped type
+
+		alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
+
+		mutable std::mutex mutex; // router synchronizer
+
+		friend struct GC::router<GC::forward_list<T, Allocator>>;
+
+	private: // -- data accessors -- //
+
+		// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
+		wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
+		const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+	public: // -- typedefs -- //
+
+		typedef typename wrapped_t::value_type value_type;
+		typedef typename wrapped_t::allocator_type allocator_type;
+
+		typedef typename wrapped_t::size_type size_type;
+		typedef typename wrapped_t::difference_type difference_type;
+
+		typedef typename wrapped_t::reference reference;
+		typedef typename wrapped_t::const_reference const_reference;
+
+		typedef typename wrapped_t::pointer pointer;
+		typedef typename wrapped_t::const_pointer const_pointer;
+
+		typedef typename wrapped_t::iterator iterator;
+		typedef typename wrapped_t::const_iterator const_iterator;
+
+	public: // -- ctor / dtor -- //
+
+		forward_list()
+		{
+			new (buffer) wrapped_t();
+		}
+		explicit forward_list(const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(alloc);
+		}
+
+		forward_list(size_type count, const T &value, const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(count, value, alloc);
+		}
+
+		explicit forward_list(size_type count, const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(count, alloc);
+		}
+
+		template<typename InputIt>
+		forward_list(InputIt first, InputIt last, const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(first, last, alloc);
+		}
+
+		forward_list(const forward_list &other)
+		{
+			new (buffer) wrapped_t(other.wrapped());
+		}
+		forward_list(const std::forward_list<T, Allocator> &other)
+		{
+			new (buffer) wrapped_t(other);
+		}
+
+		forward_list(const forward_list &other, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(other.wrapped(), alloc);
+		}
+		forward_list(const std::forward_list<T, Allocator> &other, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(other, alloc);
+		}
+
+		forward_list(forward_list &&other)
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			new (buffer) wrapped_t(std::move(other.wrapped()));
+		}
+		forward_list(std::forward_list<T, Allocator> &&other)
+		{
+			new (buffer) wrapped_t(std::move(other));
+		}
+
+		forward_list(forward_list &&other, const Allocator &alloc)
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
+		}
+		forward_list(std::forward_list<T, Allocator> &&other, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(std::move(other), alloc);
+		}
+
+		forward_list(std::initializer_list<T> init, const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(init, alloc);
+		}
+
+		~forward_list()
+		{
+			wrapped().~wrapped_t();
+		}
+
+	public: // -- asgn -- //
+
+		forward_list &operator=(const forward_list &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = other.wrapped();
+			return *this;
+		}
+		forward_list &operator=(const std::forward_list<T, Allocator> &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = other;
+			return *this;
+		}
+
+		forward_list &operator=(forward_list &&other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+			return *this;
+		}
+		forward_list &operator=(std::forward_list<T, Allocator> &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = std::move(other);
+			return *this;
+		}
+
+		forward_list &operator=(std::initializer_list<T> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = ilist;
+			return *this;
+		}
+
+		void assign(size_type count, const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().assign(count, value);
+		}
+
+		template<typename InputIt>
+		void assign(InputIt first, InputIt last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().assign(first, last);
+		}
+
+		void assign(std::initializer_list<T> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().assign(ilist);
+		}
+
+	public: // -- misc -- //
+
+		allocator_type get_allocator() const { return wrapped().get_allocator(); }
+
+	public: // -- obj access -- //
+
+		reference front() { return wrapped().front(); }
+		const_reference front() const { return wrapped().front(); }
+
+	public: // -- iterators -- //
+
+		iterator before_begin() noexcept { return wrapped().before_begin(); }
+		const_iterator before_begin() const noexcept { return wrapped().before_begin(); }
+		const_iterator cbefore_begin() const noexcept { return wrapped().cbefore_begin(); }
+
+		iterator begin() noexcept { return wrapped().begin(); }
+		const_iterator begin() const noexcept { return wrapped().begin(); }
+		const_iterator cbegin() const noexcept { return wrapped().cbegin(); }
+
+		iterator end() noexcept { return wrapped().end(); }
+		const_iterator end() const noexcept { return wrapped().end(); }
+		const_iterator cend() const noexcept { return wrapped().cend(); }
+
+	public: // -- size / cap -- //
+
+		bool empty() const noexcept { return wrapped().empty(); }
+
+		size_type max_size() const noexcept { return wrapped().max_size(); }
+
+		void clear() noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().clear();
+		}
+
+	public: // -- insert / erase -- //
+
+		iterator insert_after(const_iterator pos, const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert_after(pos, value);
+		}
+		iterator insert_after(const_iterator pos, T &&value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert_after(pos, std::move(value));
+		}
+
+		iterator insert_after(const_iterator pos, size_type count, const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert_after(pos, count, value);
+		}
+
+		template<typename InputIt>
+		iterator insert_after(const_iterator pos, InputIt first, InputIt last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert_after(pos, first, last);
+		}
+
+		iterator insert_after(const_iterator pos, std::initializer_list<T> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert_after(pos, ilist);
+		}
+
+		template<typename ...Args>
+		iterator emplace_after(const_iterator pos, Args &&...args)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().emplace_after(pos, std::forward<Args>(args)...);
+		}
+
+		iterator erase_after(const_iterator pos)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().erase_after(pos);
+		}
+		iterator erase_after(const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().erase_after(first, last);
+		}
+
+	public: // -- push / pop -- //
+
+		void push_front(const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().push_front(value);
+		}
+		void push_front(T &&value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().push_front(std::move(value));
+		}
+
+		template<typename ...Args>
+		decltype(auto) emplace_front(Args &&...args)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().emplace_front(std::forward<Args>(args)...);
+		}
+
+		void pop_front()
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().pop_front();
+		}
+
+	public: // -- resize -- //
+
+		void resize(size_type count)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().resize(count);
+		}
+		void resize(size_type count, const value_type &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().resize(count, value);
+		}
+
+	public: // -- swap -- //
+
+		void swap(forward_list &other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
+		friend void swap(forward_list &a, forward_list &b) { a.swap(b); }
+
+	public: // -- cmp -- //
+
+		friend bool operator==(const vector &a, const vector &b) { return a.wrapped() == b.wrapped(); }
+		friend bool operator!=(const vector &a, const vector &b) { return a.wrapped() != b.wrapped(); }
+		friend bool operator<(const vector &a, const vector &b) { return a.wrapped() < b.wrapped(); }
+		friend bool operator<=(const vector &a, const vector &b) { return a.wrapped() <= b.wrapped(); }
+		friend bool operator>(const vector &a, const vector &b) { return a.wrapped() > b.wrapped(); }
+		friend bool operator>=(const vector &a, const vector &b) { return a.wrapped() >= b.wrapped(); }
+
+	public: // -- merge -- //
+
+		void merge(forward_list &other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().merge(other.wrapped());
+		}
+		void merge(forward_list &&other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().merge(std::move(other.wrapped()));
+		}
+
+		template<typename Compare>
+		void merge(forward_list &other, Compare comp)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().merge(other.wrapped(), comp);
+		}
+		template<typename Compare>
+		void merge(forward_list &&other, Compare comp)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().merge(std::move(other.wrapped()), comp);
+		}
+
+	public: // -- splice -- //
+
+		void splice_after(const_iterator pos, forward_list &other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped());
+		}
+		void splice_after(const_iterator pos, forward_list &&other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()));
+		}
+
+		void splice_after(const_iterator pos, forward_list &other, const_iterator it)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped(), it);
+		}
+		void splice_after(const_iterator pos, forward_list &&other, const_iterator it)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()), it);
+		}
+
+		void splice_after(const_iterator pos, forward_list &other, const_iterator first, const_iterator last)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped(), first, last);
+		}
+		void splice_after(const_iterator pos, forward_list &&other, const_iterator first, const_iterator last)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		}
+
+	public: // -- remove -- //
+
+		decltype(auto) remove(const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().remove(value);
+		}
+
+		template<typename UnaryPredicate>
+		decltype(auto) remove_if(UnaryPredicate p)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().remove_if(p);
+		}
+
+	public: // -- ordering -- //
+
+		void reverse() noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().reverse();
+		}
+
+		decltype(auto) unique()
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().unique();
+		}
+		template<typename BinaryPredicate>
+		decltype(auto) unique(BinaryPredicate p)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().unique(p);
+		}
+
+		void sort()
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().sort();
+		}
+		template<typename Compare>
+		void sort(Compare comp)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().sort(comp);
+		}
+	};
+	template<typename T, typename Allocator>
+	struct router<GC::forward_list<T, Allocator>>
+	{
+		template<typename F>
+		static void route(const GC::forward_list<T, Allocator> &list, F func)
+		{
+			std::lock_guard<std::mutex> lock(list.mutex);
+			GC::route(list.wrapped(), func);
+		}
+	};
+
 private: // -- containers -- //
 
 	// a container of info objects - implemented as a doubly-linked list for fast removal from the middle.

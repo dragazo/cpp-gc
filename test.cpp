@@ -451,6 +451,12 @@ int main() try
 
 	assert(**ptr_unique_ptr == 123);
 
+	auto gc_flist = new GC::forward_list<float>(gc_float_deq.begin(), gc_float_deq.end());
+
+	GC::ptr<GC::forward_list<float>> ptr_gc_flist = GC::adopt<GC::forward_list<float>>(gc_flist);
+
+	ptr_gc_flist->push_front(111222333.444f);
+
 	{
 		std::mutex mutex1, mutex2, mutex3, mutex4;
 
