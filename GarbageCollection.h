@@ -1348,40 +1348,40 @@ public: // -- mutable std wrappers -- //
 		friend bool operator>=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped >= b.wrapped; }
 
 		template<typename T1, typename D1>
-		friend bool operator==(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x == nullptr; }
+		friend bool operator==(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped == nullptr; }
 		template<typename T1, typename D1>
-		friend bool operator==(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr == x; }
+		friend bool operator==(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr == x.wrapped; }
 
 		template<typename T1, typename D1>
-		friend bool operator!=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x != nullptr; }
+		friend bool operator!=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped != nullptr; }
 		template<typename T1, typename D1>
-		friend bool operator!=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr != x; }
+		friend bool operator!=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr != x.wrapped; }
 
 		template<typename T1, typename D1>
-		friend bool operator<(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x < nullptr; }
+		friend bool operator<(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped < nullptr; }
 		template<typename T1, typename D1>
-		friend bool operator<(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr < x; }
+		friend bool operator<(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr < x.wrapped; }
 
 		template<typename T1, typename D1>
-		friend bool operator<=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x <= nullptr; }
+		friend bool operator<=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped <= nullptr; }
 		template<typename T1, typename D1>
-		friend bool operator<=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr <= x; }
+		friend bool operator<=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr <= x.wrapped; }
 
 		template<typename T1, typename D1>
-		friend bool operator>(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x > nullptr; }
+		friend bool operator>(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped > nullptr; }
 		template<typename T1, typename D1>
-		friend bool operator>(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr > x; }
+		friend bool operator>(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr > x.wrapped; }
 
 		template<typename T1, typename D1>
-		friend bool operator>=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x >= nullptr; }
+		friend bool operator>=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped >= nullptr; }
 		template<typename T1, typename D1>
-		friend bool operator>=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr >= x; }
+		friend bool operator>=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr >= x.wrapped; }
 	};
 	template<typename T, typename Deleter>
 	struct router<GC::unique_ptr<T, Deleter>>
 	{
 		template<typename F>
-		void route(const GC::unique_ptr<T, Deleter> &obj, F func)
+		static void route(const GC::unique_ptr<T, Deleter> &obj, F func)
 		{
 			std::lock_guard<std::mutex> lock(obj.mutex);
 			GC::route(*obj, func);
@@ -1421,12 +1421,11 @@ public: // -- mutable std wrappers -- //
 
 	public: // -- ctor / dtor -- //
 
-		vector() : wrapped() {}
+		vector() {}
 		explicit vector(const Allocator &alloc) : wrapped(alloc) {}
 
 		vector(size_type count, const T& value = T(), const Allocator &alloc = Allocator()) : wrapped(count, value, alloc) {}
 
-		explicit vector(size_type count) : wrapped(count) {}
 		explicit vector(size_type count, const Allocator &alloc = Allocator()) : wrapped(count, alloc) {}
 
 		template<typename InputIt>
@@ -1436,15 +1435,264 @@ public: // -- mutable std wrappers -- //
 		vector(const std::vector<T, Allocator> &other) : wrapped(other) {}
 
 		vector(const vector &other, const Allocator &alloc) : wrapped(other.wrapped, alloc) {}
-		vector(const std::vector<T, Allocator> &other, Allocator &alloc) : wrapped(other, alloc) {}
+		vector(const std::vector<T, Allocator> &other, const Allocator &alloc) : wrapped(other, alloc) {}
 
-		vector(vector &&other) : wrapped(std::move(other.wrapped)) {}
+		vector(vector &&other)
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			wrapped = std::move(other.mutex);
+		}
 		vector(std::vector<T, Allocator> &&other) : wrapped(std::move(other)) {}
 
-		vector(vector &&other, const Allocator &alloc) : wrapped(std::move(other.wrapped), alloc) {}
+		vector(vector &&other, const Allocator &alloc)
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			decltype(wrapped) temp(std::move(other.wrapped), alloc); // this step is to ensure we account for the allocator argument
+			wrapped = std::move(temp);
+		}
 		vector(std::vector<T, Allocator> &&other, const Allocator &alloc) : wrapped(std::move(other), alloc) {}
 
 		vector(std::initializer_list<T> init, const Allocator &alloc = Allocator()) : wrapped(init, alloc) {}
+
+		~vector() = default;
+
+	public: // -- asgn -- //
+
+		vector &operator=(const vector &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = other.wrapped;
+			return *this;
+		}
+		vector &operator=(const std::vector<T, Allocator> &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = other;
+			return *this;
+		}
+
+		vector &operator=(vector &&other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped = std::move(other.wrapped);
+			return *this;
+		}
+		vector &operator=(std::vector<T, Allocator> &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = std::move(other);
+			return *this;
+		}
+
+		vector &operator=(std::initializer_list<T> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped = ilist;
+			return *this;
+		}
+
+		void assign(size_type count, const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.assign(count, value);
+		}
+
+		template<typename InputIt>
+		void assign(InputIt first, InputIt last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.assign(first, last);
+		}
+
+		void assign(std::initializer_list<T> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.assign(ilist);
+		}
+
+	public: // -- misc -- //
+
+		allocator_type get_allocator() const { return wrapped.get_allocator(); }
+
+	public: // -- obj access -- //
+
+		reference at(size_type pos) { return wrapped.at(pos); }
+		const_reference at(size_type pos) const { return wrapped.at(pos); }
+
+		reference operator[](size_type pos) { return wrapped[pos]; }
+		const_reference operator[](size_type pos) const { return wrapped[pos]; }
+
+		reference front() { return wrapped.front(); }
+		const_reference front() const { return wrapped.front(); }
+
+		reference back() { return wrapped.back(); }
+		const_reference back() const { return wrapped.back(); }
+
+		T *data() noexcept { return wrapped.data(); }
+		const T *data() const noexcept { return wrapped.data(); }
+
+	public: // -- iterators -- //
+
+		iterator begin() noexcept { return wrapped.begin(); }
+		const_iterator begin() const noexcept { return wrapped.begin(); }
+		const_iterator cbegin() const noexcept { return wrapped.cbegin(); }
+
+		iterator end() noexcept { return wrapped.end(); }
+		const_iterator end() const noexcept { return wrapped.end(); }
+		const_iterator cend() const noexcept { return wrapped.cend(); }
+
+		reverse_iterator rbegin() noexcept { return wrapped.rbegin(); }
+		const_reverse_iterator rbegin() const noexcept { return wrapped.rbegin(); }
+		const_reverse_iterator crbegin() const noexcept { return wrapped.crbegin(); }
+
+		reverse_iterator rend() noexcept { return wrapped.rend(); }
+		const_reverse_iterator rend() const noexcept { return wrapped.rend(); }
+		const_reverse_iterator crend() const noexcept { return wrapped.crend(); }
+
+	public: // -- size / cap -- //
+
+		bool empty() const noexcept { return wrapped.empty(); }
+		size_type size() const noexcept { return wrapped.size(); }
+
+		size_type max_size() const noexcept { return wrapped.max_size(); }
+
+		void reserve(size_type new_cap)
+		{
+			// we need to lock on this because it may result in a reallocation
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.reserve(new_cap);
+		}
+		size_type capacity() const noexcept { return wrapped.capacity(); }
+
+		void shrink_to_fit()
+		{
+			// we need to lock on this because it may result in a reallocation
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.shrink_to_fit();
+		}
+
+		void clear() noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.clear();
+		}
+
+	public: // -- insert / erase -- //
+
+		iterator insert(const_iterator pos, const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.insert(pos, value);
+		}
+		iterator insert(const_iterator pos, T &&value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.insert(pos, std::move(value));
+		}
+
+		iterator insert(const_iterator pos, size_type count, const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.insert(pos, count, value);
+		}
+
+		template<typename InputIt>
+		iterator insert(const_iterator pos, InputIt first, InputIt last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.insert(pos, first, last);
+		}
+
+		iterator insert(const_iterator pos, std::initializer_list<T> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.insert(pos, ilist);
+		}
+
+		template<typename ...Args>
+		iterator emplace(const_iterator pos, Args &&...args)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.emplace(std::forward<Args>(args)...);
+		}
+
+		iterator erase(const_iterator pos)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.erase(pos);
+		}
+		iterator erase(const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.erase(first, last);
+		}
+
+	public: // -- push / pop -- //
+
+		void push_back(const T &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.push_back(value);
+		}
+		void push_back(T &&value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.push_back(std::move(value));
+		}
+
+		template<typename ...Args>
+		decltype(auto) emplace_back(Args &&...args)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped.emplace_back(std::forward<Args>(args)...);
+		}
+
+		void pop_back()
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.pop_back();
+		}
+
+	public: // -- resize -- //
+
+		void resize(size_type count)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.resize(count);
+		}
+		void resize(size_type count, const value_type &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped.resize(count, value);
+		}
+
+	public: // -- swap -- //
+
+		void swap(vector &other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped.swap(other.wrapped);
+		}
+		friend void swap(vector &a, vector &b) { a.swap(b); }
+
+	public: // -- cmp -- //
+
+		friend bool operator==(const vector &a, const vector &b) { return a.wrapped == b.wrapped; }
+		friend bool operator!=(const vector &a, const vector &b) { return a.wrapped != b.wrapped; }
+		friend bool operator<(const vector &a, const vector &b) { return a.wrapped < b.wrapped; }
+		friend bool operator<=(const vector &a, const vector &b) { return a.wrapped <= b.wrapped; }
+		friend bool operator>(const vector &a, const vector &b) { return a.wrapped > b.wrapped; }
+		friend bool operator>=(const vector &a, const vector &b) { return a.wrapped >= b.wrapped; }
+	};
+	template<typename T, typename Allocator>
+	struct router<GC::vector<T, Allocator>>
+	{
+		template<typename F>
+		static void route(const GC::vector<T, Allocator> &vec, F func)
+		{
+			std::lock_guard<std::mutex> lock(vec.mutex);
+			GC::route(vec.wrapped, func);
+		}
 	};
 
 private: // -- containers -- //

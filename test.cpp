@@ -420,6 +420,16 @@ int main() try
 	
 	GC::unique_ptr<int> gc_uint(new int(77));
 	
+	if (gc_uint != nullptr)
+	{
+		std::cerr << "non null gc unique ptr\n";
+	}
+
+	GC::vector<int> gc_vec;
+	gc_vec.emplace_back(17);
+
+	assert(gc_vec == gc_vec);
+
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
 
