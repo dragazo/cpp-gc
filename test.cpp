@@ -457,6 +457,11 @@ int main() try
 
 	ptr_gc_flist->push_front(111222333.444f);
 
+	GC::ptr<GC::list<float>> ptr_gc_list = GC::make<GC::list<float>>();
+	ptr_gc_list->emplace_front(17.f);
+	ptr_gc_list->push_back(12.f);
+
+
 	{
 		std::mutex mutex1, mutex2, mutex3, mutex4;
 
