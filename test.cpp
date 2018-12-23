@@ -432,6 +432,24 @@ int main() try
 
 	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
+	std::allocator<int> int_alloc;
+
+	GC::vector<int> gc_vec2(std::move(gc_vec), int_alloc);
+
+	GC::vector<float> gc_float_vec = { 1, 2, 3, 4 };
+	GC::deque<float> gc_float_deq = { 1, 2, 3, 4 };
+
+	gc_float_deq.push_front(178);
+	gc_vec2.pop_back();
+
+	GC::ptr<GC::unique_ptr<int>> ptr_unique_ptr = GC::make<GC::unique_ptr<int>>(new int(69));
+	**ptr_unique_ptr = 36;
+	*ptr_unique_ptr = std::make_unique<int>(345);
+
+	int *pint = ptr_unique_ptr.get()->get();
+	*pint = 123;
+
+	assert(**ptr_unique_ptr == 123);
 
 	{
 		std::mutex mutex1, mutex2, mutex3, mutex4;
