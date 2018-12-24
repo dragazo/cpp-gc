@@ -5021,14 +5021,429 @@ public: // -- mutable std wrappers -- //
 
 	public: // -- cmp -- //
 
-		friend bool operator==(const set &a, const set &b) { return a.wrapped() == b.wrapped(); }
-		friend bool operator!=(const set &a, const set &b) { return a.wrapped() != b.wrapped(); }
+		friend bool operator==(const unordered_set &a, const unordered_set &b) { return a.wrapped() == b.wrapped(); }
+		friend bool operator!=(const unordered_set &a, const unordered_set &b) { return a.wrapped() != b.wrapped(); }
 	};
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<GC::unordered_set<Key, Hash, KeyEqual, Allocator>>
 	{
 		template<typename F>
 		static void route(const GC::unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func)
+		{
+			std::lock_guard<std::mutex> lock(set.mutex);
+			GC::route(set.wrapped(), func);
+		}
+	};
+
+	template<typename Key, typename Hash = std::hash<Key>, typename KeyEqual = std::equal_to<Key>, typename Allocator = std::allocator<Key>>
+	class unordered_multiset
+	{
+	private: // -- data -- //
+
+		typedef std::unordered_multiset<Key, Hash, KeyEqual, Allocator> wrapped_t; // the wrapped type
+
+		alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
+
+		mutable std::mutex mutex; // router synchronizer
+
+		friend struct GC::router<GC::unordered_multiset<Key, Hash, KeyEqual, Allocator>>;
+
+	private: // -- data accessors -- //
+
+		// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
+		wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
+		const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+	public: // -- typedefs -- //
+
+		typedef typename wrapped_t::key_type key_type;
+		typedef typename wrapped_t::value_type value_type;
+
+		typedef typename wrapped_t::size_type size_type;
+		typedef typename wrapped_t::difference_type difference_type;
+
+		typedef typename wrapped_t::hasher hasher;
+		typedef typename wrapped_t::key_equal key_equal;
+
+		typedef typename wrapped_t::allocator_type allocator_type;
+
+		typedef typename wrapped_t::reference reference;
+		typedef typename wrapped_t::const_reference const_reference;
+
+		typedef typename wrapped_t::pointer pointer;
+		typedef typename wrapped_t::const_pointer const_pointer;
+
+		typedef typename wrapped_t::iterator iterator;
+		typedef typename wrapped_t::const_iterator const_iterator;
+
+		typedef typename wrapped_t::local_iterator local_iterator;
+		typedef typename wrapped_t::const_local_iterator const_local_iterator;
+
+		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+		typedef typename wrapped_t::node_type node_type;
+		#endif
+
+	public: // -- ctor / dtor -- //
+
+		unordered_multiset()
+		{
+			new (buffer) wrapped_t();
+		}
+		explicit unordered_multiset(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(bucket_count, hash, equal, alloc);
+		}
+
+		unordered_multiset(size_type bucket_count, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(bucket_count, alloc);
+		}
+		unordered_multiset(size_type bucket_count, const Hash &hash, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(bucket_count, hash, alloc);
+		}
+
+		explicit unordered_multiset(const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(alloc);
+		}
+
+		template<typename InputIt>
+		unordered_multiset(InputIt first, InputIt last)
+		{
+			new (buffer) wrapped_t(first, last);
+		}
+		template<typename InputIt>
+		unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(first, last, bucket_count, hash, equal, alloc);
+		}
+
+		template<typename InputIt>
+		unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(first, last, bucket_count, alloc);
+		}
+
+		template<typename InputIt>
+		unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(first, last, bucket_count, hash, alloc);
+		}
+
+		unordered_multiset(const unordered_multiset &other)
+		{
+			new (buffer) wrapped_t(other.wrapped());
+		}
+		unordered_multiset(const wrapped_t &other)
+		{
+			new (buffer) wrapped_t(other);
+		}
+
+		unordered_multiset(const unordered_multiset &other, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(other.wrapped(), alloc);
+		}
+		unordered_multiset(const wrapped_t &other, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(other, alloc);
+		}
+
+		unordered_multiset(unordered_multiset &&other)
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			new (buffer) wrapped_t(std::move(other.wrapped()));
+		}
+		unordered_multiset(wrapped_t &&other)
+		{
+			new (buffer) wrapped_t(std::move(other));
+		}
+
+		unordered_multiset(unordered_multiset &&other, const Allocator &alloc)
+		{
+			std::lock_guard<std::mutex> lock(other.mutex);
+			new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
+		}
+		unordered_multiset(wrapped_t &&other, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(std::move(other), alloc);
+		}
+
+		unordered_multiset(std::initializer_list<value_type> init)
+		{
+			new (buffer) wrapped_t(init);
+		}
+		unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+		{
+			new (buffer) wrapped_t(init, bucket_count, hash, equal, alloc);
+		}
+
+		unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(init, bucket_count, alloc);
+		}
+		unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+		{
+			new (buffer) wrapped_t(init, bucket_count, hash, alloc);
+		}
+
+		~unordered_multiset()
+		{
+			wrapped().~wrapped_t();
+		}
+
+	public: // -- asgn -- //
+
+		unordered_multiset &operator=(const unordered_multiset &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = other.wrapped();
+			return *this;
+		}
+		unordered_multiset &operator=(const wrapped_t &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = other;
+			return *this;
+		}
+
+		unordered_multiset &operator=(unordered_multiset &&other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+			return *this;
+		}
+		unordered_multiset &operator=(wrapped_t &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = std::move(other);
+			return *this;
+		}
+
+		unordered_multiset &operator=(std::initializer_list<value_type> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped() = ilist;
+			return *this;
+		}
+
+	public: // -- misc -- //
+
+		allocator_type get_allocator() const { return wrapped().get_allocator(); }
+
+	public: // -- iterators -- //
+
+		iterator begin() noexcept { return wrapped().begin(); }
+		const_iterator begin() const noexcept { return wrapped().begin(); }
+		const_iterator cbegin() const noexcept { return wrapped().cbegin(); }
+
+		iterator end() noexcept { return wrapped().end(); }
+		const_iterator end() const noexcept { return wrapped().end(); }
+		const_iterator cend() const noexcept { return wrapped().cend(); }
+
+	public: // -- size / cap -- //
+
+		bool empty() const noexcept { return wrapped().empty(); }
+		size_type size() const noexcept { return wrapped().size(); }
+
+		size_type max_size() const noexcept { return wrapped().max_size(); }
+
+		void clear() noexcept
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().clear();
+		}
+
+	public: // -- insert / erase -- //
+
+		iterator insert(const value_type &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert(value);
+		}
+		iterator insert(value_type &&value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert(std::move(value));
+		}
+
+		iterator insert(const_iterator hint, const value_type &value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert(hint, value);
+		}
+		iterator insert(const_iterator hint, value_type &&value)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert(hint, std::move(value));
+		}
+
+		template<typename InputIt>
+		void insert(InputIt first, InputIt last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().insert(first, last);
+		}
+
+		void insert(std::initializer_list<value_type> ilist)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().insert(ilist);
+		}
+
+		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+
+		iterator insert(node_type &&nh)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert(std::move(nh));
+		}
+		iterator insert(const_iterator hint, node_type &&nh)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().insert(hint, std::move(nh));
+		}
+
+		#endif
+
+		template<typename ...Args>
+		iterator emplace(Args &&...args)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().emplace(std::forward<Args>(args)...);
+		}
+		template<typename ...Args>
+		iterator emplace_hint(const_iterator hint, Args &&...args)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
+		}
+
+		iterator erase(const_iterator pos)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().erase(pos);
+		}
+		iterator erase(const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().erase(first, last);
+		}
+
+		size_type erase(const key_type &key)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().erase(key);
+		}
+
+	public: // -- swap -- //
+
+		void swap(unordered_multiset &other)
+		{
+			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
+		friend void swap(unordered_multiset &a, unordered_multiset &b) { a.swap(b); }
+
+	public: // -- extract -- //
+
+		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+
+		node_type extract(const_iterator pos)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().extract(pos);
+		}
+		node_type extract(const key_type &key)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			return wrapped().extract(key);
+		}
+
+		#endif
+
+		// !! ADD MERGE FUNCTIONS (C++17)
+
+	public: // -- lookup -- //
+
+		size_type count(const Key &key) const { return wrapped().count(key); }
+		template<typename K>
+		size_type count(const K &key) const { return wrapped().count(key); }
+
+		iterator find(const Key &key) { return wrapped().find(key); }
+		const_iterator find(const Key &key) const { return wrapped().find(key); }
+
+		template<typename K>
+		iterator find(const K &key) { return wrapped().find(key); }
+		template<typename K>
+		const_iterator find(const K &key) const { return wrapped().find(key); }
+
+		bool contains(const Key &key) const { return wrapped().contains(key); }
+		template<typename K>
+		bool contains(const K &key) const { return wrapped().contains(key); }
+
+		std::pair<iterator, iterator> equal_range(const Key &key) { return wrapped().equal_range(key); }
+		std::pair<const_iterator, const_iterator> equal_range(const Key &key) const { return wrapped().equal_range(key); }
+
+		template<typename K>
+		std::pair<iterator, iterator> equal_range(const K &key) { return wrapped().equal_range(key); }
+		template<typename K>
+		std::pair<const_iterator, const_iterator> equal_range(const K &key) const { return wrapped().equal_range(key); }
+
+	public: // -- bucket interface -- //
+
+		local_iterator begin(size_type n) { return wrapped().begin(n); }
+		const_local_iterator begin(size_type n) const { return wrapped().begin(n); }
+		const_local_iterator cbegin(size_type n) const { return wrapped().cbegin(n); }
+
+		local_iterator end(size_type n) { return wrapped().end(n); }
+		const_local_iterator end(size_type n) const { return wrapped().end(n); }
+		const_local_iterator cend(size_type n) const { return wrapped().cend(n); }
+
+		size_type bucket_count() const { return wrapped().bucket_count(); }
+		size_type max_bucket_count() const { return wrapped().max_bucket_count(); }
+
+		size_type bucket_size(size_type n) const { return wrapped().bucket_size(n); }
+		size_type bucket(const Key &key) const { return wrapped().bucket(key); }
+
+	public: // -- hash policy -- //
+
+		float load_factor() const { return wrapped().load_factor(); }
+
+		float max_load_factor() const { return wrapped().max_load_factor(); }
+		void max_load_factor(float ml)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().max_load_factor(ml);
+		}
+
+		void rehash(size_type count)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().rehash(count);
+		}
+
+		void reserve(size_type count)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().reserve(count);
+		}
+
+	public: // -- observers -- //
+
+		hasher hash_function() const { return wrapped().hash_function(); }
+		key_equal key_eq() const { return wrapped().key_eq(); }
+
+	public: // -- cmp -- //
+
+		friend bool operator==(const unordered_multiset &a, const unordered_multiset &b) { return a.wrapped() == b.wrapped(); }
+		friend bool operator!=(const unordered_multiset &a, const unordered_multiset &b) { return a.wrapped() != b.wrapped(); }
+	};
+	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
+	struct router<GC::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
+	{
+		template<typename F>
+		static void route(const GC::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func)
 		{
 			std::lock_guard<std::mutex> lock(set.mutex);
 			GC::route(set.wrapped(), func);

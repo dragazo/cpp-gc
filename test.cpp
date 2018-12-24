@@ -480,6 +480,12 @@ int main() try
 	for (auto i : *pmset) std::cerr << i << ' ';
 	std::cerr << '\n';
 
+	GC::ptr<GC::unordered_multiset<float>> pumset = GC::make<GC::unordered_multiset<float>>(pmset->begin(), pmset->end());
+
+	pumset->insert(std::sqrt(10.0f));
+	for (auto i : *pumset) std::cerr << i << ' ';
+	std::cerr << '\n';
+
 	std::cerr << '\n';
 
 	GC::ptr<GC::map<int, std::string>> pmap = GC::make<GC::map<int, std::string>>();
