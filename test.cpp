@@ -467,6 +467,29 @@ int main() try
 	for (auto i : *pset) std::cerr << i << ' ';
 	std::cerr << '\n';
 
+	GC::ptr<GC::multiset<float>> pmset = GC::make<GC::multiset<float>>(gc_float_vec.begin(), gc_float_vec.end());
+
+	pmset->insert(2.71828f);
+	for (auto i : *pmset) std::cerr << i << ' ';
+	std::cerr << '\n';
+
+	std::cerr << '\n';
+
+	GC::ptr<GC::map<int, std::string>> pmap = GC::make<GC::map<int, std::string>>();
+	pmap->emplace(0, "zero");
+	pmap->emplace(1, "one");
+	pmap->emplace(2, "two");
+	pmap->emplace(3, "three");
+	pmap->emplace(4, "four");
+	pmap->emplace(5, "five");
+	pmap->emplace(6, "six");
+	pmap->emplace(7, "seven");
+	pmap->emplace(8, "eight");
+	pmap->emplace(8, "eight-repeat");
+	pmap->emplace(9, "nine");
+	pmap->emplace(10, "ten");
+	for (const auto &i : *pmap) std::cerr << i.first << " -> " << i.second << '\n';
+
 	std::cerr << '\n';
 
 	{
