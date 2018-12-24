@@ -461,6 +461,13 @@ int main() try
 	ptr_gc_list->emplace_front(17.f);
 	ptr_gc_list->push_back(12.f);
 
+	GC::ptr<GC::set<float>> pset = GC::make<GC::set<float>>(gc_float_vec.begin(), gc_float_vec.end());
+
+	pset->insert(3.14159f);
+	for (auto i : *pset) std::cerr << i << ' ';
+	std::cerr << '\n';
+
+	std::cerr << '\n';
 
 	{
 		std::mutex mutex1, mutex2, mutex3, mutex4;
