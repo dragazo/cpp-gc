@@ -6,6 +6,7 @@
 #include <cassert>
 #include <sstream>
 #include <utility>
+#include <cmath>
 
 #include "GarbageCollection.h"
 
@@ -467,9 +468,15 @@ int main() try
 	for (auto i : *pset) std::cerr << i << ' ';
 	std::cerr << '\n';
 
-	GC::ptr<GC::multiset<float>> pmset = GC::make<GC::multiset<float>>(gc_float_vec.begin(), gc_float_vec.end());
+	GC::ptr<GC::unordered_set<float>> puset = GC::make<GC::unordered_set<float>>(pset->begin(), pset->end());
 
-	pmset->insert(2.71828f);
+	puset->insert(2.71828f);
+	for (auto i : *puset) std::cerr << i << ' ';
+	std::cerr << '\n';
+
+	GC::ptr<GC::multiset<float>> pmset = GC::make<GC::multiset<float>>(puset->begin(), puset->end());
+
+	pmset->insert(std::sqrt(2.0f));
 	for (auto i : *pmset) std::cerr << i << ' ';
 	std::cerr << '\n';
 
