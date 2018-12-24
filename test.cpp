@@ -7,6 +7,7 @@
 #include <sstream>
 #include <utility>
 #include <cmath>
+#include <initializer_list>
 
 #include "GarbageCollection.h"
 
@@ -519,6 +520,40 @@ int main() try
 	pmmap->emplace(9, "nine");
 	pmmap->emplace(10, "ten");
 	for (const auto &i : *pmmap) std::cerr << i.first << " -> " << i.second << '\n';
+
+	std::cerr << '\n';
+
+	GC::ptr<GC::unordered_map<int, std::string>> pumap = GC::make<GC::unordered_map<int, std::string>>();
+	pumap->emplace(0, "zero");
+	pumap->emplace(1, "one");
+	pumap->emplace(2, "two");
+	pumap->emplace(3, "three");
+	pumap->emplace(4, "four");
+	pumap->emplace(5, "five");
+	pumap->emplace(6, "six");
+	pumap->emplace(7, "seven");
+	pumap->emplace(8, "eight");
+	pumap->emplace(8, "eight-repeat");
+	pumap->emplace(9, "nine");
+	pumap->emplace(10, "ten");
+	for (const auto &i : *pumap) std::cerr << i.first << " -> " << i.second << '\n';
+
+	std::cerr << '\n';
+
+	GC::ptr<GC::unordered_multimap<int, std::string>> pummap = GC::make<GC::unordered_multimap<int, std::string>>();
+	pummap->emplace(0, "zero");
+	pummap->emplace(1, "one");
+	pummap->emplace(2, "two");
+	pummap->emplace(3, "three");
+	pummap->emplace(4, "four");
+	pummap->emplace(5, "five");
+	pummap->emplace(6, "six");
+	pummap->emplace(7, "seven");
+	pummap->emplace(8, "eight");
+	pummap->emplace(8, "eight-repeat");
+	pummap->emplace(9, "nine");
+	pummap->emplace(10, "ten");
+	for (const auto &i : *pummap) std::cerr << i.first << " -> " << i.second << '\n';
 
 	std::cerr << '\n';
 
