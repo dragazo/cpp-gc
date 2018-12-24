@@ -492,6 +492,23 @@ int main() try
 
 	std::cerr << '\n';
 
+	GC::ptr<GC::multimap<int, std::string>> pmmap = GC::make<GC::multimap<int, std::string>>();
+	pmmap->emplace(0, "zero");
+	pmmap->emplace(1, "one");
+	pmmap->emplace(2, "two");
+	pmmap->emplace(3, "three");
+	pmmap->emplace(4, "four");
+	pmmap->emplace(5, "five");
+	pmmap->emplace(6, "six");
+	pmmap->emplace(7, "seven");
+	pmmap->emplace(8, "eight");
+	pmmap->emplace(8, "eight-repeat");
+	pmmap->emplace(9, "nine");
+	pmmap->emplace(10, "ten");
+	for (const auto &i : *pmmap) std::cerr << i.first << " -> " << i.second << '\n';
+
+	std::cerr << '\n';
+
 	{
 		std::mutex mutex1, mutex2, mutex3, mutex4;
 
