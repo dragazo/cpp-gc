@@ -211,32 +211,38 @@ private:
     friend struct GC::router<SymbolTable>;
     
 public:
+
+	// wrapped symbols table type that is safe to modify directly
+	GC::unordered_map<std::string, GC::ptr<TreeNode>> better_symbols;
+
+public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
     {
-		//GC::ptr<TreeNode> safe_allocation_1 = GC::make<TreeNode>();
-		
 		{
 			// modification of the mutable collection of GC::ptr and router must be mutually exclusive
 			std::lock_guard<std::mutex> lock(symbols_mutex);
 			symbols[name] = new_value;
 		}
-
-		//GC::ptr<TreeNode> safe_allocation_2 = GC::make<TreeNode>();
     }
 	void clear()
 	{
-		std::lock_guard<std::mutex> lock(symbols_mutex);
-		symbols.clear();
+		{
+			std::lock_guard<std::mutex> lock(symbols_mutex);
+			symbols.clear();
+		}
+		better_symbols.clear();
 	}
 };
 template<> struct GC::router<SymbolTable>
 {
     template<typename F> static void route(const SymbolTable &table, F func)
     {
-        // modification of the mutable collection of GC::ptr and router must be mutually exclusive
-        std::lock_guard<std::mutex> lock(table.symbols_mutex);
-
-        GC::route(table.symbols, func);
+		{
+			// modification of the mutable collection of GC::ptr and router must be mutually exclusive
+			std::lock_guard<std::mutex> lock(table.symbols_mutex);
+			GC::route(table.symbols, func);
+		}
+		GC::route(table.better_symbols, func);
     }
 };
 
@@ -839,7 +845,11 @@ int main() try
 					GC::ptr<TreeNode> tree = GC::make<TreeNode>();
 					tree->left = GC::make<TreeNode>();
 					tree->right = GC::make<TreeNode>();
-					table->update(tostr(i), tree);
+
+					std::string key = tostr(i);
+
+					table->update(key, tree); // the one with explicit locks
+					table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
 				}
 
 				std::cerr << "phase1\n";

@@ -333,6 +333,25 @@ private: // -- array typing helpers -- //
 	template<typename T> using remove_unbound_extent_t = typename remove_unbound_extent<T>::type;
 	template<typename T> using remove_bound_extent_t = typename remove_bound_extent<T>::type;
 
+private: // -- mutex helper helpers -- //
+
+	// performs the unlocking step for our custom scoped_lock impl.
+	// Len is the length of the current T... slice (initially sizeof...(T)).
+	template<std::size_t Len, typename ...T>
+	struct __scoped_lock_unlocker
+	{
+		static void unlock(const std::tuple<T&...> &t)
+		{
+			std::get<Len - 1>(t).unlock();
+			__scoped_lock_unlocker<Len - 1, T...>::unlock(t);
+		}
+	};
+	template<typename ...T>
+	struct __scoped_lock_unlocker<0, T...>
+	{
+		static void unlock(const std::tuple<T&...> &t) {}
+	};
+
 public: // -- mutex helpers -- //
 
 	// equivalent to std::scoped_lock - included here because it's handy and is otherwise only available in C++17 and up
@@ -341,21 +360,20 @@ public: // -- mutex helpers -- //
 	{
 	private: // -- data -- //
 
-		// an array of unlocker data (one per lockable) - consists of pairs of an unlocker function and an argument for said function (an untyped pointer to the unlock target).
-		std::pair<void(*)(void*), void*> unlockers[sizeof...(Lockable)];
+		std::tuple<Lockable&...> locks;
 
 	public: // -- ctor / dtor / asgn -- //
 
-		explicit scoped_lock(Lockable &...lockable) : unlockers{ std::pair<void(*)(void*), void*>([](void *raw) { reinterpret_cast<Lockable*>(raw)->unlock(); }, std::addressof(lockable))... }
+		explicit scoped_lock(Lockable &...lockable) : locks(lockable...)
 		{
 			std::lock(lockable...);
 		}
-		scoped_lock(std::adopt_lock_t, Lockable &...lockable) : unlockers{ std::pair<void(*)(void*), void*>([](void *raw) { reinterpret_cast<Lockable*>(raw)->unlock(); }, std::addressof(lockable))... }
+		scoped_lock(std::adopt_lock_t, Lockable &...lockable) : locks(lockable...)
 		{}
 
 		~scoped_lock()
 		{
-			for (const auto &i : unlockers) i.first(i.second);
+			__scoped_lock_unlocker<sizeof...(Lockable), Lockable...>::unlock(locks);
 		}
 
 		scoped_lock(const scoped_lock&) = delete;
