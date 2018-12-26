@@ -779,6 +779,15 @@ int main() try
 	std::cerr << "a: " << dp_as_b1->a << '\n';
 	std::cerr << "b: " << dp_as_b2->b << '\n';
 
+	std::unique_ptr<int[]> raw_up(new int[16]);
+	GC::unique_ptr<int[]> gc_up(new int[16]);
+
+	raw_up.reset();
+	gc_up.reset();
+
+	raw_up.reset(new int[16]);
+	gc_up.reset(new int[16]);
+
 	//auto _ii = std::make_unique<int[]>(56);
 	//auto _jj = std::make_shared<int[]>(56);
 	//auto _kk = GC::make<int[]>(56);

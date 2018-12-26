@@ -1239,7 +1239,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::unique_ptr<T, Deleter>>;
+		friend struct GC::router<unique_ptr>;
 
 	private: // -- data accessors -- //
 
@@ -1370,7 +1370,7 @@ public: // -- mutable std wrappers -- //
 			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
 			wrapped().swap(other.wrapped());
 		}
-		friend void swap(unique_ptr &a, unique_ptr *b) { a.swap(b); }
+		friend void swap(unique_ptr &a, unique_ptr &b) { a.swap(b); }
 
 	public: // -- obj access -- //
 
@@ -1386,51 +1386,6 @@ public: // -- mutable std wrappers -- //
 
 		template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
 		decltype(auto) operator[](std::size_t i) const { return wrapped()[i]; }
-
-	public: // -- cmp -- //
-
-		template<typename T1, typename D1, typename T2, typename D2>
-		friend bool operator==(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped() == b.wrapped(); }
-		template<typename T1, typename D1, typename T2, typename D2>
-		friend bool operator!=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped() != b.wrapped(); }
-		template<typename T1, typename D1, typename T2, typename D2>
-		friend bool operator<(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped() < b.wrapped(); }
-		template<typename T1, typename D1, typename T2, typename D2>
-		friend bool operator<=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped() <= b.wrapped(); }
-		template<typename T1, typename D1, typename T2, typename D2>
-		friend bool operator>(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped() > b.wrapped(); }
-		template<typename T1, typename D1, typename T2, typename D2>
-		friend bool operator>=(const unique_ptr<T1, D1> &a, const unique_ptr<T2, D2> &b) { return a.wrapped() >= b.wrapped(); }
-
-		template<typename T1, typename D1>
-		friend bool operator==(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped() == nullptr; }
-		template<typename T1, typename D1>
-		friend bool operator==(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr == x.wrapped(); }
-
-		template<typename T1, typename D1>
-		friend bool operator!=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped() != nullptr; }
-		template<typename T1, typename D1>
-		friend bool operator!=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr != x.wrapped(); }
-
-		template<typename T1, typename D1>
-		friend bool operator<(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped() < nullptr; }
-		template<typename T1, typename D1>
-		friend bool operator<(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr < x.wrapped(); }
-
-		template<typename T1, typename D1>
-		friend bool operator<=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped() <= nullptr; }
-		template<typename T1, typename D1>
-		friend bool operator<=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr <= x.wrapped(); }
-
-		template<typename T1, typename D1>
-		friend bool operator>(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped() > nullptr; }
-		template<typename T1, typename D1>
-		friend bool operator>(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr > x.wrapped(); }
-
-		template<typename T1, typename D1>
-		friend bool operator>=(const unique_ptr<T1, D1> &x, std::nullptr_t) { return x.wrapped() >= nullptr; }
-		template<typename T1, typename D1>
-		friend bool operator>=(std::nullptr_t, const unique_ptr<T1, D1> &x) { return nullptr >= x.wrapped(); }
 	};
 	template<typename T, typename Deleter>
 	struct router<GC::unique_ptr<T, Deleter>>
@@ -1443,6 +1398,53 @@ public: // -- mutable std wrappers -- //
 		}
 	};
 
+	// -- unique_ptr cmp -- //
+
+	template<typename T1, typename D1, typename T2, typename D2>
+	friend bool operator==(const GC::unique_ptr<T1, D1> &a, const GC::unique_ptr<T2, D2> &b) { return a.get() == b.get(); }
+	template<typename T1, typename D1, typename T2, typename D2>
+	friend bool operator!=(const GC::unique_ptr<T1, D1> &a, const GC::unique_ptr<T2, D2> &b) { return a.get() != b.get(); }
+	template<typename T1, typename D1, typename T2, typename D2>
+	friend bool operator<(const GC::unique_ptr<T1, D1> &a, const GC::unique_ptr<T2, D2> &b) { return a.get() < b.get(); }
+	template<typename T1, typename D1, typename T2, typename D2>
+	friend bool operator<=(const GC::unique_ptr<T1, D1> &a, const GC::unique_ptr<T2, D2> &b) { return a.get() <= b.get(); }
+	template<typename T1, typename D1, typename T2, typename D2>
+	friend bool operator>(const GC::unique_ptr<T1, D1> &a, const GC::unique_ptr<T2, D2> &b) { return a.get() > b.get(); }
+	template<typename T1, typename D1, typename T2, typename D2>
+	friend bool operator>=(const GC::unique_ptr<T1, D1> &a, const GC::unique_ptr<T2, D2> &b) { return a.get() >= b.get(); }
+
+	template<typename T1, typename D1>
+	friend bool operator==(const GC::unique_ptr<T1, D1> &x, std::nullptr_t) { return x.get() == nullptr; }
+	template<typename T1, typename D1>
+	friend bool operator==(std::nullptr_t, const GC::unique_ptr<T1, D1> &x) { return nullptr == x.get(); }
+
+	template<typename T1, typename D1>
+	friend bool operator!=(const GC::unique_ptr<T1, D1> &x, std::nullptr_t) { return x.get() != nullptr; }
+	template<typename T1, typename D1>
+	friend bool operator!=(std::nullptr_t, const GC::unique_ptr<T1, D1> &x) { return nullptr != x.get(); }
+
+	template<typename T1, typename D1>
+	friend bool operator<(const GC::unique_ptr<T1, D1> &x, std::nullptr_t) { return x.get() < nullptr; }
+	template<typename T1, typename D1>
+	friend bool operator<(std::nullptr_t, const GC::unique_ptr<T1, D1> &x) { return nullptr < x.get(); }
+
+	template<typename T1, typename D1>
+	friend bool operator<=(const GC::unique_ptr<T1, D1> &x, std::nullptr_t) { return x.get() <= nullptr; }
+	template<typename T1, typename D1>
+	friend bool operator<=(std::nullptr_t, const GC::unique_ptr<T1, D1> &x) { return nullptr <= x.get(); }
+
+	template<typename T1, typename D1>
+	friend bool operator>(const GC::unique_ptr<T1, D1> &x, std::nullptr_t) { return x.get() > nullptr; }
+	template<typename T1, typename D1>
+	friend bool operator>(std::nullptr_t, const GC::unique_ptr<T1, D1> &x) { return nullptr > x.get(); }
+
+	template<typename T1, typename D1>
+	friend bool operator>=(const GC::unique_ptr<T1, D1> &x, std::nullptr_t) { return x.get() >= nullptr; }
+	template<typename T1, typename D1>
+	friend bool operator>=(std::nullptr_t, const GC::unique_ptr<T1, D1> &x) { return nullptr >= x.get(); }
+
+	// --------------------------------------------------------------
+
 	template<typename T, typename Allocator = std::allocator<T>>
 	class vector
 	{
@@ -1454,7 +1456,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::vector<T, Allocator>>;
+		friend struct GC::router<vector>;
 
 	private: // -- data accessors -- //
 
@@ -1659,7 +1661,6 @@ public: // -- mutable std wrappers -- //
 
 		void reserve(size_type new_cap)
 		{
-			// we need to lock on this because it may result in a reallocation
 			std::lock_guard<std::mutex> lock(this->mutex);
 			wrapped().reserve(new_cap);
 		}
@@ -1667,12 +1668,11 @@ public: // -- mutable std wrappers -- //
 
 		void shrink_to_fit()
 		{
-			// we need to lock on this because it may result in a reallocation
 			std::lock_guard<std::mutex> lock(this->mutex);
 			wrapped().shrink_to_fit();
 		}
 
-		void clear() noexcept
+		void clear() noexcept(noexcept(std::declval<std::mutex>().lock()))
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
 			wrapped().clear();
@@ -1807,7 +1807,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // the router synchronizer
 
-		friend struct GC::router<GC::deque<T, Allocator>>;
+		friend struct GC::router<deque>;
 
 	private: // -- data accessors -- //
 
@@ -2009,7 +2009,6 @@ public: // -- mutable std wrappers -- //
 
 		void reserve(size_type new_cap)
 		{
-			// we need to lock on this because it may result in a reallocation
 			std::lock_guard<std::mutex> lock(this->mutex);
 			wrapped().reserve(new_cap);
 		}
@@ -2017,7 +2016,6 @@ public: // -- mutable std wrappers -- //
 
 		void shrink_to_fit()
 		{
-			// we need to lock on this because it may result in a reallocation
 			std::lock_guard<std::mutex> lock(this->mutex);
 			wrapped().shrink_to_fit();
 		}
@@ -2181,7 +2179,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::forward_list<T, Allocator>>;
+		friend struct GC::router<forward_list>;
 
 	private: // -- data accessors -- //
 
@@ -2503,6 +2501,32 @@ public: // -- mutable std wrappers -- //
 			wrapped().merge(std::move(other.wrapped()), comp);
 		}
 
+		// ------------------------------------------------------------
+
+		void merge(wrapped_t &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(other);
+		}
+		void merge(wrapped_t &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(std::move(other));
+		}
+
+		template<typename Compare>
+		void merge(wrapped_t &other, Compare comp)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(other, comp);
+		}
+		template<typename Compare>
+		void merge(wrapped_t &&other, Compare comp)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(std::move(other), comp);
+		}
+
 	public: // -- splice -- //
 
 		void splice_after(const_iterator pos, forward_list &other)
@@ -2536,6 +2560,41 @@ public: // -- mutable std wrappers -- //
 		{
 			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
 			wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		}
+
+		// ------------------------------------------------------------
+
+		void splice_after(const_iterator pos, wrapped_t &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, other);
+		}
+		void splice_after(const_iterator pos, wrapped_t &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, std::move(other));
+		}
+
+		void splice_after(const_iterator pos, wrapped_t &other, const_iterator it)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, other, it);
+		}
+		void splice_after(const_iterator pos, wrapped_t &&other, const_iterator it)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, std::move(other), it);
+		}
+
+		void splice_after(const_iterator pos, wrapped_t &other, const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, other, first, last);
+		}
+		void splice_after(const_iterator pos, wrapped_t &&other, const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, std::move(other), first, last);
 		}
 
 	public: // -- remove -- //
@@ -2607,7 +2666,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::list<T, Allocator>>;
+		friend struct GC::router<list>;
 
 	private: // -- data accessors -- //
 
@@ -2830,31 +2889,31 @@ public: // -- mutable std wrappers -- //
 		iterator insert(const_iterator pos, InputIt first, InputIt last)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().insert(pos, first, last);
+			return wrapped().insert(pos, first, last);
 		}
 
 		iterator insert(const_iterator pos, std::initializer_list<T> ilist)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().insert(pos, ilist);
+			return wrapped().insert(pos, ilist);
 		}
 
 		template<typename ...Args>
 		iterator emplace(const_iterator pos, Args &&...args)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().emplace(pos, std::forward<Args>(args)...);
+			return wrapped().emplace(pos, std::forward<Args>(args)...);
 		}
 
 		iterator erase(const_iterator pos)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().erase(pos);
+			return wrapped().erase(pos);
 		}
 		iterator erase(const_iterator first, const_iterator last)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().erase(first, last);
+			return wrapped().erase(first, last);
 		}
 
 	public: // -- push / pop -- //
@@ -2874,7 +2933,7 @@ public: // -- mutable std wrappers -- //
 		decltype(auto) emplace_back(Args &&...args)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().emplace_back(std::forward<Args>(args)...);
+			return wrapped().emplace_back(std::forward<Args>(args)...);
 		}
 
 		void pop_back()
@@ -2898,7 +2957,7 @@ public: // -- mutable std wrappers -- //
 		decltype(auto) emplace_front(Args &&...args)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
-			wrapped().emplace_front(std::forward<Args>(args)...);
+			return wrapped().emplace_front(std::forward<Args>(args)...);
 		}
 
 		void pop_front()
@@ -2964,6 +3023,32 @@ public: // -- mutable std wrappers -- //
 			wrapped().merge(std::move(other.wrapped()), comp);
 		}
 
+		// ----------------------------------------------------------
+
+		void merge(wrapped_t &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(other);
+		}
+		void merge(wrapped_t &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(std::move(other));
+		}
+
+		template<typename Compare>
+		void merge(wrapped_t &other, Compare comp)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(other, comp);
+		}
+		template<typename Compare>
+		void merge(wrapped_t &&other, Compare comp)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().merge(std::move(other), comp);
+		}
+
 	public: // -- splice -- //
 
 		void splice_after(const_iterator pos, list &other)
@@ -2997,6 +3082,41 @@ public: // -- mutable std wrappers -- //
 		{
 			GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
 			wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		}
+
+		// ----------------------------------------------------------
+
+		void splice_after(const_iterator pos, wrapped_t &other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, other);
+		}
+		void splice_after(const_iterator pos, wrapped_t &&other)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, std::move(other));
+		}
+
+		void splice_after(const_iterator pos, wrapped_t &other, const_iterator it)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, other, it);
+		}
+		void splice_after(const_iterator pos, wrapped_t &&other, const_iterator it)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, std::move(other), it);
+		}
+
+		void splice_after(const_iterator pos, wrapped_t &other, const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, other, first, last);
+		}
+		void splice_after(const_iterator pos, wrapped_t &&other, const_iterator first, const_iterator last)
+		{
+			std::lock_guard<std::mutex> lock(this->mutex);
+			wrapped().splice_after(pos, std::move(other), first, last);
 		}
 
 	public: // -- remove -- //
@@ -3068,7 +3188,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::set<Key, Compare, Allocator>>;
+		friend struct GC::router<set>;
 
 	private: // -- data accessors -- //
 
@@ -3442,7 +3562,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::multiset<Key, Compare, Allocator>>;
+		friend struct GC::router<multiset>;
 
 	private: // -- data accessors -- //
 
@@ -3665,6 +3785,7 @@ public: // -- mutable std wrappers -- //
 		}
 
 		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+
 		iterator insert(node_type &&nh)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
@@ -3675,6 +3796,7 @@ public: // -- mutable std wrappers -- //
 			std::lock_guard<std::mutex> lock(this->mutex);
 			return wrapped().insert(hint, std::move(nh));
 		}
+
 		#endif
 
 		template<typename ...Args>
@@ -3811,7 +3933,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::map<Key, T, Compare, Allocator>>;
+		friend struct GC::router<map>;
 		
 	private: // -- data accessors -- //
 
@@ -4087,7 +4209,7 @@ public: // -- mutable std wrappers -- //
 			return wrapped().insert_or_assign(k, std::forward<M>(obj));
 		}
 		template<typename M>
-		std::pair<iterator, bool> insert_or_assign(Key_type &&k, M &&obj)
+		std::pair<iterator, bool> insert_or_assign(key_type &&k, M &&obj)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
 			return wrapped().insert_or_assign(std::move(k), std::forward<M>(obj));
@@ -4100,7 +4222,7 @@ public: // -- mutable std wrappers -- //
 			return wrapped().insert_or_assign(hint, k, std::forward<M>(obj));
 		}
 		template<typename M>
-		std::pair<iterator, bool> insert_or_assign(const_iterator hint, Key_type &&k, M &&obj)
+		std::pair<iterator, bool> insert_or_assign(const_iterator hint, key_type &&k, M &&obj)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
 			return wrapped().insert_or_assign(hint, std::move(k), std::forward<M>(obj));
@@ -4176,6 +4298,7 @@ public: // -- mutable std wrappers -- //
 	public: // -- extract -- //
 
 		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+
 		node_type extract(const_iterator pos)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
@@ -4186,6 +4309,7 @@ public: // -- mutable std wrappers -- //
 			std::lock_guard<std::mutex> lock(this->mutex);
 			return wrapped().extract(key);
 		}
+
 		#endif
 
 		// !! ADD MERGE FUNCTIONS (C++17)
@@ -4268,7 +4392,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::multimap<Key, T, Compare, Allocator>>;
+		friend struct GC::router<multimap>;
 
 	private: // -- data accessors -- //
 
@@ -4564,6 +4688,7 @@ public: // -- mutable std wrappers -- //
 	public: // -- extract -- //
 
 		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+
 		node_type extract(const_iterator pos)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
@@ -4574,6 +4699,7 @@ public: // -- mutable std wrappers -- //
 			std::lock_guard<std::mutex> lock(this->mutex);
 			return wrapped().extract(key);
 		}
+
 		#endif
 
 		// !! ADD MERGE FUNCTIONS (C++17)
@@ -4656,7 +4782,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::unordered_set<Key, Hash, KeyEqual, Allocator>>;
+		friend struct GC::router<unordered_set>;
 
 	private: // -- data accessors -- //
 
@@ -5072,7 +5198,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::unordered_multiset<Key, Hash, KeyEqual, Allocator>>;
+		friend struct GC::router<unordered_multiset>;
 
 	private: // -- data accessors -- //
 
@@ -5487,7 +5613,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::unordered_map<Key, T, Hash, KeyEqual, Allocator>>;
+		friend struct GC::router<unordered_map>;
 
 	private: // -- data accessors -- //
 
@@ -5861,6 +5987,7 @@ public: // -- mutable std wrappers -- //
 	public: // -- extract -- //
 
 		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+
 		node_type extract(const_iterator pos)
 		{
 			std::lock_guard<std::mutex> lock(this->mutex);
@@ -5871,6 +5998,7 @@ public: // -- mutable std wrappers -- //
 			std::lock_guard<std::mutex> lock(this->mutex);
 			return wrapped().extract(key);
 		}
+
 		#endif
 
 		// !! ADD MERGE FUNCTIONS (C++17)
@@ -5988,7 +6116,7 @@ public: // -- mutable std wrappers -- //
 
 		mutable std::mutex mutex; // router synchronizer
 
-		friend struct GC::router<GC::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>;
+		friend struct GC::router<unordered_multimap>;
 
 	private: // -- data accessors -- //
 
