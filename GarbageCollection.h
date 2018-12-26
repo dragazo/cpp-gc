@@ -44,9 +44,98 @@
 // C++11 = 11, C++14 = 14, C++17 = 17, C++20 = 20
 #define DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID 14
 
+// ------------------- //
+
+// -- utility types -- //
+
+// ------------------- //
+
+// this is equivalent to std::scoped_lock - included here because it's really handy and is otherwise C++17 only.
+// you shouldn't use this type by name - you should refer to it by is alias in the GC class i.e. GC::scoped_lock.
+template<typename ...Lockable>
+class __gc_scoped_lock
+{
+private: // -- helpers -- //
+
+	// performs the unlocking step for our custom scoped_lock impl.
+	// Len is the length of the current T... slice (initially sizeof...(T)).
+	template<std::size_t Len, typename ...T>
+	struct unlocker
+	{
+		static void unlock(const std::tuple<T&...> &t)
+		{
+			std::get<Len - 1>(t).unlock();
+			unlocker<Len - 1, T...>::unlock(t);
+		}
+	};
+	template<typename ...T>
+	struct unlocker<0, T...>
+	{
+		static void unlock(const std::tuple<T&...> &t) {}
+	};
+
+private: // -- data -- //
+
+	std::tuple<Lockable&...> locks;
+
+public: // -- ctor / dtor / asgn -- //
+
+	explicit __gc_scoped_lock(Lockable &...lockable) : locks(lockable...)
+	{
+		std::lock(lockable...);
+	}
+	__gc_scoped_lock(std::adopt_lock_t, Lockable &...lockable) : locks(lockable...)
+	{}
+
+	~__gc_scoped_lock()
+	{
+		unlocker<sizeof...(Lockable), Lockable...>::unlock(locks);
+	}
+
+	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
+	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
+};
+template<typename Lockable>
+class __gc_scoped_lock<Lockable>
+{
+private: // -- data -- //
+
+	Lockable &lock; // the (single) lockable object
+
+public: // -- ctor / dtor / asgn -- //
+
+	explicit __gc_scoped_lock(Lockable &lockable) : lock(lockable)
+	{
+		lockable.lock();
+	}
+	__gc_scoped_lock(std::adopt_lock_t, Lockable &lockable) : lock(lockable)
+	{}
+
+	~__gc_scoped_lock()
+	{
+		lock.unlock();
+	}
+
+	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
+	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
+};
+template<>
+class __gc_scoped_lock<>
+{
+public: // -- ctor / dtor / asgn -- //
+
+	explicit __gc_scoped_lock() = default;
+	__gc_scoped_lock(std::adopt_lock_t) {}
+
+	~__gc_scoped_lock() = default;
+
+	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
+	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
+};
+
 // ------------------------ //
 
-// -- Garbage Collection -- //
+// -- garbage collection -- //
 
 // ------------------------ //
 
@@ -73,7 +162,8 @@ private: // -- router function usage safety -- //
 	template<typename T, typename F>
 	struct is_well_formed_router_function : GC::is_router_function_object<F>
 	{
-	private: typedef decltype(static_cast<void(*)(const T&, F)>(GC::router<std::remove_cv_t<T>>::route)) __type_check; // just used to make sure it exists
+	// was used to make sure router funcs used the correct types - commented out because gcc doesn't like it
+	//private: typedef decltype(static_cast<void(*)(const T&, F)>(GC::router<std::remove_cv_t<T>>::route)) __type_check; // just used to make sure it exists
 	};
 
 public: // -- router functions -- //
@@ -188,7 +278,7 @@ private: // -- private types -- //
 
 		const info_vtable *const vtable; // virtual function table to use
 
-		std::atomic<std::size_t> ref_count = 1;                 // the reference count for this allocation
+		std::atomic<std::size_t> ref_count; // the reference count for this allocation
 		
 		std::atomic_flag destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
 		bool             destroy_completed = false;     // marks if destruction completed
@@ -200,7 +290,7 @@ private: // -- private types -- //
 
 		// populates info - ref count starts at 1 - prev/next are undefined
 		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
-			: obj(_obj), count(_count), vtable(_vtable)
+			: obj(_obj), count(_count), vtable(_vtable), ref_count(1)
 		{}
 
 		// -- helpers -- //
@@ -333,89 +423,11 @@ private: // -- array typing helpers -- //
 	template<typename T> using remove_unbound_extent_t = typename remove_unbound_extent<T>::type;
 	template<typename T> using remove_bound_extent_t = typename remove_bound_extent<T>::type;
 
-private: // -- mutex helper helpers -- //
-
-	// performs the unlocking step for our custom scoped_lock impl.
-	// Len is the length of the current T... slice (initially sizeof...(T)).
-	template<std::size_t Len, typename ...T>
-	struct __scoped_lock_unlocker
-	{
-		static void unlock(const std::tuple<T&...> &t)
-		{
-			std::get<Len - 1>(t).unlock();
-			__scoped_lock_unlocker<Len - 1, T...>::unlock(t);
-		}
-	};
-	template<typename ...T>
-	struct __scoped_lock_unlocker<0, T...>
-	{
-		static void unlock(const std::tuple<T&...> &t) {}
-	};
-
 public: // -- mutex helpers -- //
 
 	// equivalent to std::scoped_lock - included here because it's handy and is otherwise only available in C++17 and up
-	template<typename ...Lockable>
-	class scoped_lock
-	{
-	private: // -- data -- //
-
-		std::tuple<Lockable&...> locks;
-
-	public: // -- ctor / dtor / asgn -- //
-
-		explicit scoped_lock(Lockable &...lockable) : locks(lockable...)
-		{
-			std::lock(lockable...);
-		}
-		scoped_lock(std::adopt_lock_t, Lockable &...lockable) : locks(lockable...)
-		{}
-
-		~scoped_lock()
-		{
-			__scoped_lock_unlocker<sizeof...(Lockable), Lockable...>::unlock(locks);
-		}
-
-		scoped_lock(const scoped_lock&) = delete;
-		scoped_lock &operator=(const scoped_lock&) = delete;
-	};
-	template<typename Lockable>
-	class scoped_lock<Lockable>
-	{
-	private: // -- data -- //
-
-		Lockable &lock; // the (single) lockable object
-
-	public: // -- ctor / dtor / asgn -- //
-
-		explicit scoped_lock(Lockable &lockable) : lock(lockable)
-		{
-			lockable.lock();
-		}
-		scoped_lock(std::adopt_lock_t, Lockable &lockable) : lock(lockable)
-		{}
-
-		~scoped_lock()
-		{
-			lock.unlock();
-		}
-
-		scoped_lock(const scoped_lock&) = delete;
-		scoped_lock &operator=(const scoped_lock&) = delete;
-	};
-	template<>
-	class scoped_lock<>
-	{
-	public: // -- ctor / dtor / asgn -- //
-
-		explicit scoped_lock() = default;
-		scoped_lock(std::adopt_lock_t) {}
-
-		~scoped_lock() = default;
-
-		scoped_lock(const scoped_lock&) = delete;
-		scoped_lock &operator=(const scoped_lock&) = delete;
-	};
+	template<typename ...T>
+	using scoped_lock = __gc_scoped_lock<T...>;
 
 public: // -- ptr -- //
 
@@ -2468,12 +2480,12 @@ public: // -- mutable std wrappers -- //
 
 	public: // -- cmp -- //
 
-		friend bool operator==(const vector &a, const vector &b) { return a.wrapped() == b.wrapped(); }
-		friend bool operator!=(const vector &a, const vector &b) { return a.wrapped() != b.wrapped(); }
-		friend bool operator<(const vector &a, const vector &b) { return a.wrapped() < b.wrapped(); }
-		friend bool operator<=(const vector &a, const vector &b) { return a.wrapped() <= b.wrapped(); }
-		friend bool operator>(const vector &a, const vector &b) { return a.wrapped() > b.wrapped(); }
-		friend bool operator>=(const vector &a, const vector &b) { return a.wrapped() >= b.wrapped(); }
+		friend bool operator==(const forward_list &a, const forward_list &b) { return a.wrapped() == b.wrapped(); }
+		friend bool operator!=(const forward_list &a, const forward_list &b) { return a.wrapped() != b.wrapped(); }
+		friend bool operator<(const forward_list &a, const forward_list &b) { return a.wrapped() < b.wrapped(); }
+		friend bool operator<=(const forward_list &a, const forward_list &b) { return a.wrapped() <= b.wrapped(); }
+		friend bool operator>(const forward_list &a, const forward_list &b) { return a.wrapped() > b.wrapped(); }
+		friend bool operator>=(const forward_list &a, const forward_list &b) { return a.wrapped() >= b.wrapped(); }
 
 	public: // -- merge -- //
 
@@ -5652,8 +5664,6 @@ public: // -- mutable std wrappers -- //
 		typedef typename wrapped_t::node_type node_type;
 		typedef typename wrapped_t::insert_return_type insert_return_type;
 		#endif
-
-		typedef typename wrapped_t::value_compare value_compare; // alias map's nested value_compare class
 
 	public: // -- ctor / dtor -- //
 
