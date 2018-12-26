@@ -75,45 +75,6 @@ GC::no_addref_t GC::no_addref;
 
 GC::bind_new_obj_t GC::bind_new_obj;
 
-// -------------------------------- //
-
-// -- info handle implementation -- //
-
-// -------------------------------- //
-
-GC::smart_handle::smart_handle(std::nullptr_t) : handle(new info*)
-{
-	collection_synchronizer::schedule_handle_create_null(*handle);
-}
-GC::smart_handle::smart_handle(info *init, bind_new_obj_t) : handle(new info*)
-{
-	collection_synchronizer::schedule_handle_create_bind_new_obj(*handle, init);
-}
-
-GC::smart_handle::~smart_handle()
-{
-	collection_synchronizer::schedule_handle_destroy(*handle);
-}
-
-GC::smart_handle::smart_handle(const smart_handle &other) : handle(new info*)
-{
-	collection_synchronizer::schedule_handle_create_alias(*handle, *other.handle);
-}
-GC::smart_handle &GC::smart_handle::operator=(const smart_handle &other)
-{
-	reset(other);
-	return *this;
-}
-
-void GC::smart_handle::reset(const smart_handle &new_value)
-{
-	collection_synchronizer::schedule_handle_repoint(*handle, new_value.handle);
-}
-void GC::smart_handle::reset()
-{
-	collection_synchronizer::schedule_handle_repoint(*handle, nullptr);
-}
-
 // ------------------------------------ //
 
 // -- object database implementation -- //
@@ -181,9 +142,9 @@ void GC::obj_list::merge(obj_list &&other)
 
 GC::obj_list GC::collection_synchronizer::objs;
 
-std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots;
+std::unordered_set<GC::raw_handle_t> GC::collection_synchronizer::roots;
 
-std::vector<GC::info*> GC::collection_synchronizer::del_list;
+GC::obj_list GC::collection_synchronizer::del_list;
 
 // ---------------------------------------------------------------------
 
@@ -193,12 +154,12 @@ std::thread::id GC::collection_synchronizer::collector_thread;
 
 GC::obj_list GC::collection_synchronizer::objs_add_cache;
 
-std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_add_cache;
-std::unordered_set<GC::info *const*> GC::collection_synchronizer::roots_remove_cache;
+std::unordered_set<GC::raw_handle_t> GC::collection_synchronizer::roots_add_cache;
+std::unordered_set<GC::raw_handle_t> GC::collection_synchronizer::roots_remove_cache;
 
-std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
+std::unordered_map<GC::raw_handle_t, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
 
-std::vector<GC::info**> GC::collection_synchronizer::handle_dealloc_list;
+std::vector<GC::raw_handle_t> GC::collection_synchronizer::handle_dealloc_list;
 
 // ---------------------------------------------------------------------
 
@@ -251,7 +212,7 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 	if (success)
 	{
 		// destroy objects
-		for (info *handle : del_list)
+		for (info *handle = del_list.front(); handle; handle = handle->next)
 		{
 			#if GC_SHOW_DELMSG
 			std::cerr << "\ngc deleting " << handle->obj << '\n';
@@ -262,15 +223,17 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 
 		// deallocate memory
 		// done after calling deleters so that the deletion func can access the handles (but not objects) safely
-		for (info *handle : del_list)
+		for (info *handle = del_list.front(), *next; handle; handle = next)
 		{
+			next = handle->next;
 			handle->dealloc();
 		}
 
-		// clear the del list
-		del_list.clear();
+		// clear the del list (we already deallocated the resources above)
+		del_list.unsafe_clear();
 
-		// end the collection action
+		// end the collection action.
+		// must be after dtors/deallocs to ensure that if they call collect() it'll no-op (otherwise very slow).
 		{
 			std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -288,122 +251,114 @@ bool GC::collection_synchronizer::this_is_collector_thread()
 	return collector_thread == std::this_thread::get_id();
 }
 
-void GC::collection_synchronizer::schedule_handle_create_null(info *&raw_handle)
+void GC::collection_synchronizer::schedule_handle_create_null(raw_handle_t &handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// root the handle
-	__schedule_handle_root(raw_handle);
+	// create the handle
+	handle = new info*(nullptr);
 
-	// since we're creating the handle, it's not already in the handle database
-	// thus we can assign the value immediately
-
-	// repoint it to null
-	raw_handle = nullptr;
+	// root it
+	__schedule_handle_root(handle);
 }
-void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(info *&raw_handle, info *new_obj)
+void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(raw_handle_t &handle, info *new_obj)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// root the handle
-	__schedule_handle_root(raw_handle);
+	// create the handle
+	handle = new info*(new_obj);
 
-	// since we're creating the handle, it's not already in the handle database
-	// thus we can assign the value immediately
-
-	// repoint it to the new obj
-	raw_handle = new_obj;
+	// root it
+	__schedule_handle_root(handle);
 
 	// add the new obj to the obj add cache
 	objs_add_cache.add(new_obj);
 }
-void GC::collection_synchronizer::schedule_handle_create_alias(info *&raw_handle, info *&src_handle)
+void GC::collection_synchronizer::schedule_handle_create_alias(raw_handle_t &handle, raw_handle_t src_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// root the handle
-	__schedule_handle_root(raw_handle);
+	// create the handle
+	handle = new info*(__get_current_target(src_handle));
 
-	// since we're creating the handle, it's not already in the handle database
-	// thus we can assign the value immediately
-
-	// repoint it to the current target of src_handle
-	raw_handle = __get_current_target(&src_handle);
+	// root it
+	__schedule_handle_root(handle);
 }
 
-void GC::collection_synchronizer::schedule_handle_destroy(info *&raw_handle)
+void GC::collection_synchronizer::schedule_handle_destroy(raw_handle_t handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// unroot it
-	__schedule_handle_unroot(raw_handle);
+	__schedule_handle_unroot(handle);
 
 	// purge it from the repoint cache
-	handle_repoint_cache.erase(&raw_handle);
+	handle_repoint_cache.erase(handle);
 
 	// add it to the dynamic handle deletion list
-	handle_dealloc_list.push_back(&raw_handle);
+	handle_dealloc_list.push_back(handle);
 }
 
-void GC::collection_synchronizer::schedule_handle_unroot(info *const &raw_handle)
+void GC::collection_synchronizer::schedule_handle_unroot(raw_handle_t handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-	__schedule_handle_unroot(raw_handle);
+	__schedule_handle_unroot(handle);
 }
-void GC::collection_synchronizer::unsafe_immediate_handle_unroot(info *const &raw_handle)
+void GC::collection_synchronizer::unsafe_immediate_handle_unroot(raw_handle_t handle)
 {
-	// no need to lock because we're modifying collector-only resources
-	roots.erase(&raw_handle);
+	// no need to lock because we're modifying collector-only resources and assuming we're the collector
+	roots.erase(handle);
 }
 
-void GC::collection_synchronizer::__schedule_handle_root(info *&raw_handle)
+void GC::collection_synchronizer::__schedule_handle_root(raw_handle_t handle)
 {
 	// add it to the root add cache
-	roots_add_cache.insert(&raw_handle);
+	roots_add_cache.insert(handle);
 	// remove it from the root remove cache
-	roots_remove_cache.erase(&raw_handle);
+	roots_remove_cache.erase(handle);
 }
-void GC::collection_synchronizer::__schedule_handle_unroot(info *const &raw_handle)
+void GC::collection_synchronizer::__schedule_handle_unroot(raw_handle_t handle)
 {
 	// add it to the roots remove cache
-	roots_remove_cache.insert(&raw_handle);
+	roots_remove_cache.insert(handle);
 	// remove it from the roots add cache
-	roots_add_cache.erase(&raw_handle);
+	roots_add_cache.erase(handle);
 }
 
-void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, info *const *new_value)
+void GC::collection_synchronizer::schedule_handle_repoint(raw_handle_t handle, raw_handle_t new_value)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	
-	// assign this as raw_handle's repoint target in the cache
-	handle_repoint_cache[&raw_handle] = __get_current_target(new_value);
+	// assign this as handle's repoint target in the cache
+	handle_repoint_cache[handle] = __get_current_target(new_value);
 }
-void GC::collection_synchronizer::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
+void GC::collection_synchronizer::schedule_handle_repoint_null(raw_handle_t handle)
+{
+	std::lock_guard<std::mutex> lock(internal_mutex);
+
+	// assign null as handle's repoint target in the cache
+	handle_repoint_cache[handle] = nullptr;
+}
+void GC::collection_synchronizer::schedule_handle_repoint_swap(raw_handle_t handle_a, raw_handle_t handle_b)
 {
 	std::lock_guard<std::mutex> lock(internal_mutex);
 
 	// get their current repoint targets
-	info *target_a = __get_current_target(&handle_a);
-	info *target_b = __get_current_target(&handle_b);
+	info *target_a = __get_current_target(handle_a);
+	info *target_b = __get_current_target(handle_b);
 
 	// schedule repoint actions to swap them
-	handle_repoint_cache[&handle_a] = target_b;
-	handle_repoint_cache[&handle_b] = target_a;
+	handle_repoint_cache[handle_a] = target_b;
+	handle_repoint_cache[handle_b] = target_a;
 }
 
-GC::info *GC::collection_synchronizer::__get_current_target(info *const *new_value)
+GC::info *GC::collection_synchronizer::__get_current_target(raw_handle_t handle)
 {
-	// if new_value is non-null, we need to look it up
-	if (new_value)
-	{
-		// find new_value's repoint target from the cache
-		auto new_value_iter = handle_repoint_cache.find(const_cast<info**>(new_value)); // the const cast is safe because we won't be modifying it - just for compiler's sake
+	// find new_value's repoint target from the cache
+	auto new_value_iter = handle_repoint_cache.find(handle);
 
-		// get the target (if it's in the repoint cache, get the repoint target, otherwise use it raw)
-		return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : *new_value;
-	}
-	// otherwise the target is null
-	else return nullptr;
+	// get the target (if it's in the repoint cache, get the repoint target, otherwise use it raw)
+	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : *handle;
 }
 
 // ---------------- //
@@ -421,7 +376,7 @@ void GC::__mark_sweep(info *handle)
 	handle->route(+[](const smart_handle &arc)
 	{
 		// get the current arc value - this is only safe because we're in a gc cycle
-		info *raw = arc.raw_handle();
+		info *raw = *arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
 		if (raw && !raw->marked) __mark_sweep(raw);

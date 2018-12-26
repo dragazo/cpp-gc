@@ -308,49 +308,77 @@ private: // -- private types -- //
 	// used to select constructor paths that bind a new object
 	static struct bind_new_obj_t {} bind_new_obj;
 
+	// the type used to represent a raw gc handle
+	typedef info **raw_handle_t;
+
+	// represents a raw_handle_t value with encapsulated syncronization logic.
+	// you should not use raw_handle_t directly - use this instead.
 	class smart_handle
 	{
 	private: // -- data -- //
 
 		// the raw handle to manage.
 		// after construction, this must never be modified directly.
-		// all modification actions should be delegated to one of the collection_synchronizer repoint cache functions.
-		// all actions on handles are non-blocking, including the destructor - because of this handle must be dynamic.
-		// this ensures that it'll still be accessible after the smart_handle is destroyed (other logic will delete it).
-		info **const handle;
+		// all modification actions should be delegated to one of the collection_synchronizer functions.
+		raw_handle_t handle;
 
 	public: // -- ctor / dtor / asgn -- //
 
 		// initializes the info handle to null and marks it as a root.
-		smart_handle(std::nullptr_t = nullptr);
+		smart_handle(std::nullptr_t = nullptr)
+		{
+			collection_synchronizer::schedule_handle_create_null(handle);
+		}
 
 		// initializes the info handle with the specified value and marks it as a root.
 		// the init object is added to the objects database in the same atomic step as the handle initialization.
 		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
-		smart_handle(info *init, bind_new_obj_t);
-
-		// unroots the internal handle - the roots database must not already be locked by the calling thread.
-		// if non-null, decrements the reference count.
-		~smart_handle();
-
+		smart_handle(info *init, bind_new_obj_t)
+		{
+			collection_synchronizer::schedule_handle_create_bind_new_obj(handle, init);
+		}
+		
 		// constructs a new smart handle to alias another
-		smart_handle(const smart_handle &other);
+		smart_handle(const smart_handle &other)
+		{
+			collection_synchronizer::schedule_handle_create_alias(handle, other.handle);
+		}
+
+		// unroots the internal handle.
+		~smart_handle()
+		{
+			collection_synchronizer::schedule_handle_destroy(handle);
+		}
+
 		// repoints this smart_handle to other - equivalent to this->reset(other)
-		smart_handle &operator=(const smart_handle &other);
+		smart_handle &operator=(const smart_handle &other) { reset(other); return *this; }
 
 	public: // -- interface -- //
 
 		// gets the raw handle - guaranteed to outlive the object during a gc cycle.
 		// the value of the referenced pointer does not reflect the true current value.
 		// said value is only meant as a snapshot of the gc graph structure at an instance for the garbage collector.
-		// thus, using the value of the pointer (and not just the reference to the pointer) is undefined behavior.
-		// therefore this should never be used as an argument to a smart_handle constructor.
-		info *const &raw_handle() const noexcept { return *handle; }
+		// thus, using the value of the info* (and not just the pointer to the pointer) is undefined behavior.
+		// therefore this should never be used to get an argument for a smart_handle constructor.
+		raw_handle_t raw_handle() const noexcept { return handle; }
 
-		// safely points the underlying raw handle at the new handle.
-		void reset(const smart_handle &new_value);
-		// safely points the underlying raw handle at nothing (null).
-		void reset();
+		// safely repoints the underlying raw handle at the new handle's object.
+		void reset(const smart_handle &new_value)
+		{
+			collection_synchronizer::schedule_handle_repoint(handle, new_value.handle);
+		}
+		// safely repoints the underlying raw handle at no object (null).
+		void reset()
+		{
+			collection_synchronizer::schedule_handle_repoint_null(handle);
+		}
+
+		// safely swaps the underlying raw handles.
+		void swap(smart_handle &other)
+		{
+			collection_synchronizer::schedule_handle_repoint_swap(handle, other.handle);
+		}
+		friend void swap(smart_handle &a, smart_handle &b) { a.swap(b); }
 	};
 
 private: // -- base router function -- //
@@ -560,12 +588,10 @@ public: // -- ptr -- //
 
 		void swap(ptr &other)
 		{
-			// since we can't do an atomic swap, we need to do the usual swap algorithm
-			// this is to ensure there's never an object that isn't pointed to during an intermediate step
+			using std::swap;
 
-			ptr temp = *this;
-			*this = other;
-			other = temp;
+			swap(obj, other.obj);
+			swap(handle, other.handle);
 		}
 		friend void swap(ptr &a, ptr &b) { a.swap(b); }
 	};
@@ -6561,6 +6587,9 @@ private: // -- containers -- //
 		// creates an empty obj list
 		obj_list();
 
+		// destroys the container but does not release resources - see unsafe_clear()
+		~obj_list() = default;
+
 		obj_list(const obj_list&) = delete;
 		obj_list &operator=(const obj_list&) = delete;
 
@@ -6579,6 +6608,10 @@ private: // -- containers -- //
 		// if other refers to this object, does nothing.
 		// otherwise, other is guaranteed to be empty after this operation.
 		void merge(obj_list &&other);
+
+		// sets the contents of the list to empty without deallocating resources.
+		// this should only be used if you're handling resource deallocation yourself.
+		void unsafe_clear() { first = last = nullptr; }
 	};
 
 private: // -- sentries -- //
@@ -6616,9 +6649,9 @@ private: // -- collection synchronizer -- //
 
 		static obj_list objs; // the list of all objects under gc consideration
 
-		static std::unordered_set<info *const*> roots; // the set of all root handles - must not be modified directly
+		static std::unordered_set<raw_handle_t> roots; // the set of all root handles - must not be modified directly
 
-		static std::vector<info*> del_list; // the list of info objects that should be destroyed after a collector pass
+		static obj_list del_list; // the list of info objects that should be destroyed after a collector pass
 
 	private: // -- internal data -- //
 
@@ -6628,17 +6661,17 @@ private: // -- collection synchronizer -- //
 
 		static obj_list objs_add_cache; // the scheduled obj add operations
 
-		static std::unordered_set<info *const*> roots_add_cache; // the scheduled root operations
-		static std::unordered_set<info *const*> roots_remove_cache; // the scheduled unroot operations
+		static std::unordered_set<raw_handle_t> roots_add_cache; // the scheduled root operations
+		static std::unordered_set<raw_handle_t> roots_remove_cache; // the scheduled unroot operations
 
 		// cache used to support non-blocking handle repoint actions.
 		// it is structured such that M[&raw_handle] is what it should be repointed to.
-		static std::unordered_map<info**, info*> handle_repoint_cache; 
+		static std::unordered_map<raw_handle_t, info*> handle_repoint_cache; 
 
 		// all actions on handles are non-blocking, including the destructor which unroots it.
 		// but during a gc cycle, the handle must stay alive, so it must be a dynamic allocation.
 		// upon calling schedule_handle_destroy(), it's added to this list for eventual deletion.
-		static std::vector<info**> handle_dealloc_list;
+		static std::vector<raw_handle_t> handle_dealloc_list;
 
 	public: // -- types -- //
 
@@ -6699,7 +6732,7 @@ private: // -- collection synchronizer -- //
 			{
 				assert(success);
 				objs.remove(obj);
-				del_list.push_back(obj);
+				del_list.add(obj);
 			}
 		};
 
@@ -6709,51 +6742,52 @@ private: // -- collection synchronizer -- //
 		static bool this_is_collector_thread();
 
 		// schedules a handle creation action that points to null.
-		// raw_handle need not be initialized prior to this call - it will be immedately repointed to null.
-		static void schedule_handle_create_null(info *&raw_handle);
+		// a new raw_handle_t value will be created and assigned to handle.
+		static void schedule_handle_create_null(raw_handle_t &handle);
 		// schedules a handle creation action that points to a new object - inserts new_obj into the obj database.
-		// raw_handle need not be initialized prior to this call - it will be immediately repointed to src_handle.
-		// new_obj must not already exist in the gc database.
-		static void schedule_handle_create_bind_new_obj(info *&raw_handle, info *new_obj);
+		// new_obj must not already exist in the gc database (see create alias below).
+		// a new raw_handle_t value will be created and assigned to handle.
+		static void schedule_handle_create_bind_new_obj(raw_handle_t &handle, info *new_obj);
 		// schedules a handle creation action that points at a pre-existing handle - marks the new handle as a root.
-		// raw_handle need not be initialized prior to this call - it will be immediately repointed to src_handle.
-		static void schedule_handle_create_alias(info *&raw_handle, info *&src_handle);
+		// a new raw_handle_t value will be created and assigned to handle.
+		static void schedule_handle_create_alias(raw_handle_t &raw_handle, raw_handle_t src_handle);
 
 		// schedules a handle deletion action - unroots the handle and purges it from the handle repoint cache.
-		static void schedule_handle_destroy(info *&raw_handle);
+		static void schedule_handle_destroy(raw_handle_t handle);
 
 		// schedules a handle unroot operation - unmarks handle as a root.
-		static void schedule_handle_unroot(info *const &raw_handle);
+		static void schedule_handle_unroot(raw_handle_t raw_handle);
 
 		// immediately performs an unroot operation.
 		// this directly modifies the collector-only data and thus must not be used unless the sentry object is successfully constructed.
 		// as this directly modifies collector-only data, there is no internal mutex lock.
-		static void unsafe_immediate_handle_unroot(info *const &raw_handle);
+		static void unsafe_immediate_handle_unroot(raw_handle_t handle);
 
 		// schedules a handle repoint action.
-		// raw_handle shall eventually be repointed to new_value before the next collection action.
-		// new_value is the address of an info* - null represents repointing raw_handle to null.
-		// if raw_handle is destroyed, it must first be removed from this cache via unschedule_handle().
-		static void schedule_handle_repoint(info *&raw_handle, info *const *new_value);
-
+		// handle shall eventually be repointed to new_value before the next collection action.
+		// if handle is destroyed, it must first be removed from this cache via unschedule_handle().
+		static void schedule_handle_repoint(raw_handle_t handle, raw_handle_t new_value);
+		// schedules a handle repoint action.
+		// handle shall eventually be repointed to null before the next collection action.
+		// if handle is destroyed, it must first be removed from this cache via unschedule_handle().
+		static void schedule_handle_repoint_null(raw_handle_t handle);
 		// schedules a handle repoint action that swaps the pointed-to info objects of two handles atomically.
 		// handle_a shall eventually point to whatever handle_b used to point to and vice versa.
 		// if wither handle is destroyed, it must first be removed from this cache via unschedule_handle().
-		static void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
+		static void schedule_handle_repoint_swap(raw_handle_t handle_a, raw_handle_t handle_b);
 
 	private: // -- private interface (unsafe) -- //
 
 		// as schedule_handle_root() but not thread safe - you should first lock internal_mutex
-		static void __schedule_handle_root(info *&raw_handle);
+		static void __schedule_handle_root(raw_handle_t handle);
 
 		// as schedule_handle_unroot() but not thread safe - you should first lock internal_mutex
-		static void __schedule_handle_unroot(info *const &raw_handle);
+		static void __schedule_handle_unroot(raw_handle_t handle);
 		
 		// gets the current target info object of new_value.
-		// if new_value is null, returns null.
 		// otherwise returns the current repoint target if it's in the repoint database.
-		// otherwise returns the current pointed-to value of new_value.
-		static info *__get_current_target(info *const *new_value);
+		// otherwise returns the current pointed-to value of value.
+		static info *__get_current_target(raw_handle_t handle);
 	};
 
 private: // -- data -- //
