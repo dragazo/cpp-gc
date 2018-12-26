@@ -6725,11 +6725,21 @@ private: // -- collection synchronizer -- //
 		// schedules a handle unroot operation - unmarks handle as a root.
 		static void schedule_handle_unroot(info *const &raw_handle);
 
+		// immediately performs an unroot operation.
+		// this directly modifies the collector-only data and thus must not be used unless the sentry object is successfully constructed.
+		// as this directly modifies collector-only data, there is no internal mutex lock.
+		static void unsafe_immediate_handle_unroot(info *const &raw_handle);
+
 		// schedules a handle repoint action.
 		// raw_handle shall eventually be repointed to new_value before the next collection action.
 		// new_value is the address of an info* - null represents repointing raw_handle to null.
 		// if raw_handle is destroyed, it must first be removed from this cache via unschedule_handle().
 		static void schedule_handle_repoint(info *&raw_handle, info *const *new_value);
+
+		// schedules a handle repoint action that swaps the pointed-to info objects of two handles atomically.
+		// handle_a shall eventually point to whatever handle_b used to point to and vice versa.
+		// if wither handle is destroyed, it must first be removed from this cache via unschedule_handle().
+		static void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
 
 	private: // -- private interface (unsafe) -- //
 
@@ -6738,9 +6748,6 @@ private: // -- collection synchronizer -- //
 
 		// as schedule_handle_unroot() but not thread safe - you should first lock internal_mutex
 		static void __schedule_handle_unroot(info *const &raw_handle);
-
-		// as schedule_handle_repoint() but not thread safe - you should lock internal_mutex
-		static void __schedule_handle_repoint(info *&raw_handle, info *const *new_value);
 		
 		// gets the current target info object of new_value.
 		// if new_value is null, returns null.
@@ -6787,6 +6794,7 @@ private: // -- private interface -- //
 private: // -- utility router functions -- //
 
 	static void router_unroot(const smart_handle &arc);
+	static void router_unsafe_immediate_unroot(const smart_handle &arc);
 
 private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
 

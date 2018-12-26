@@ -350,6 +350,11 @@ void GC::collection_synchronizer::schedule_handle_unroot(info *const &raw_handle
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	__schedule_handle_unroot(raw_handle);
 }
+void GC::collection_synchronizer::unsafe_immediate_handle_unroot(info *const &raw_handle)
+{
+	// no need to lock because we're modifying collector-only resources
+	roots.erase(&raw_handle);
+}
 
 void GC::collection_synchronizer::__schedule_handle_root(info *&raw_handle)
 {
@@ -369,12 +374,21 @@ void GC::collection_synchronizer::__schedule_handle_unroot(info *const &raw_hand
 void GC::collection_synchronizer::schedule_handle_repoint(info *&raw_handle, info *const *new_value)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-	__schedule_handle_repoint(raw_handle, new_value);
-}
-void GC::collection_synchronizer::__schedule_handle_repoint(info *&raw_handle, info *const *new_value)
-{
+	
 	// assign this as raw_handle's repoint target in the cache
 	handle_repoint_cache[&raw_handle] = __get_current_target(new_value);
+}
+void GC::collection_synchronizer::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
+{
+	std::lock_guard<std::mutex> lock(internal_mutex);
+
+	// get their current repoint targets
+	info *target_a = __get_current_target(&handle_a);
+	info *target_b = __get_current_target(&handle_b);
+
+	// schedule repoint actions to swap them
+	handle_repoint_cache[&handle_a] = target_b;
+	handle_repoint_cache[&handle_b] = target_a;
 }
 
 GC::info *GC::collection_synchronizer::__get_current_target(info *const *new_value)
@@ -438,7 +452,7 @@ void GC::collect()
 
 			// claim its children (see above comment)
 			// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
-			i->mutable_route(GC::router_unroot);
+			i->mutable_route(GC::router_unsafe_immediate_unroot);
 		}
 
 		// -- mark and sweep -- //
@@ -485,6 +499,10 @@ void GC::collect()
 void GC::router_unroot(const smart_handle &arc)
 {
 	collection_synchronizer::schedule_handle_unroot(arc.raw_handle());
+}
+void GC::router_unsafe_immediate_unroot(const smart_handle &arc)
+{
+	collection_synchronizer::unsafe_immediate_handle_unroot(arc.raw_handle());
 }
 
 // --------------------- //

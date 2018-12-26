@@ -348,10 +348,63 @@ std::string tostr(T &&v)
 
 
 
+struct self_ptr
+{
+	std::unique_ptr<GC::ptr<self_ptr>> p;
+
+	self_ptr() { std::cerr << "self_ptr ctor\n"; }
+	~self_ptr() { std::cerr << "self_ptr dtor\n"; }
+};
+template<>
+struct GC::router<self_ptr>
+{
+	template<typename F>
+	static void route(const self_ptr &p, F func)
+	{
+		// we should really be using a mutex here for the std::unique_ptr but this is just a test and i know it's safe ...
+		GC::route(p.p, func);
+	}
+};
+
+struct gc_self_ptr
+{
+	GC::unique_ptr<GC::ptr<gc_self_ptr>> p;
+
+	gc_self_ptr() { std::cerr << "gc_self_ptr ctor\n"; }
+	~gc_self_ptr() { std::cerr << "gc_self_ptr dtor\n"; }
+};
+template<>
+struct GC::router<gc_self_ptr>
+{
+	template<typename F>
+	static void route(const gc_self_ptr &p, F func)
+	{
+		GC::route(p.p, func);
+	}
+};
+
+
+
+
 int main() try
 {
 	GC::strategy(GC::strategies::manual);
 	
+
+	std::cerr << "-------- ctors --------\n";
+	{
+		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
+		GC::ptr<gc_self_ptr> gcsp = GC::make<gc_self_ptr>();
+
+		sp->p = std::make_unique<decltype(sp)>(sp);
+		gcsp->p = std::make_unique<decltype(gcsp)>(gcsp);
+	}
+	std::cerr << "-------- collect 1 --------\n";
+	GC::collect();
+	std::cerr << "-------- collect 2 --------\n";
+	GC::collect();
+	std::cerr << "-------- end --------\n\n";
+
 
 	GC::ptr<atomic_container> atomic_container_obj = GC::make<atomic_container>();
 
