@@ -6784,6 +6784,10 @@ private: // -- collection synchronizer -- //
 		// as schedule_handle_unroot() but not thread safe - you should first lock internal_mutex
 		static void __schedule_handle_unroot(raw_handle_t handle);
 		
+		// the underlying function for all handle repoint actions.
+		// handles the logic of managing the repoint cache for repointing handle to target.
+		static void __raw_schedule_handle_repoint(raw_handle_t handle, info *target);
+
 		// gets the current target info object of new_value.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of value.

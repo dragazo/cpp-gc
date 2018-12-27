@@ -312,32 +312,50 @@ void GC::collection_synchronizer::unsafe_immediate_handle_unroot(raw_handle_t ha
 
 void GC::collection_synchronizer::__schedule_handle_root(raw_handle_t handle)
 {
-	// add it to the root add cache
-	roots_add_cache.insert(handle);
-	// remove it from the root remove cache
-	roots_remove_cache.erase(handle);
+	// if there's no collector thread, we can apply the change immediately
+	if (collector_thread == std::thread::id())
+	{
+		roots.insert(handle);
+	}
+	// otherwise we need to cache the request
+	else
+	{
+		// add it to the root add cache
+		roots_add_cache.insert(handle);
+		// remove it from the root remove cache
+		roots_remove_cache.erase(handle);
+	}
 }
 void GC::collection_synchronizer::__schedule_handle_unroot(raw_handle_t handle)
 {
-	// add it to the roots remove cache
-	roots_remove_cache.insert(handle);
-	// remove it from the roots add cache
-	roots_add_cache.erase(handle);
+	// if there's no collector thread, we can apply the change immediately
+	if (collector_thread == std::thread::id())
+	{
+		roots.erase(handle);
+	}
+	// otherwise we need to cache the request
+	else
+	{
+		// add it to the roots remove cache
+		roots_remove_cache.insert(handle);
+		// remove it from the roots add cache
+		roots_add_cache.erase(handle);
+	}
 }
 
 void GC::collection_synchronizer::schedule_handle_repoint(raw_handle_t handle, raw_handle_t new_value)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	
-	// assign this as handle's repoint target in the cache
-	handle_repoint_cache[handle] = __get_current_target(new_value);
+	// repoint handle to the target
+	__raw_schedule_handle_repoint(handle, __get_current_target(new_value));
 }
 void GC::collection_synchronizer::schedule_handle_repoint_null(raw_handle_t handle)
 {
 	std::lock_guard<std::mutex> lock(internal_mutex);
 
-	// assign null as handle's repoint target in the cache
-	handle_repoint_cache[handle] = nullptr;
+	// repoint handle to null
+	__raw_schedule_handle_repoint(handle, nullptr);
 }
 void GC::collection_synchronizer::schedule_handle_repoint_swap(raw_handle_t handle_a, raw_handle_t handle_b)
 {
@@ -348,8 +366,24 @@ void GC::collection_synchronizer::schedule_handle_repoint_swap(raw_handle_t hand
 	info *target_b = __get_current_target(handle_b);
 
 	// schedule repoint actions to swap them
-	handle_repoint_cache[handle_a] = target_b;
-	handle_repoint_cache[handle_b] = target_a;
+	__raw_schedule_handle_repoint(handle_a, target_b);
+	__raw_schedule_handle_repoint(handle_b, target_a);
+}
+
+void GC::collection_synchronizer::__raw_schedule_handle_repoint(raw_handle_t handle, info *target)
+{
+	// if there's no collector thread, we can apply the change immediately
+	if (collector_thread == std::thread::id())
+	{
+		// immediately repoint handle to target
+		*handle = target;
+	}
+	// otherwise we need to cache the request
+	else
+	{
+		// assign handle's repoint target
+		handle_repoint_cache[handle] = target;
+	}
 }
 
 GC::info *GC::collection_synchronizer::__get_current_target(raw_handle_t handle)
