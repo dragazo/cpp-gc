@@ -140,71 +140,130 @@ void GC::obj_list::merge(obj_list &&other)
 
 // ----------------------------- //
 
+std::mutex GC::collection_synchronizer::internal_mutex;
+
+std::thread::id GC::collection_synchronizer::collector_thread;
+
+// ---------------------------------------------------------------------
+
 GC::obj_list GC::collection_synchronizer::objs;
 
-std::unordered_set<GC::raw_handle_t> GC::collection_synchronizer::roots;
+std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots;
+
+std::unordered_set<GC::info*> GC::collection_synchronizer::root_objs;
 
 GC::obj_list GC::collection_synchronizer::del_list;
 
 // ---------------------------------------------------------------------
 
-std::mutex GC::collection_synchronizer::internal_mutex;
-
-std::thread::id GC::collection_synchronizer::collector_thread;
-
 GC::obj_list GC::collection_synchronizer::objs_add_cache;
 
-std::unordered_set<GC::raw_handle_t> GC::collection_synchronizer::roots_add_cache;
-std::unordered_set<GC::raw_handle_t> GC::collection_synchronizer::roots_remove_cache;
+std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots_add_cache;
+std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots_remove_cache;
 
-std::unordered_map<GC::raw_handle_t, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
-
-std::vector<GC::raw_handle_t> GC::collection_synchronizer::handle_dealloc_list;
+std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
 
 // ---------------------------------------------------------------------
 
 GC::collection_synchronizer::collection_sentry::collection_sentry()
 {
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	// -- begin the collection action -- //
 
-	// if there's already a collector thread, fail
-	if (collector_thread != std::thread::id()) { success = false; return; }
-
-	// otherwise mark the calling thread as the collector thread
-	collector_thread = std::this_thread::get_id();
-
-	// apply all the obj add actions
-	objs.merge(std::move(objs_add_cache));
-
-	// apply all the scheduled root add actions
-	for (auto i : roots_add_cache)
 	{
-		roots.insert(i);
-	}
-	roots_add_cache.clear();
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// apply all the scheduled root remove actions
-	for (auto i : roots_remove_cache)
+		// this only succeeds if there's not currently a collection action in progress.
+		// this ensures that we don't have back-to-back collections and that collections don't block one another.
+		if (collector_thread != std::thread::id()) { success = false; return; }
+
+		// otherwise mark the calling thread as the collector thread
+		collector_thread = std::this_thread::get_id();
+
+		// since we just came out of no-collect phase, all the caches should be empty
+		assert(objs_add_cache.empty());
+		assert(roots_add_cache.empty());
+		assert(roots_remove_cache.empty());
+		assert(handle_repoint_cache.empty());
+
+		// the del list should also be empty
+		assert(del_list.empty());
+
+		success = true;
+	}
+
+	// -- initialize the collection data -- //
+
+	// we've now started the collection action, so we have lock-free access to collector-only resources.
+
+	// to ensure all unused objects are deleted in one pass, we need to unroot all mutables arcs.
+	// this requires going through all the obj list entities, so we might as well clear their marks.
+
+	// for each object we'll examine
+	for (info *i = objs.front(); i; i = i->next)
 	{
-		roots.erase(i);
-	}
-	roots_remove_cache.clear();
+		// clear the marked flag
+		i->marked = false;
 
-	// apply all the scheduled handle repoint actions from the cache
-	for (const auto &entry : handle_repoint_cache)
+		// route to mutable arcs and directly unroot from the collector-only root set.
+		// this is only safe because we're guaranteed to be the (only) collector at this point.
+		i->mutable_route(+[](const smart_handle &arc) { roots.erase(&arc.raw_handle()); });
+	}
+
+	// clear the root objs set
+	root_objs.clear();
+
 	{
-		*entry.first = entry.second;
-	}
-	handle_repoint_cache.clear();
+		std::lock_guard<std::mutex> lock(internal_mutex);
 
-	// delete everything in the handle dealloc list
-	for (info **i : handle_dealloc_list)
-	{
-		delete i;
-	}
-	handle_dealloc_list.clear();
+		// at this point we've directly unrooted all the mutables in the obj list.
+		// however, other threads could have destroyed rooted handles.
+		// this means the roots set at this point may contain dangling pointers.
+		// thus, we need to apply the cached root/unroot actions.
+		// this will ensure there are no dangling pointers that are represented.
+		
+		// the reason we can't just do the cached unroot actions is because it could exclude live objects.
+		// for instance, suppose we have a pre-existing dynamic rooted handle A.
+		// now, say a new dynamic rooted handle B is created and initialized to A, then A is destroyed.
+		// thus, A was unrooted, but the object it refered to is still reachable through B.
+		// this could happen e.g. on a std::vector<GC::ptr<T>> reallocation.
+		// this of course could only happen for live objects, so we want to make sure we keep them that way.
+		// thus we account for both root and unroot cached actions.
 
-	success = true;
+		// for much the same reasons, we need to apply the handle repoint cache.
+		// and, because we now have roots that may point to objects in the obj add cache, we need to add those as well.
+		// however, we need to clear their marks first.
+		// we can't perform the routing step for them because we need the mutex to be locked during this process.
+		// but that's not a problem as collect() only guarantees it will collect all objects unreachable prior to invocation.
+		// the routing logic is just to ensure this happens in 1 pass and not 2 (uncommon but otherwise possible without this step).
+
+		// so long story short we need to apply all the caches, plus a tiny bit of extra logic.
+		// we know this is safe because it's as if we took the graph snapshot later on and just routed to a subset of it for unrooting.
+
+		// clear the obj list add cache marks (the ones in the obj list are already cleared)
+		for (info *i = objs_add_cache.front(); i; i = i->next) i->marked = false;
+
+		// merge the obj add cache
+		objs.merge(std::move(objs_add_cache));
+		assert(objs_add_cache.empty()); // just to be sure
+
+		// apply cached root actions
+		for (auto i : roots_add_cache) roots.insert(i);
+		roots_add_cache.clear();
+
+		// apply cached unroot actions
+		for (auto i : roots_remove_cache) roots.erase(i);
+		roots_remove_cache.clear();
+
+		// apply handle repoint actions
+		for (auto i : handle_repoint_cache) *i.first = i.second;
+
+		// now that that's all done...
+
+		// add the pointed-at objects of all remaining (valid) roots to a set of root objects.
+		// we only include the non-null targets for convenience.
+		for (auto root : roots)
+			if (*root) root_objs.insert(*root);
+	}
 }
 GC::collection_synchronizer::collection_sentry::~collection_sentry()
 {
@@ -212,33 +271,51 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 	if (success)
 	{
 		// destroy objects
-		for (info *handle = del_list.front(); handle; handle = handle->next)
+		for (info *i = del_list.front(); i; i = i->next)
 		{
 			#if GC_SHOW_DELMSG
 			std::cerr << "\ngc deleting " << handle->obj << '\n';
 			#endif
 
-			handle->destroy();
+			i->destroy();
 		}
 
 		// deallocate memory
-		// done after calling deleters so that the deletion func can access the handles (but not objects) safely
-		for (info *handle = del_list.front(), *next; handle; handle = next)
+		// done after calling deleters so that the deletion func can access the info objects safely
+		for (info *i = del_list.front(), *next; i; i = next)
 		{
-			next = handle->next;
-			handle->dealloc();
+			next = i->next;
+			i->dealloc();
 		}
 
 		// clear the del list (we already deallocated the resources above)
 		del_list.unsafe_clear();
+		assert(del_list.empty()); // just to make sure - won't affect release build execution
 
 		// end the collection action.
 		// must be after dtors/deallocs to ensure that if they call collect() it'll no-op (otherwise very slow).
+		// additionally, must be after those to ensure the caches are fully emptied as the last atomic step.
 		{
 			std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 			// mark that there is no longer a collector thread
 			collector_thread = std::thread::id();
+
+			// apply all the cached obj add actions that occurred during the collection action
+			objs.merge(std::move(objs_add_cache));
+			assert(objs_add_cache.empty()); // just to make sure
+
+			// apply cached root actions
+			for (auto i : roots_add_cache) roots.insert(i);
+			roots_add_cache.clear();
+
+			// apply cached unroot actions
+			for (auto i : roots_remove_cache) roots.erase(i);
+			roots_remove_cache.clear();
+
+			// apply all the cached handle repoint actions
+			for (auto i : handle_repoint_cache) *i.first = i.second;
+			handle_repoint_cache.clear();
 		}
 	}
 }
@@ -246,118 +323,88 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 bool GC::collection_synchronizer::this_is_collector_thread()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
-	// return true iff the calling thread is the collector thread
 	return collector_thread == std::this_thread::get_id();
 }
 
-void GC::collection_synchronizer::schedule_handle_create_null(raw_handle_t &handle)
+void GC::collection_synchronizer::schedule_handle_create_null(info *&handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// create the handle
-	handle = new info*(nullptr);
+	// point it at null
+	handle = nullptr;
+	
+	// root it
+	__schedule_handle_root(handle);
+}
+void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(info *&handle, info *new_obj)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// point it at the object
+	handle = new_obj;
+
+	// root it
+	__schedule_handle_root(handle);
+
+	// -- add the object -- //
+
+	// if there's no collector thread, we MUST apply the change immediately
+	if (collector_thread == std::thread::id())
+	{
+		// if this branch was selected, the caches should be empty
+		assert(objs_add_cache.empty());
+
+		objs.add(new_obj);
+	}
+	// otherwise we need to cache the request
+	else objs_add_cache.add(new_obj);
+}
+void GC::collection_synchronizer::schedule_handle_create_alias(info *&handle, info *const &src_handle)
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+	// point it at the source handle's current target
+	handle = __get_current_target(src_handle);
 
 	// root it
 	__schedule_handle_root(handle);
 }
-void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(raw_handle_t &handle, info *new_obj)
-{
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-	// create the handle
-	handle = new info*(new_obj);
-
-	// root it
-	__schedule_handle_root(handle);
-
-	// add the new obj to the obj add cache
-	objs_add_cache.add(new_obj);
-}
-void GC::collection_synchronizer::schedule_handle_create_alias(raw_handle_t &handle, raw_handle_t src_handle)
-{
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
-	// create the handle
-	handle = new info*(__get_current_target(src_handle));
-
-	// root it
-	__schedule_handle_root(handle);
-}
-
-void GC::collection_synchronizer::schedule_handle_destroy(raw_handle_t handle)
+void GC::collection_synchronizer::schedule_handle_destroy(info *const &handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// unroot it
 	__schedule_handle_unroot(handle);
 
-	// purge it from the repoint cache
-	handle_repoint_cache.erase(handle);
-
-	// add it to the dynamic handle deletion list
-	handle_dealloc_list.push_back(handle);
+	// purge it from the repoint cache so we don't dereference undefined memory.
+	// the const cast is ok because we won't be modifying it - just for lookup.
+	handle_repoint_cache.erase(const_cast<info**>(&handle));
 }
 
-void GC::collection_synchronizer::schedule_handle_unroot(raw_handle_t handle)
+void GC::collection_synchronizer::schedule_handle_unroot(info *const &handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	
+	// unroot it
 	__schedule_handle_unroot(handle);
 }
-void GC::collection_synchronizer::unsafe_immediate_handle_unroot(raw_handle_t handle)
-{
-	// no need to lock because we're modifying collector-only resources and assuming we're the collector
-	roots.erase(handle);
-}
 
-void GC::collection_synchronizer::__schedule_handle_root(raw_handle_t handle)
-{
-	// if there's no collector thread, we can apply the change immediately
-	if (collector_thread == std::thread::id())
-	{
-		roots.insert(handle);
-	}
-	// otherwise we need to cache the request
-	else
-	{
-		// add it to the root add cache
-		roots_add_cache.insert(handle);
-		// remove it from the root remove cache
-		roots_remove_cache.erase(handle);
-	}
-}
-void GC::collection_synchronizer::__schedule_handle_unroot(raw_handle_t handle)
-{
-	// if there's no collector thread, we can apply the change immediately
-	if (collector_thread == std::thread::id())
-	{
-		roots.erase(handle);
-	}
-	// otherwise we need to cache the request
-	else
-	{
-		// add it to the roots remove cache
-		roots_remove_cache.insert(handle);
-		// remove it from the roots add cache
-		roots_add_cache.erase(handle);
-	}
-}
-
-void GC::collection_synchronizer::schedule_handle_repoint(raw_handle_t handle, raw_handle_t new_value)
+void GC::collection_synchronizer::schedule_handle_repoint(info *&handle, info *const &new_value)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	
 	// repoint handle to the target
 	__raw_schedule_handle_repoint(handle, __get_current_target(new_value));
 }
-void GC::collection_synchronizer::schedule_handle_repoint_null(raw_handle_t handle)
+void GC::collection_synchronizer::schedule_handle_repoint_null(info *&handle)
 {
 	std::lock_guard<std::mutex> lock(internal_mutex);
 
 	// repoint handle to null
 	__raw_schedule_handle_repoint(handle, nullptr);
 }
-void GC::collection_synchronizer::schedule_handle_repoint_swap(raw_handle_t handle_a, raw_handle_t handle_b)
+void GC::collection_synchronizer::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
 {
 	std::lock_guard<std::mutex> lock(internal_mutex);
 
@@ -370,29 +417,67 @@ void GC::collection_synchronizer::schedule_handle_repoint_swap(raw_handle_t hand
 	__raw_schedule_handle_repoint(handle_b, target_a);
 }
 
-void GC::collection_synchronizer::__raw_schedule_handle_repoint(raw_handle_t handle, info *target)
+void GC::collection_synchronizer::__schedule_handle_root(info *const &handle)
 {
-	// if there's no collector thread, we can apply the change immediately
+	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
 	{
-		// immediately repoint handle to target
-		*handle = target;
+		// if this branch was selected, the caches should be empty
+		assert(roots_add_cache.empty());
+		assert(roots_remove_cache.empty());
+
+		roots.insert(&handle);
 	}
 	// otherwise we need to cache the request
 	else
 	{
-		// assign handle's repoint target
-		handle_repoint_cache[handle] = target;
+		roots_add_cache.insert(&handle);
+		roots_remove_cache.erase(&handle); // ensure the sets are disjoint
+	}
+}
+void GC::collection_synchronizer::__schedule_handle_unroot(info *const &handle)
+{
+	// if there's no collector thread, we MUST apply the change immediately
+	if (collector_thread == std::thread::id())
+	{
+		// if this branch was selected, the caches should be empty
+		assert(roots_add_cache.empty());
+		assert(roots_remove_cache.empty());
+
+		roots.erase(&handle);
+	}
+	// otherwise we need to cache the request
+	else
+	{
+		roots_remove_cache.insert(&handle);
+		roots_add_cache.erase(&handle); // ensure the sets are disjoint
 	}
 }
 
-GC::info *GC::collection_synchronizer::__get_current_target(raw_handle_t handle)
+void GC::collection_synchronizer::__raw_schedule_handle_repoint(info *&handle, info *target)
 {
-	// find new_value's repoint target from the cache
-	auto new_value_iter = handle_repoint_cache.find(handle);
+	// if there's no collector thread, we MUST apply the change immediately
+	if (collector_thread == std::thread::id())
+	{
+		// if this branch was selected, the caches should be empty
+		assert(handle_repoint_cache.empty());
 
-	// get the target (if it's in the repoint cache, get the repoint target, otherwise use it raw)
-	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : *handle;
+		// immediately repoint handle to target
+		handle = target;
+	}
+	// otherwise we need to cache the request
+	else handle_repoint_cache[&handle] = target;
+}
+
+GC::info *GC::collection_synchronizer::__get_current_target(info *const &handle)
+{
+	// find new_value's repoint target from the cache.
+	// const cast is safe because we won't be modifying it (just for lookup in the repoint cache).
+	auto new_value_iter = handle_repoint_cache.find(const_cast<info**>(&handle));
+
+	// get the target - if it's in the repoint cache, get the repoint target, otherwise use it raw.
+	// this works regardless of if we're in a collect action or not (if we're in a collect action the cache is empty).
+	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : handle;
 }
 
 // ---------------- //
@@ -409,8 +494,8 @@ void GC::__mark_sweep(info *handle)
 	// for each outgoing arc
 	handle->route(+[](const smart_handle &arc)
 	{
-		// get the current arc value - this is only safe because we're in a gc cycle
-		info *raw = *arc.raw_handle();
+		// get the current arc value - this is only safe because we're in a collect action
+		info *raw = arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
 		if (raw && !raw->marked) __mark_sweep(raw);
@@ -424,59 +509,36 @@ void GC::collect()
 	collection_synchronizer::collection_sentry sentry;
 	if (!sentry) return;
 
+	#if GC_COLLECT_MSG
+	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
+	#endif
+
+	// -- mark and sweep -- //
+
+	// perform a mark sweep from each root object
+	for (info *i : sentry.get_root_objs()) __mark_sweep(i);
+
+	// -- clean anything not marked -- //
+
+	// for each item in the gc database
+	for (info *i = sentry.get_objs().front(); i; )
 	{
-		#if GC_COLLECT_MSG
-		std::size_t collect_count = 0; // number of objects that we scheduled for deletion
-		#endif
-
-		// -- recalculate root claims for each object -- //
-
-		// this can happen because e.g. a ptr<T> was added to a std::vector<ptr<T>> and thus was not unrooted by GC::make() after construction
-
-		// for each object in the gc database
-		for (info *i = sentry.get_objs().front(); i; i = i->next)
+		// if it hasn't been marked and isn't currently being deleted
+		if (!i->marked && !i->destroying.test_and_set())
 		{
-			// clear its marked flag
-			i->marked = false;
+			// mark it for deletion (internally unlinks it from obj database)
+			i = sentry.mark_delete(i);
 
-			// claim its children (see above comment)
-			// we only need to do this for the mutable targets because the non-mutable targets are collected immediately upon the object entering gc control
-			i->mutable_route(GC::router_unsafe_immediate_unroot);
+			#if GC_COLLECT_MSG
+			++collect_count;
+			#endif
 		}
-
-		// -- mark and sweep -- //
-
-		// for each root
-		for (info *const *i : sentry.get_roots())
-		{
-			// perform a mark sweep from this root (if it points to something)
-			if (*i) __mark_sweep(*i);
-		}
-
-		// -- clean anything not marked -- //
-
-		// for each item in the gc database
-		for (info *i = sentry.get_objs().front(), *_next; i; i = _next)
-		{
-			// record next node
-			_next = i->next;
-
-			// if it hasn't been marked and isn't currently being deleted
-			if (!i->marked && !i->destroying.test_and_set())
-			{
-				// mark it for deletion (internally unlinks it from obj database)
-				sentry.mark_delete(i);
-
-				#if GC_COLLECT_MSG
-				++collect_count;
-				#endif
-			}
-		}
-
-		#if GC_COLLECT_MSG
-		std::cerr << "collecting - deleting: " << collect_count << '\n';
-		#endif
+		else i = i->next;
 	}
+
+	#if GC_COLLECT_MSG
+	std::cerr << "collecting - deleting: " << collect_count << '\n';
+	#endif
 }
 
 // ------------------------------ //
@@ -488,10 +550,6 @@ void GC::collect()
 void GC::router_unroot(const smart_handle &arc)
 {
 	collection_synchronizer::schedule_handle_unroot(arc.raw_handle());
-}
-void GC::router_unsafe_immediate_unroot(const smart_handle &arc)
-{
-	collection_synchronizer::unsafe_immediate_handle_unroot(arc.raw_handle());
 }
 
 // --------------------- //

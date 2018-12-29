@@ -852,7 +852,7 @@ int main() try
 	//dp_as_b = dp;
 	//dp_as_b = 67;
 
-	std::cin.get();
+	//std::cin.get();
 
 	/**/
 	{
