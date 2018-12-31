@@ -71,8 +71,6 @@ void GC::aligned_free(void *ptr)
 	if (ptr) std::free(*(void**)((char*)ptr - sizeof(void*)));
 }
 
-GC::no_addref_t GC::no_addref;
-
 GC::bind_new_obj_t GC::bind_new_obj;
 
 // ------------------------------------ //
@@ -281,7 +279,9 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 		}
 
 		// deallocate memory
-		// done after calling deleters so that the deletion func can access the info objects safely
+		// done after calling ALL dtors so that the dtors can access the info objects safely.
+		// this is because we might be deleting objects whose reference count is not zero.
+		// which means they could potentially hold gc references to other objects in this del list (e.g. cycles).
 		for (info *i = del_list.front(), *next; i; i = next)
 		{
 			next = i->next;
@@ -295,6 +295,7 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 		// end the collection action.
 		// must be after dtors/deallocs to ensure that if they call collect() it'll no-op (otherwise very slow).
 		// additionally, must be after those to ensure the caches are fully emptied as the last atomic step.
+		// also, if this came before dtors, the reference count system could fall to 0 and result in double dtor.
 		{
 			std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -348,6 +349,9 @@ void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(info *&han
 
 	// -- add the object -- //
 
+	// set its reference count to 1
+	new_obj->ref_count = 1;
+
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
 	{
@@ -366,20 +370,29 @@ void GC::collection_synchronizer::schedule_handle_create_alias(info *&handle, in
 	// point it at the source handle's current target
 	handle = __get_current_target(src_handle);
 
+	// increment the target reference count
+	if (handle) ++handle->ref_count;
+
 	// root it
 	__schedule_handle_root(handle);
 }
 
 void GC::collection_synchronizer::schedule_handle_destroy(info *const &handle)
 {
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 
-	// unroot it
+	// get the old target
+	info *old_target = __get_current_target(handle);
+
+	// unroot the handle
 	__schedule_handle_unroot(handle);
 
-	// purge it from the repoint cache so we don't dereference undefined memory.
+	// purge the handle from the repoint cache so we don't dereference undefined memory.
 	// the const cast is ok because we won't be modifying it - just for lookup.
 	handle_repoint_cache.erase(const_cast<info**>(&handle));
+
+	// dec the reference count
+	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
 
 void GC::collection_synchronizer::schedule_handle_unroot(info *const &handle)
@@ -392,29 +405,55 @@ void GC::collection_synchronizer::schedule_handle_unroot(info *const &handle)
 
 void GC::collection_synchronizer::schedule_handle_repoint(info *&handle, info *const &new_value)
 {
-	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 	
-	// repoint handle to the target
-	__raw_schedule_handle_repoint(handle, __get_current_target(new_value));
+	// get the old/new targets
+	info *old_target = __get_current_target(handle);
+	info *new_target = __get_current_target(new_value);
+
+	// only do the remaining logic if it's an actual repoint
+	if (old_target != new_target)
+	{
+		// repoint handle to the new target
+		__raw_schedule_handle_repoint(handle, new_target);
+
+		// increment new target reference count
+		if (new_target) ++new_target->ref_count;
+
+		// decrement old target reference count
+		__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
+	}
 }
 void GC::collection_synchronizer::schedule_handle_repoint_null(info *&handle)
 {
-	std::lock_guard<std::mutex> lock(internal_mutex);
+	std::unique_lock<std::mutex> internal_lock(internal_mutex);
+
+	// get the old target
+	info *old_target = __get_current_target(handle);
 
 	// repoint handle to null
 	__raw_schedule_handle_repoint(handle, nullptr);
+
+	// decrement old target reference count
+	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
 void GC::collection_synchronizer::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
 {
-	std::lock_guard<std::mutex> lock(internal_mutex);
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// get their current repoint targets
 	info *target_a = __get_current_target(handle_a);
 	info *target_b = __get_current_target(handle_b);
 
-	// schedule repoint actions to swap them
-	__raw_schedule_handle_repoint(handle_a, target_b);
-	__raw_schedule_handle_repoint(handle_b, target_a);
+	// only perform the swap if they point to different things
+	if (target_a != target_b)
+	{
+		// schedule repoint actions to swap them
+		__raw_schedule_handle_repoint(handle_a, target_b);
+		__raw_schedule_handle_repoint(handle_b, target_a);
+
+		// there's no need for reference counting logic in a swap operation
+	}
 }
 
 void GC::collection_synchronizer::__schedule_handle_root(info *const &handle)
@@ -480,6 +519,38 @@ GC::info *GC::collection_synchronizer::__get_current_target(info *const &handle)
 	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : handle;
 }
 
+void GC::collection_synchronizer::__MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
+{
+	// decrement the reference count
+	// if it falls to zero and there's not currently a collection action in progress we can delete it.
+	// otherwise either ref count is nonzero (so we shouldn't delete it) or the collector will delete it for us.
+	if (target && --target->ref_count == 0 && collector_thread == std::thread::id())
+	{
+		// if this branch was selected, the caches should be empty
+		assert(objs_add_cache.empty());
+
+		// remove it from the obj list
+		// we know it's in the obj list (and not the obj add cache) because the caches are empty.
+		objs.remove(target);
+
+		// before we go any further we have to unlock the mutex
+		internal_lock.unlock();
+		// ----------------------------------------------------
+
+		// delete it now that the lock is released.
+		// the collector deleter (in sentry dtor) does all destory() calls before dealloc() calls.
+		// this is because the dtors of those objects might need to reference the info objects of others.
+		// however, that isn't a problem in this case, because we know the reference count is zero.
+		// this means there's absolutely no way anyone else could possibly be referring to this info object.
+		// (the same logic applies for the collect deleter in terms of reachable vs. non-reachable).
+		// in short, for a batch of objects, all destroy() come before all dealloc().
+		// but in this case there's only one.
+
+		target->destroy();
+		target->dealloc();
+	}
+}
+
 // ---------------- //
 
 // -- collection -- //
@@ -523,8 +594,8 @@ void GC::collect()
 	// for each item in the gc database
 	for (info *i = sentry.get_objs().front(); i; )
 	{
-		// if it hasn't been marked and isn't currently being deleted
-		if (!i->marked && !i->destroying.test_and_set())
+		// if it hasn't been marked, mark it for deletion
+		if (!i->marked)
 		{
 			// mark it for deletion (internally unlinks it from obj database)
 			i = sentry.mark_delete(i);

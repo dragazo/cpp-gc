@@ -189,6 +189,7 @@ public: // -- router functions -- //
 	// because object ownership cannot be cyclic, this will never degrade into infinite recursion.
 
 	// routing to anything you don't own is undefined behavior.
+    // routing to the same object twice is likewise undefined behavior.
 	// thus, although it is legal to route to the "contents" of an owned object (i.e. owned object of an owned object), it is typically dangerous to do so.
 	// in general, you should just route to all your by-value members - it is their responsibility to properly route the message the rest of the way.
 	// thus, if you own a std::vector<T> where T is a gc type, you should just route to the vector itself, which has its own router functions to route the message to its contents.
@@ -207,9 +208,9 @@ public: // -- router functions -- //
 	// this is due to the fact that you would never route to its pointed-to contents due to it being a shared resource.
 
 	// the following is critical and easily forgotten:
-	// all mutating actions in a mutable gc object (e.g. adding items to a std::vector<GC::ptr<T>>) must occurr in a manner mutually exclusive with the object's router function.
+	// all mutating actions in a mutable gc object (e.g. adding items to a std::vector<GC::ptr<T>>) must occur in a manner mutually exclusive with the object's router function.
 	// this is because any thread may at any point make routing requests to any number of objects under gc management in any order and for any purpose.
-	// thus, if you have e.g. a std::vector<GC::ptr<T>>, you should also have a mutex to guard it on insertion/deletion/reordering of an element and for the router function.
+	// thus, if you have e.g. a std::vector<GC::ptr<T>>, you should also have a mutex to guard it on insertion/deletion/reordering of elements and for the router function.
 	// this would likely need to be encapsulated by methods of your class to ensure external code can't violate this requirement (it is undefined behavior to violate this).
 
 	// on the bright side, cpp-gc has wrappers for all standard containers that internally apply all of this logic without the need to remember it.
@@ -219,12 +220,13 @@ public: // -- router functions -- //
 	// for a normal router function (i.e. GC::router_fn) this must at least route to all owned gc objects.
 	// for a mutable router function (i.e. GC::mutable_router_fn) this must at least route to all owned "mutable" gc objects.
 	// the mutable router function system is entirely a method for optimization and can safely be ignored if desired.
-
-	// this type represents the router function set for objects of type T.
-	// router functions must be static, named "route", return void, and take two args: const T& and a router function object by value (i.e. GC::router_fn or GC::mutable_router_fn).
-	// if you don't care about the efficiency mechanism of mutable router functions, you can defined the function type as a template type paramter, but it must be deducible.
+    
+	// the following struct represents the router function set for objects of type T.
+    // the T in router<T> must not be cv-qualified.
+	// router functions must be static, named "route", return void, and take two args: a reference to (possibly cv-qualified) T and a by-value router function object (i.e. GC::router_fn or GC::mutable_router_fn).
+	// if you don't care about the efficiency mechanism of mutable router functions, you can define the function type as a template type paramter, but it must be deducible.
 	// the default implementation is no-op, which is suitable for any non-gc type.
-	// this should not be used directly for routing to owned objects - see the helper functions below.
+	// this should not be used directly for routing to owned objects - use the helper function GC::route() and GC::route_range() instead.
 	template<typename T>
 	struct router
 	{
@@ -273,37 +275,38 @@ private: // -- private types -- //
 	// ANY POINTER OF THIS TYPE UNDER GC CONTROL MUST AT ALL TIMES POINT TO A VALID OBJECT OR NULL.
 	struct info
 	{
+	public: // -- core info -- //
+
 		void *const       obj;   // pointer to the managed object
 		const std::size_t count; // the number of elements in obj (meaning varies by implementer)
 
 		const info_vtable *const vtable; // virtual function table to use
 
-		std::atomic<std::size_t> ref_count; // the reference count for this allocation
-		
-		std::atomic_flag destroying = ATOMIC_FLAG_INIT; // marks if the object is currently in the process of being destroyed (multi-delete safety flag)
-		bool             destroy_completed = false;     // marks if destruction completed
-
-		bool marked; // only used for GC::collect() - otherwise undefined
-
-		info *prev; // the std::list iterator contract isn't quite what we want
-		info *next; // so we need to manage a linked list on our own
-
 		// populates info - ref count starts at 1 - prev/next are undefined
 		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
-			: obj(_obj), count(_count), vtable(_vtable), ref_count(1)
+			: obj(_obj), count(_count), vtable(_vtable)
 		{}
 
-		// -- helpers -- //
+	public: // -- vtable helpers -- //
 
 		void destroy() { vtable->destroy(*this); }
 		void dealloc() { vtable->dealloc(*this); }
 
 		void route(router_fn func) { vtable->route(*this, func); }
 		void mutable_route(mutable_router_fn func) { vtable->mutable_route(*this, func); }
-	};
 
-	// used to select constructor paths that lack the addref step
-	static struct no_addref_t {} no_addref;
+	public: // -- special resources -- //
+
+		// reference count - should only be used by collection syn function under internal_mutex lock
+		std::size_t ref_count;
+
+		// mark flag - should only be used by the collector
+		bool marked;
+
+		// dlist pointers - should only be modified by obj_list methods.
+		// dlists have no other internal synchronization, so external code must make this thread safe if needed.
+		info *prev, *next;
+	};
 
 	// used to select constructor paths that bind a new object
 	static struct bind_new_obj_t {} bind_new_obj;
@@ -6783,17 +6786,22 @@ private: // -- collection synchronizer -- //
 		static bool this_is_collector_thread();
 
 		// schedules a handle creation action that points to null.
-		// a new raw_handle_t value will be created and assigned to handle.
+		// raw_handle need not be initialized prior to this call.
 		static void schedule_handle_create_null(info *&handle);
 		// schedules a handle creation action that points to a new object - inserts new_obj into the obj database.
 		// new_obj must not already exist in the gc database (see create alias below).
-		// a new raw_handle_t value will be created and assigned to handle.
+		// the reference count for new_obj is initialized to 1.
+		// raw_handle need not be initialized prior to this call.
 		static void schedule_handle_create_bind_new_obj(info *&handle, info *new_obj);
 		// schedules a handle creation action that points at a pre-existing handle - marks the new handle as a root.
-		// a new raw_handle_t value will be created and assigned to handle.
+		// raw_handle need not be initialized prior to this call.
+		// increments the reference count of the referenced target.
 		static void schedule_handle_create_alias(info *&raw_handle, info *const &src_handle);
 
 		// schedules a handle deletion action - unroots the handle and purges it from the handle repoint cache.
+		// for any call to schedule_handle_create_*(), said handle must be sent here before the end of its lifetime.
+		// calling this function implies that the handle no longer exists as far as the gc systems are concerned.
+		// reference counting and other gc logic will commence due to the gc reference being destroyed.
 		static void schedule_handle_destroy(info *const &handle);
 
 		// schedules a handle unroot operation - unmarks handle as a root.
@@ -6801,15 +6809,14 @@ private: // -- collection synchronizer -- //
 
 		// schedules a handle repoint action.
 		// handle shall eventually be repointed to null before the next collection action.
-		// if handle is destroyed, it must first be removed from this cache via unschedule_handle().
+		// automatically performs reference counting logic.
 		static void schedule_handle_repoint_null(info *&handle);
 		// schedules a handle repoint action.
 		// handle shall eventually be repointed to new_value before the next collection action.
-		// if handle is destroyed, it must first be removed from this cache via unschedule_handle().
+		// automatically performs reference counting logic.
 		static void schedule_handle_repoint(info *&handle, info *const &new_value);
 		// schedules a handle repoint action that swaps the pointed-to info objects of two handles atomically.
 		// handle_a shall eventually point to whatever handle_b used to point to and vice versa.
-		// if wither handle is destroyed, it must first be removed from this cache via unschedule_handle().
 		static void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
 
 	private: // -- private interface (unsafe) -- //
@@ -6821,12 +6828,22 @@ private: // -- collection synchronizer -- //
 
 		// the underlying function for all handle repoint actions.
 		// handles the logic of managing the repoint cache for repointing handle to target.
+		// DOES NOT HANDLE REFERENCE COUNT LOGIC - DO THAT ON YOUR OWN.
 		static void __raw_schedule_handle_repoint(info *&handle, info *target);
 
 		// gets the current target info object of new_value.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of value.
 		static info *__get_current_target(info *const &handle);
+
+		// performs the reference count decrement logic on target (allowed to be null).
+		// internal_lock is the (already-owned) lock on internal_mutex that was taken previously.
+		// you should do all your other work first before calling this.
+		// if the reference count falls to zero and there's no collection action, deletes the object.
+		// otherwise does nothing (aside from the reference count decrement).
+		// handles all deletion logic internally.
+		// THIS MUST BE THE LAST THING YOU DO UNDER INTERNAL_MUTEX LOCK.
+		static void __MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
 	};
 
 private: // -- data -- //

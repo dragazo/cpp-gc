@@ -900,21 +900,28 @@ int main() try
 				*/
 				
 				/**/
+				
 				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
 
-				for (int i = 0; i < 128; ++i)
+				for (int pass = 0; pass < 1024; ++pass)
 				{
-					GC::ptr<TreeNode> tree = GC::make<TreeNode>();
-					tree->left = GC::make<TreeNode>();
-					tree->right = GC::make<TreeNode>();
+					for (int i = 0; i < 128; ++i)
+					{
+						GC::ptr<TreeNode> tree = GC::make<TreeNode>();
+						tree->left = GC::make<TreeNode>();
+						tree->right = GC::make<TreeNode>();
 
-					std::string key = tostr(i);
+						std::string key = tostr(i);
 
-					table->update(key, tree); // the one with explicit locks
-					table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
+						table->update(key, tree); // the one with explicit locks
+						table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
+					}
+					table->clear();
+
+					std::cerr << "pass " << pass << '\n';
 				}
 
-				std::cerr << "phase1\n";
+				std::cerr << "phase 1 completed\n";
 
 				/**/
 
@@ -935,7 +942,7 @@ int main() try
 		//{
 
 		int i = 0;
-		while (1)
+		//while (1)
 		{
 			//*atomic_gc_ptr = GC::make<atomic_container>();
 
