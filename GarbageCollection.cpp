@@ -132,6 +132,14 @@ void GC::obj_list::merge(obj_list &&other)
 	other.first = other.last = nullptr;
 }
 
+bool GC::obj_list::contains(info *obj) const noexcept
+{
+	for (info *i = first; i; i = i->next)
+		if (i == obj) return true;
+
+	return false;
+}
+
 // ----------------------------- //
 
 // -- collection synchronizer -- //
@@ -154,7 +162,12 @@ GC::obj_list GC::collection_synchronizer::del_list;
 
 // ---------------------------------------------------------------------
 
-GC::obj_list GC::collection_synchronizer::objs_add_cache;
+bool GC::collection_synchronizer::cache_ref_count_del_actions = false;
+std::unordered_set<GC::info*> GC::collection_synchronizer::ref_count_del_cache;
+
+// ---------------------------------------------------------------------
+
+std::unordered_set<GC::info*> GC::collection_synchronizer::objs_add_cache;
 
 std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots_add_cache;
 std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots_remove_cache;
@@ -177,11 +190,19 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 		// otherwise mark the calling thread as the collector thread
 		collector_thread = std::this_thread::get_id();
 
+		// begin caching ref count deletion events
+		cache_ref_count_del_actions = true;
+
 		// since we just came out of no-collect phase, all the caches should be empty
 		assert(objs_add_cache.empty());
+
 		assert(roots_add_cache.empty());
 		assert(roots_remove_cache.empty());
+
 		assert(handle_repoint_cache.empty());
+
+		// ref count del cache should also be empty
+		assert(ref_count_del_cache.empty());
 
 		// the del list should also be empty
 		assert(del_list.empty());
@@ -234,15 +255,16 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 		// but that's not a problem as collect() only guarantees it will collect all objects unreachable prior to invocation.
 		// the routing logic is just to ensure this happens in 1 pass and not 2 (uncommon but otherwise possible without this step).
 
-		// so long story short we need to apply all the caches, plus a tiny bit of extra logic.
+		// so long story short we need to apply all the caches (aside from obj deletion), plus a tiny bit of extra logic.
 		// we know this is safe because it's as if we took the graph snapshot later on and just routed to a subset of it for unrooting.
 
-		// clear the obj list add cache marks (the ones in the obj list are already cleared)
-		for (info *i = objs_add_cache.front(); i; i = i->next) i->marked = false;
-
-		// merge the obj add cache
-		objs.merge(std::move(objs_add_cache));
-		assert(objs_add_cache.empty()); // just to be sure
+		// apply the obj add cache - also clear their marks (the ones in the obj list are already cleared)
+		for (info *i : objs_add_cache)
+		{
+			i->marked = false;
+			objs.add(i);
+		}
+		objs_add_cache.clear();
 
 		// apply cached root actions
 		for (auto i : roots_add_cache) roots.insert(i);
@@ -254,6 +276,7 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 
 		// apply handle repoint actions
 		for (auto i : handle_repoint_cache) *i.first = i.second;
+		handle_repoint_cache.clear();
 
 		// now that that's all done...
 
@@ -268,31 +291,70 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 	// only do this if the construction was successful
 	if (success)
 	{
-		// destroy objects
-		for (info *i = del_list.front(); i; i = i->next)
-		{
-			#if GC_SHOW_DELMSG
-			std::cerr << "\ngc deleting " << handle->obj << '\n';
-			#endif
+		// we've now divided the old obj list into two partitions:
+		// the reachable objects are still in the obj list.
+		// the unreachable objects are now in the del list.
+		// ref count deletion caching is still in effect.
 
-			i->destroy();
+		// destroy unreachable objects
+		for (info *i = del_list.front(); i; i = i->next) i->destroy();
+
+		// now we've destroyed the unreachable objects but there may be cached deletions from ref count logic.
+		// we'll now resume immediate ref count deletions.
+		// we can't resume immediate ref count deletions prior to destroying the unreachable objs because it could double delete.
+		// e.g. could drop an unreachable obj ref count to 0 and insta-delete on its own before we get to it.
+		// even if we made a check for double delete, it would still deallocate the info object as well and would cause even more headache.
+		// we know this usage is safe because there's no way a reachable object could ref count delete an unreachable object.
+		
+		// resume immediate ref count deletions.
+		{
+			std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+			// stop caching ref count deletion actions (i.e. resume immediate ref count deletions)
+			cache_ref_count_del_actions = false;
+
+			// if an unreachable object is in the ref count del cache purge it (to avoid the double delete issue for unreachable objs).
+			// we know this'll work because the unreachable objects are unreachable from reachable objects (hence the name).
+			// thus, since we already called unreachable destructors, there will be no further ref count logic for unreachables.
+
+			// purge unreachable objects from the ref count del cache (to avoid double deletions - see above).
+			for (info *i = del_list.front(); i; i = i->next) ref_count_del_cache.erase(i);
+
+			// after the double-deletion purge, remove remaining ref count del cache objects from the obj list.
+			// we do this now because enabling immediate ref count del logic means the obj list can be modified by any holder of the mutex.
+			for (auto i : ref_count_del_cache) objs.remove(i);
 		}
 
+		// we now have lock-free exclusive ownership of the ref count del cache.
+
 		// deallocate memory
-		// done after calling ALL dtors so that the dtors can access the info objects safely.
+		// done after calling ALL unreachable dtors so that the dtors can access the info objects safely.
 		// this is because we might be deleting objects whose reference count is not zero.
-		// which means they could potentially hold gc references to other objects in this del list (e.g. cycles).
+		// which means they could potentially hold live gc references to other objects in del list and try to refer to their info objects.
 		for (info *i = del_list.front(), *next; i; i = next)
 		{
-			next = i->next;
+			next = i->next; // dealloc() will deallocate the info object as well, so grab the next object now
 			i->dealloc();
 		}
 
 		// clear the del list (we already deallocated the resources above)
 		del_list.unsafe_clear();
-		assert(del_list.empty()); // just to make sure - won't affect release build execution
+		assert(del_list.empty()); // just to make sure
 
-		// end the collection action.
+		// remember, we still have lock-free exclusive ownership of the ref count del cache from above.
+		// process the cached ref count deletions.
+		for (auto i : ref_count_del_cache)
+		{
+			// we don't need to do all destructors before all deallocators like we did above.
+			// this is because we know the ref count for these is zero (because they were cached ref count deletion).
+			// this means we don't have the same risks as above (i.e. live references being forcibly severed).
+
+			i->destroy();
+			i->dealloc();
+		}
+		ref_count_del_cache.clear();
+
+		// end the collection action
 		// must be after dtors/deallocs to ensure that if they call collect() it'll no-op (otherwise very slow).
 		// additionally, must be after those to ensure the caches are fully emptied as the last atomic step.
 		// also, if this came before dtors, the reference count system could fall to 0 and result in double dtor.
@@ -303,8 +365,8 @@ GC::collection_synchronizer::collection_sentry::~collection_sentry()
 			collector_thread = std::thread::id();
 
 			// apply all the cached obj add actions that occurred during the collection action
-			objs.merge(std::move(objs_add_cache));
-			assert(objs_add_cache.empty()); // just to make sure
+			for (auto i : objs_add_cache) objs.add(i);
+			objs_add_cache.clear();
 
 			// apply cached root actions
 			for (auto i : roots_add_cache) roots.insert(i);
@@ -361,7 +423,7 @@ void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(info *&han
 		objs.add(new_obj);
 	}
 	// otherwise we need to cache the request
-	else objs_add_cache.add(new_obj);
+	else objs_add_cache.insert(new_obj);
 }
 void GC::collection_synchronizer::schedule_handle_create_alias(info *&handle, info *const &src_handle)
 {
@@ -522,32 +584,43 @@ GC::info *GC::collection_synchronizer::__get_current_target(info *const &handle)
 void GC::collection_synchronizer::__MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
 {
 	// decrement the reference count
-	// if it falls to zero and there's not currently a collection action in progress we can delete it.
-	// otherwise either ref count is nonzero (so we shouldn't delete it) or the collector will delete it for us.
-	if (target && --target->ref_count == 0 && collector_thread == std::thread::id())
+	// if it falls to zero we need to perform ref count deletion logic
+	if (target && --target->ref_count == 0)
 	{
-		// if this branch was selected, the caches should be empty
-		assert(objs_add_cache.empty());
+		// if it's in the obj add cache we can delete it immediately regardless of what's going on.
+		// this is because it being in the obj add cache means it's not in the obj list, and is thus not under gc consideration.
+		if (objs_add_cache.find(target) != objs_add_cache.end())
+		{
+			// remove it from the obj add cache
+			objs_add_cache.erase(target);
 
-		// remove it from the obj list
-		// we know it's in the obj list (and not the obj add cache) because the caches are empty.
-		objs.remove(target);
+			// unlock the mutex so we can call arbitrary code
+			internal_lock.unlock();
 
-		// before we go any further we have to unlock the mutex
-		internal_lock.unlock();
-		// ----------------------------------------------------
+			target->destroy();
+			target->dealloc();
+		}
+		// otherwise we know it exists and isn't in the add cache, therefore it's in the obj list.
+		// if we're not suppoed to cache ref count deletions, handle it immediately
+		else if (!cache_ref_count_del_actions)
+		{
+			// remove it from the obj list
+			objs.remove(target);
+			
+			// unlock the mutex so we can call arbitrary code
+			internal_lock.unlock();
 
-		// delete it now that the lock is released.
-		// the collector deleter (in sentry dtor) does all destory() calls before dealloc() calls.
-		// this is because the dtors of those objects might need to reference the info objects of others.
-		// however, that isn't a problem in this case, because we know the reference count is zero.
-		// this means there's absolutely no way anyone else could possibly be referring to this info object.
-		// (the same logic applies for the collect deleter in terms of reachable vs. non-reachable).
-		// in short, for a batch of objects, all destroy() come before all dealloc().
-		// but in this case there's only one.
+			target->destroy();
+			target->dealloc();
+		}
+		// otherwise we're supposed to cache the ref count deletion action.
+		// this also implies we're in a collection action.
+		else
+		{
+			assert(collector_thread != std::thread::id());
 
-		target->destroy();
-		target->dealloc();
+			ref_count_del_cache.insert(target);
+		}
 	}
 }
 

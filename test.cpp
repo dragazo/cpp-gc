@@ -384,12 +384,37 @@ struct GC::router<gc_self_ptr>
 };
 
 
+struct bool_alerter
+{
+	std::atomic<bool> &flag;
+
+	explicit bool_alerter(std::atomic<bool> &d) : flag(d) { flag = false; }
+	~bool_alerter() { flag = true; }
+};
+
 
 
 int main() try
 {
 	GC::strategy(GC::strategies::manual);
 	
+	{
+		std::atomic<bool> flag;
+		for (int i = 0; i < 4096; ++i)
+		{
+			std::thread test_thread([]()
+			{
+				GC::collect();
+			});
+
+			{
+				GC::ptr<bool_alerter> a = GC::make<bool_alerter>(flag);
+			}
+
+			test_thread.join();
+			assert(flag);
+		}
+	}
 
 	std::cerr << "-------- ctors --------\n";
 	{

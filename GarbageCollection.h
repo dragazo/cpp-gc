@@ -297,7 +297,7 @@ private: // -- private types -- //
 
 	public: // -- special resources -- //
 
-		// reference count - should only be used by collection syn function under internal_mutex lock
+		// reference count - should only be used by collection sync function under internal_mutex lock
 		std::size_t ref_count;
 
 		// mark flag - should only be used by the collector
@@ -6615,6 +6615,10 @@ private: // -- containers -- //
 
 		// returns true iff the container is empty
 		bool empty() const noexcept { return !first; }
+
+		// returns true iff obj is contained in this list.
+		// this is O(n) and for efficiency reasons should only be used in debug code.
+		bool contains(info *obj) const noexcept;
 	};
 
 private: // -- sentries -- //
@@ -6689,6 +6693,24 @@ private: // -- collection synchronizer -- //
 		// the sentry dtor will handle the logic of deleting the objects.
 		static obj_list del_list;
 
+	private: // -- modified caches -- //
+
+		// these are like caches (see below) but have special rules.
+		// for proper usage, read each modified cache's associated comments.
+
+		// controls ref count deletion behavior:
+		// if false, delete the objects immediately.
+		// if true, cache the request in ref_count_del_cache.
+		// thus if false, the cache is considered a collector-only resource and must not be modified.
+		// if this is false, it is safe to directly modify the obj list under normal mutex lock.
+		static bool cache_ref_count_del_actions;
+
+		// the shared resource cache for ref count deletion actions.
+		// objects in this cache MUST currently be in the obj list (NOT in the obj add cache).
+		// DO NOT unlink objects from the obj list when you put them in this list (just a cache).
+		// see cache_ref_count_del_actions for how to use this cache properly.
+		static std::unordered_set<info*> ref_count_del_cache;
+
 	private: // -- caches -- //
 
 		// these objects can be modified at any time so long as internal_mutex is locked.
@@ -6699,8 +6721,9 @@ private: // -- collection synchronizer -- //
 		// additionally, if there's NOT a collection action in progress, you MUST apply the change immediately (do not cache it).
 		// this is because the caches are only flushed upon termination of a collect action, not before one begins.
 
-		// the scheduled obj add operations
-		static obj_list objs_add_cache;
+		// the scheduled obj add operations.
+		// used by new obj insertion during a collection action.
+		static std::unordered_set<info*> objs_add_cache;
 
 		// the scheduled root add/remove operations.
 		// these sets must at all times be disjoint.
