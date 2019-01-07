@@ -160,11 +160,7 @@ private: // -- router function usage safety -- //
 
 	// gets if T is a well-formed router function overload
 	template<typename T, typename F>
-	struct is_well_formed_router_function : GC::is_router_function_object<F>
-	{
-	// was used to make sure router funcs used the correct types - commented out because gcc doesn't like it
-	//private: typedef decltype(static_cast<void(*)(const T&, F)>(GC::router<std::remove_cv_t<T>>::route)) __type_check; // just used to make sure it exists
-	};
+	struct is_well_formed_router_function : GC::is_router_function_object<F> {};
 
 public: // -- router functions -- //
 
@@ -233,6 +229,11 @@ public: // -- router functions -- //
 		// make sure we don't accidentally select a cv-qualified default implementation
 		static_assert(std::is_same<T, std::remove_cv_t<T>>::value, "router type T must not be cv-qualified");
 
+		// defining this as true in any router<T> specialization marks it as trivial (more efficient algorithms).
+		// this is only safe iff ALL router functions in said specialization are no-op.
+		// otherwise it should be declared false or not declared at all (if not present, false is assumed).
+		static constexpr bool is_trivial = true;
+
 		// if this overload is selected, it implies T is a non-gc type - thus we don't need to route to anything
 		template<typename F> static void route(const T &obj, F func) {}
 	};
@@ -251,6 +252,36 @@ public: // -- router functions -- //
 	// recursively routes to each object in an iteration range - should only be used inside router functions
 	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function_object<F>::value, int> = 0>
 	static void route_range(IterBegin begin, IterEnd end, F func) { for (; begin != end; ++begin) GC::route(*begin, func); }
+
+public: // -- router intrinsics -- //
+
+	// helper impl functions for router_is_trivial - do not use these directly
+	template<typename R>
+	static std::false_type __returns_router_is_trivial(void*);
+
+	template<typename R, std::enable_if_t<R::is_trivial, int> = 0>
+	static std::true_type __returns_router_is_trivial(std::nullptr_t);
+
+	// returns a type representing if the router for T is trivial
+	template<typename T>
+	using has_trivial_router = decltype(__returns_router_is_trivial<router<std::remove_cv_t<T>>>(nullptr));
+
+private: // -- plural router intrinsics -- //
+
+	// helper for all_have_trivial_routers - do not use this directly
+	template<typename R1, typename ...RN>
+	struct __all_have_trivial_routers : std::integral_constant<bool, has_trivial_router<R1>::value && __all_have_trivial_routers<RN...>::value> {};
+	
+	template<typename R>
+	struct __all_have_trivial_routers<R> : has_trivial_router<R> {};
+
+	// returns a type representing if all R... are trivial routers.
+	// this is equivalent to (has_trivial_router<R>::value && ...) but doesn't require C++17 fold expressions.
+	template<typename ...R>
+	struct all_have_trivial_routers : __all_have_trivial_routers<R...> {};
+
+	template<>
+	struct all_have_trivial_routers<> : std::true_type {};
 
 private: // -- private types -- //
 
@@ -730,7 +761,14 @@ public: // -- C-style array router specializations -- //
 	template<typename T, std::size_t N>
 	struct router<T[N]>
 	{
-		template<typename F> static void route(const T(&objs)[N], F func) { for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const T(&objs)[N], F func)
+		{
+			for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func);
+		}
 	};
 
 	// ill-formed variant for unbounded arrays
@@ -746,7 +784,8 @@ private: // -- tuple routing helpers -- //
 	template<std::size_t Len, typename ...Types>
 	struct __tuple_router
 	{
-		template<typename F> static void __route(const std::tuple<Types...> &tuple, F func)
+		template<typename F>
+		static void __route(const std::tuple<Types...> &tuple, F func)
 		{
 			GC::route(std::get<Len - 1>(tuple), func);
 			__tuple_router<Len - 1, Types...>::__route(tuple, func);
@@ -757,7 +796,8 @@ private: // -- tuple routing helpers -- //
 	template<typename ...Types>
 	struct __tuple_router<0, Types...>
 	{
-		template<typename F> static void __route(const std::tuple<Types...> &tuple, F func) {}
+		template<typename F>
+		static void __route(const std::tuple<Types...> &tuple, F func) {}
 	};
 
 public: // -- stdlib misc router specializations -- //
@@ -765,19 +805,41 @@ public: // -- stdlib misc router specializations -- //
 	template<typename T1, typename T2>
 	struct router<std::pair<T1, T2>>
 	{
-		template<typename F> static void route(const std::pair<T1, T2> &pair, F func) { GC::route(pair.first, func); GC::route(pair.second, func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<T1, T2>::value;
+
+		template<typename F>
+		static void route(const std::pair<T1, T2> &pair, F func)
+		{
+			GC::route(pair.first, func);
+			GC::route(pair.second, func);
+		}
 	};
 
 	template<typename ...Types>
 	struct router<std::tuple<Types...>>
 	{
-		template<typename F> static void route(const std::tuple<Types...> &tuple, F func) { GC::__tuple_router<sizeof...(Types), Types...>::__route(tuple, func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Types...>::value;
+
+		template<typename F>
+		static void route(const std::tuple<Types...> &tuple, F func)
+		{
+			GC::__tuple_router<sizeof...(Types), Types...>::__route(tuple, func);
+		}
 	};
 
 	template<typename T, typename Deleter>
 	struct router<std::unique_ptr<T, Deleter>>
 	{
-		template<typename F> static void route(const std::unique_ptr<T, Deleter> &obj, F func) { if (obj) GC::route(*obj, func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::unique_ptr<T, Deleter> &obj, F func)
+		{
+			if (obj) GC::route(*obj, func);
+		}
 	};
 
 	template<typename T>
@@ -794,79 +856,170 @@ public: // -- stdlib container router specializations -- //
 	template<typename T, std::size_t N>
 	struct router<std::array<T, N>>
 	{
-		template<typename F> static void route(const std::array<T, N> &arr, F func) { GC::route_range(arr.begin(), arr.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::array<T, N> &arr, F func)
+		{
+			GC::route_range(arr.begin(), arr.end(), func);
+		}
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::vector<T, Allocator>>
 	{
-		template<typename F> static void route(const std::vector<T, Allocator> &vec, F func) { GC::route_range(vec.begin(), vec.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::vector<T, Allocator> &vec, F func)
+		{
+			GC::route_range(vec.begin(), vec.end(), func);
+		}
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::deque<T, Allocator>>
 	{
-		template<typename F> static void route(const std::deque<T, Allocator> &deque, F func) { route_range(deque.begin(), deque.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::deque<T, Allocator> &deque, F func)
+		{
+			route_range(deque.begin(), deque.end(), func);
+		}
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::forward_list<T, Allocator>>
 	{
-		template<typename F> static void route(const std::forward_list<T, Allocator> &list, F func) { route_range(list.begin(), list.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::forward_list<T, Allocator> &list, F func)
+		{
+			route_range(list.begin(), list.end(), func);
+		}
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::list<T, Allocator>>
 	{
-		template<typename F> static void route(const std::list<T, Allocator> &list, F func) { route_range(list.begin(), list.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::list<T, Allocator> &list, F func)
+		{
+			route_range(list.begin(), list.end(), func);
+		}
 	};
 	
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<std::set<Key, Compare, Allocator>>
 	{
-		template<typename F> static void route(const std::set<Key, Compare, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
+		template<typename F>
+		static void route(const std::set<Key, Compare, Allocator> &set, F func)
+		{
+			route_range(set.begin(), set.end(), func);
+		}
 	};
 
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<std::multiset<Key, Compare, Allocator>>
 	{
-		template<typename F> static void route(const std::multiset<Key, Compare, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
+		template<typename F>
+		static void route(const std::multiset<Key, Compare, Allocator> &set, F func)
+		{
+			route_range(set.begin(), set.end(), func);
+		}
 	};
 
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<std::map<Key, T, Compare, Allocator>>
 	{
-		template<typename F> static void route(const std::map<Key, T, Compare, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
+		template<typename F>
+		static void route(const std::map<Key, T, Compare, Allocator> &map, F func)
+		{
+			route_range(map.begin(), map.end(), func);
+		}
 	};
 
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<std::multimap<Key, T, Compare, Allocator>>
 	{
-		template<typename F> static void route(const std::multimap<Key, T, Compare, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
+		template<typename F>
+		static void route(const std::multimap<Key, T, Compare, Allocator> &map, F func)
+		{
+			route_range(map.begin(), map.end(), func);
+		}
 	};
 
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
 	{
-		template<typename F> static void route(const std::unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
+		template<typename F>
+		static void route(const std::unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func)
+		{
+			route_range(set.begin(), set.end(), func);
+		}
 	};
 
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 	{
-		template<typename F> static void route(const std::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func) { route_range(set.begin(), set.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
+		template<typename F>
+		static void route(const std::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func)
+		{
+			route_range(set.begin(), set.end(), func);
+		}
 	};
 
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 	{
-		template<typename F> static void route(const std::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
+		template<typename F>
+		static void route(const std::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, F func)
+		{
+			route_range(map.begin(), map.end(), func);
+		}
 	};
 
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 	{
-		template<typename F> static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func) { route_range(map.begin(), map.end(), func); }
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
+		template<typename F>
+		static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func)
+		{
+			route_range(map.begin(), map.end(), func);
+		}
 	};
 
 private: // -- std adapter internal container access functions -- //
@@ -925,6 +1078,7 @@ private: // -- aligned raw memory allocators -- //
 	// this is more space-efficient than active alignment, but can only be used for certain types.
 	struct __passive_aligned_allocator
 	{
+		// allocated size bytes - returns null on failure - no exceptions
 		static void *alloc(std::size_t size) { return std::malloc(size); }
 		static void dealloc(void *p) { std::free(p); }
 	};
@@ -934,14 +1088,16 @@ private: // -- aligned raw memory allocators -- //
 	template<std::size_t align>
 	struct __active_aligned_allocator
 	{
+		// allocated size bytes - returns null on failure - no exceptions
 		static void *alloc(std::size_t size) { return GC::aligned_malloc(size, align); }
 		static void dealloc(void *p) { GC::aligned_free(p); }
 	};
 
-	// wrapper for an allocator that additionally performs gc-specific logic
+	// wrapper for an allocator that additionally performs gc-specific logic.
 	template<typename allocator_t>
 	struct __checked_allocator
 	{
+		// allocates size bytes - throws std::bad_alloc on failure
 		static void *alloc(std::size_t size)
 		{
 			// allocate the space
@@ -988,6 +1144,7 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		// use lambda to conveniently create the set of all router functions for type T
 		auto router_set = [](info &handle, auto func) { GC::route(*reinterpret_cast<element_type*>(handle.obj), func); };
 
 		static const info_vtable _vtable(
@@ -1052,6 +1209,7 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		// use lambda to conveniently create the set of all router functions for type T
 		auto router_set = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<scalar_type*>(handle.obj)[i], func); };
 
 		static const info_vtable _vtable(
@@ -1118,7 +1276,7 @@ public: // -- ptr allocation -- //
 	template<typename T, std::enable_if_t<GC::is_bound_array<T>::value, int> = 0>
 	static ptr<T> make()
 	{
-		// create it with the dynamic array form and reinterpret it to normal array form
+		// create it with the unbound array form and reinterpret it to the bound array form
 		return reinterpretCast<T>(make<std::remove_extent_t<T>[]>(std::extent<T>::value));
 	}
 
@@ -1140,6 +1298,7 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		// use lambda to conveniently create the set of all router functions for type T
 		auto router_set = [](info &handle, auto func) { GC::route(*reinterpret_cast<T*>(handle.obj), func); };
 
 		static const info_vtable _vtable(
@@ -1194,6 +1353,7 @@ public: // -- ptr allocation -- //
 
 		// -- create the vtable -- //
 
+		// use lambda to conveniently create the set of all router functions for type T
 		auto router_set = [](info &handle, auto func) { for (std::size_t i = 0; i < handle.count; ++i) GC::route(reinterpret_cast<T*>(handle.obj)[i], func); };
 
 		static const info_vtable _vtable(
@@ -1428,6 +1588,9 @@ public: // -- mutable std wrappers -- //
 	template<typename T, typename Deleter>
 	struct router<GC::unique_ptr<T, Deleter>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
 		template<typename F>
 		static void route(const GC::unique_ptr<T, Deleter> &obj, F func)
 		{
@@ -1826,6 +1989,9 @@ public: // -- mutable std wrappers -- //
 	template<typename T, typename Allocator>
 	struct router<GC::vector<T, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
 		template<typename F>
 		static void route(const GC::vector<T, Allocator> &vec, F func)
 		{
@@ -2198,6 +2364,9 @@ public: // -- mutable std wrappers -- //
 	template<typename T, typename Allocator>
 	struct router<GC::deque<T, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
 		template<typename F>
 		static void route(const GC::deque<T, Allocator> &vec, F func)
 		{
@@ -2685,6 +2854,9 @@ public: // -- mutable std wrappers -- //
 	template<typename T, typename Allocator>
 	struct router<GC::forward_list<T, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
 		template<typename F>
 		static void route(const GC::forward_list<T, Allocator> &list, F func)
 		{
@@ -3207,6 +3379,9 @@ public: // -- mutable std wrappers -- //
 	template<typename T, typename Allocator>
 	struct router<GC::list<T, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
 		template<typename F>
 		static void route(const GC::list<T, Allocator> &list, F func)
 		{
@@ -3581,6 +3756,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<GC::set<Key, Compare, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
 		template<typename F>
 		static void route(const GC::set<Key, Compare, Allocator> &set, F func)
 		{
@@ -3952,6 +4130,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<GC::multiset<Key, Compare, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
 		template<typename F>
 		static void route(const GC::multiset<Key, Compare, Allocator> &set, F func)
 		{
@@ -4411,6 +4592,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<GC::map<Key, T, Compare, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
 		template<typename F>
 		static void route(const GC::map<Key, T, Compare, Allocator> &map, F func)
 		{
@@ -4801,6 +4985,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<GC::multimap<Key, T, Compare, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
 		template<typename F>
 		static void route(const GC::multimap<Key, T, Compare, Allocator> &multimap, F func)
 		{
@@ -5217,6 +5404,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<GC::unordered_set<Key, Hash, KeyEqual, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
 		template<typename F>
 		static void route(const GC::unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func)
 		{
@@ -5632,6 +5822,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<GC::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = has_trivial_router<Key>::value;
+
 		template<typename F>
 		static void route(const GC::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func)
 		{
@@ -6133,6 +6326,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<GC::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
 		template<typename F>
 		static void route(const GC::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, F func)
 		{
@@ -6563,6 +6759,9 @@ public: // -- mutable std wrappers -- //
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<GC::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 	{
+		// a container's router is trivial if its contents are trivial
+		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
+
 		template<typename F>
 		static void route(const GC::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func)
 		{
