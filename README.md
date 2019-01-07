@@ -9,6 +9,7 @@ With `cpp-gc` in place, all you'd need to do to fix the above example is change 
 Contents:
 
 * [How It Works](#how-it-works)
+* [Guarantees](#guarantees)
 * [GC Strategy](#gc-strategy)
 * [Formal Definitions](#formal-definitions)
 * [Router Functions](#router-functions)
@@ -28,9 +29,24 @@ Contents:
 * `GC::adopt<T>(T*)` - Adopts a pre-existing object into gc control. Like the `T*` constructor of e.g. `std::shared_ptr<T>`.
 * `GC::collect()` - Triggers a full garbage collection pass *(see below)*.
 
-When you allocate an object via `GC::make<T>(Args...)` it creates a new garbage-collected object with a reference count of 1. Just like `std::shared_ptr`, it will automatically manage the reference count and delete the object **immediately** when the reference count hits zero. What does this mean? Well this means if `std::shared_ptr` worked for you before, it'll work for you now exactly the same *(though a bit slower due to having extra things to manage)*.
+When you allocate an object via `GC::make<T>` or bind a pre-existing object with `GC::adopt<T>` it creates a new garbage-collected object with a reference count of 1. Just like `std::shared_ptr`, it will automatically manage the reference count and delete the object **immediately** when the reference count hits zero *(except in one case - see [Guarantees](#guarantees))*. What does this mean? Well this means if `std::shared_ptr` worked for you before, it'll work for you now exactly the same *(though a bit slower due to having extra things to manage)*.
 
 `GC::collect()` triggers a full garbage collection pass, which accounts for cycles using the typical mark-and-sweep algorithm. This is rather slow compared to the other method `cpp-gc` uses to manage non-cyclic references, but is required if you do in fact have cycles. So when should you call it? Probably never. I'll explain:
+
+## Guarantees
+
+The following guarantees are made for all objects under gc control assuming all objects present have cpp-gc compliant router functions (see below) and are not destroyed by external code:
+
+* Adding an object to gc control (i.e. `GC::make<T>` or `GC::adopt<T>`) offers the strong exception guarantee and is O(1).
+* Once under gc control, the object shall not be relocated - i.e. raw pointers to said object will never be invalidated.
+* The allocating form of gc object insertion (i.e. `GC::make<T>`) shall allocate a block of memory suitably aligned for type `T` even if `T` is an overaligned type.
+* Any function or utility exposed by the cpp-gc interface is written in such a way that deadlocks are impossible under any circumstance.
+* Invoking a garbage collection (i.e. `GC::collect()`) while another garbage collection is running in any thread is non-blocking and indeed no-op.
+* A reference count shall be maintained for each object under gc control. When this reference count reaches zero the object is immediately deleted unless it is currently under collection consideration by an active call to `GC::collect()`, in which case the object is guaranteed to be destroyed before the end of said call to `GC::collect()`.
+
+Given the same assumptions of objects under gc control, the following (non-)guarantees are made by cpp-gc:
+
+* The thread that destroys an object under gc control is undefined. If your object requires the same thread that made it to destroy it (e.g. `std::unique_lock<std::mutex>`), it should not be used directly by cpp-gc.
 
 ## GC Strategy
 
@@ -215,7 +231,7 @@ struct TreeNode
 template<> struct GC::router<TreeNode>
 {
     // the "normal" router function
-    static void route(const TreeNode &node, router_fn func)
+    static void route(const TreeNode &node, GC::router_fn func)
     {
         // route to our GC::ptr instances
         GC::route(node.left, func);
@@ -223,7 +239,7 @@ template<> struct GC::router<TreeNode>
         // no need to route to anything else
     }
     // the "mutable" router function
-    static void route(const TreeNode &node, mutable_router_fn) {}
+    static void route(const TreeNode &node, GC::mutable_router_fn) {}
 };
 ```
 
@@ -340,7 +356,9 @@ public:
 };
 template<> struct GC::router<MaybeTreeNode>
 {
-    static void route(const MaybeTreeNode &maybe, GC::router_fn func)
+    // serves as both the "normal" and "mutable" router functions via templating
+    template<typename F>
+    static void route(const MaybeTreeNode &maybe, F func)
     {
         // this must be synchronized with constructing/destucting the buffer object.
         std::lock_guard<std::mutex> lock(maybe.buf_mutex);
