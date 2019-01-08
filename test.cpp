@@ -394,6 +394,24 @@ struct bool_alerter
 
 
 
+// runs statement and asserts that it throws the right type of exception
+#define assert_throws(statement, exception) \
+try { statement; std::cerr << "did not throw\n"; assert(false); } \
+catch (const exception&) {} \
+catch (...) { std::cerr << "threw wrong type\n"; assert(false); }
+
+// runs statement and asserts that it throws (anything)
+#define assert_throws_any(statement) \
+try { statement; std::cerr << "did no throw\n"; assert(false); } \
+catch (...) {}
+
+// runs statement and asserts that it doesn't throw (anything)
+#define assert_nothrow(statement) \
+try { statement; } \
+catch (...) { std::cerr << "threw an exception\n"; assert(false); }
+
+
+
 int main() try
 {
 	GC::strategy(GC::strategies::manual);
@@ -458,6 +476,25 @@ int main() try
 	std::cerr << "-------- collect 2 --------\n";
 	GC::collect();
 	std::cerr << "-------- end --------\n\n";
+
+
+	#if DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS
+	{
+		derived *d = new derived;
+		base1 *b1 = new base1;
+		base2 *b2 = new base2;
+
+		assert_nothrow(GC::adopt(d));
+		assert_nothrow(GC::adopt(b1));
+		assert_nothrow(GC::adopt(b2));
+
+		base1 *d_b1 = new derived;
+		base2 *d_b2 = new derived;
+
+		assert_throws(GC::adopt(d_b1), std::invalid_argument);
+		assert_throws(GC::adopt(d_b2), std::invalid_argument);
+	}
+	#endif
 
 
 	GC::ptr<atomic_container> atomic_container_obj = GC::make<atomic_container>();

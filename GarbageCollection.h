@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <cassert>
 #include <cstddef>
+#include <typeinfo>
 
 #include <memory>
 #include <tuple>
@@ -43,6 +44,13 @@
 // increasing numbers imply newer versions of C++ standard.
 // C++11 = 11, C++14 = 14, C++17 = 17, C++20 = 20
 #define DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID 14
+
+// controls if extra undefined behavior checks are performed at runtime for user-level code.
+// these help safeguard some common und cases at the expense of runtime performance.
+// however, if you're sure you never invoke undefined behavior, disabling these could give more performant code.
+// at the very least i suggest leaving them on during development and for testing.
+// non-zero enables these additional checks - zero disables them.
+#define DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS 1
 
 // ------------------- //
 
@@ -1280,9 +1288,12 @@ public: // -- ptr allocation -- //
 		return reinterpretCast<T>(make<std::remove_extent_t<T>[]>(std::extent<T>::value));
 	}
 
-	// adopts a pre-existing scalar instance of T that is, after this call, bound to a ptr.
-	// throws any exception resulting from failed memory allocation - in this case the object is deleted.
-	// if obj is null, does nothing and returns a null ptr object.
+	// adopts a pre-existing (dynamic) scalar instance of T that is after this call bound to a ptr for management.
+	// throws any exception resulting from failed memory allocation.
+	// if an exception is thrown, obj is destroyed by the deleter.
+	// if obj is null, does nothing and returns a null ptr object (which does not refer to an object).
+	// it is UNDEFINED BEHAVIOR for obj to not have a true object type of T - e.g. obj must not be pointer to base.
+	// if EXTRA_UND_CHECKS is enabled and T is a polymorphic type, throws std::invalid_argument if this is violated.
 	template<typename T, typename Deleter = std::default_delete<T>>
 	static ptr<T> adopt(T *obj)
 	{
@@ -1290,6 +1301,24 @@ public: // -- ptr allocation -- //
 
 		// if obj is null, return an null ptr
 		if (!obj) return {};
+
+		// und for obj to not be of type T - this is because we need the object's real router functions.
+		// otherwise we'd be using the wrong router functions and lead to undefined behavior.
+		// if T is polymorphic we can chech that now - otherwise is left as undefined behavior.
+		#if DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS
+
+		#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
+		if constexpr (std::is_polymorphic<T>::value)
+		#endif
+		{
+			if (typeid(*obj) != typeid(T))
+			{
+				Deleter()(obj);
+				throw std::invalid_argument("UND: obj was pointer to base");
+			}
+		}
+
+		#endif
 
 		// -- normalize T -- //
 
@@ -1335,9 +1364,11 @@ public: // -- ptr allocation -- //
 		return res;
 	}
 
-	// adopts a pre-existing dynamic array of T that is, after this call, bount to a ptr.
-	// throws any expection resulting from failed memory allocation - in this case the objects are deleted.
-	// if obj is null, does nothing and returns a null ptr object.
+	// adopts a pre-existing (dynamic) array of T that is after this call bound to a ptr for management.
+	// throws any expection resulting from failed memory allocation.
+	// if an exception is thrown, the array is destroyed by the deleter.
+	// if obj is null, does nothing and returns a null ptr object (which does not refer to an object).
+	// otherwise obj must point to a valid array of exactly size count (no more, no less).
 	template<typename T, typename Deleter = std::default_delete<T[]>>
 	static ptr<T[]> adopt(T *obj, std::size_t count)
 	{

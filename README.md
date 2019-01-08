@@ -379,6 +379,7 @@ In this section, we'll cover all the cases that result in undefined behavior and
 * Routing to the same object twice during the same router event - depending on what the router event is trying to do, this could cause all sorts of problems.
 * Not making your router function mutually explusive with re-pointing or adding/removing/etc things you would route to - explained in immense detail above.
 * Accessing the pointed-to object of a `ptr<T>` in the destructor of its (potentially-indirect) owner - you and the pointed-to object might have been scheduled for garbage collection together and the order of destruction by the garbage collector is undefined, so it might already have been destroyed.
+* Using `GC::adopt(T *obj)` where obj is not an instance of `T` - e.g. obj must not be pointer to base. This is because `GC::adopt()` needs the true type of the object to get its router functions. Thus if `T` is not the true type it would be using the wrong router functions and result in undefined behavior.
 
 ## Usage Examples
 
