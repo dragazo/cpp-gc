@@ -461,13 +461,6 @@ int main() try
 		}
 	}
 
-	static_assert(std::is_same<double, GC::iterator_deref_type<std::unordered_set<double>::iterator>>::value, "");
-	static_assert(std::is_same<double, GC::iterator_deref_type<std::set<double>::iterator>>::value, "");
-	static_assert(std::is_same<double, GC::iterator_deref_type<std::vector<double>::iterator>>::value, "");
-	static_assert(std::is_same<double, GC::iterator_deref_type<std::deque<double>::iterator>>::value, "");
-	static_assert(std::is_same<double, GC::iterator_deref_type<std::list<double>::iterator>>::value, "");
-	static_assert(std::is_same<double, GC::iterator_deref_type<std::forward_list<double>::iterator>>::value, "");
-
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<char>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<double>::value, "trivial assumption failure");

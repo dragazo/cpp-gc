@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cstddef>
 #include <typeinfo>
+#include <iterator>
 
 #include <memory>
 #include <tuple>
@@ -63,28 +64,22 @@
 template<typename ...Lockable>
 class __gc_scoped_lock
 {
-private: // -- helpers -- //
-
-	// performs the unlocking step for our custom scoped_lock impl.
-	// Len is the length of the current T... slice (initially sizeof...(T)).
-	template<std::size_t Len, typename ...T>
-	struct unlocker
-	{
-		static void unlock(const std::tuple<T&...> &t)
-		{
-			std::get<Len - 1>(t).unlock();
-			unlocker<Len - 1, T...>::unlock(t);
-		}
-	};
-	template<typename ...T>
-	struct unlocker<0, T...>
-	{
-		static void unlock(const std::tuple<T&...> &t) {}
-	};
-
 private: // -- data -- //
 
 	std::tuple<Lockable&...> locks;
+
+private: // -- helpers -- //
+
+	// unlocks the mutex with index I and recurses to I+1.
+	// I defaults to 0, so unlock() will unlock all mutexes in order of increasing index.
+	template<std::size_t I = 0>
+	void unlock()
+	{
+		std::get<I>(locks).unlock();
+		unlock<I + 1>();
+	}
+	template<>
+	void unlock<sizeof...(Lockable)>() {}
 
 public: // -- ctor / dtor / asgn -- //
 
@@ -97,7 +92,7 @@ public: // -- ctor / dtor / asgn -- //
 
 	~__gc_scoped_lock()
 	{
-		unlocker<sizeof...(Lockable), Lockable...>::unlock(locks);
+		unlock();
 	}
 
 	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
@@ -114,7 +109,7 @@ public: // -- ctor / dtor / asgn -- //
 
 	explicit __gc_scoped_lock(Lockable &lockable) : lock(lockable)
 	{
-		lockable.lock();
+		lock.lock();
 	}
 	__gc_scoped_lock(std::adopt_lock_t, Lockable &lockable) : lock(lockable)
 	{}
@@ -277,14 +272,6 @@ public: // -- plural router intrinsics -- //
 	template<>
 	struct all_have_trivial_routers<> : std::true_type {};
 
-public: // -- user-level routing utilites helpers -- //
-
-	// given an iterator type Iter, gets the pure type (no cv-qualifiers and no reference) resulting from dereferencing it.
-	// this effectively gets the pure content type of its associated container.
-	// e.g. unordered_set<double>::iterator would yield double (rather than const double&).
-	template<typename Iter>
-	using iterator_deref_type = std::remove_cv_t<std::remove_reference_t<decltype(**(Iter*)nullptr)>>;
-	
 public: // -- user-level routing utilities -- //
 
 	// recursively routes to obj - should only be used inside router functions
@@ -298,12 +285,12 @@ public: // -- user-level routing utilities -- //
 	static void route(const T &obj, F func) {}
 
 	// recursively routes to each object in an iteration range - should only be used inside router functions
-	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<!has_trivial_router<iterator_deref_type<IterBegin>>::value && is_router_function_object<F>::value, int> = 0>
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<!has_trivial_router<typename std::iterator_traits<IterBegin>::value_type>::value && is_router_function_object<F>::value, int> = 0>
 	static void route_range(IterBegin begin, IterEnd end, F func)
 	{
 		for (; begin != end; ++begin) GC::route(*begin, func);
 	}
-	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<has_trivial_router<iterator_deref_type<IterBegin>>::value && is_router_function_object<F>::value, int> = 0>
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<has_trivial_router<typename std::iterator_traits<IterBegin>::value_type>::value && is_router_function_object<F>::value, int> = 0>
 	static void route_range(IterBegin begin, IterEnd end, F func) {}
 
 private: // -- private types -- //
