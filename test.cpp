@@ -412,8 +412,35 @@ catch (...) { std::cerr << "threw an exception\n"; assert(false); }
 
 
 
+// wraps type T but doesn't allow copy/move
+template<typename T>
+class stationary
+{
+public:
+	
+	T value;
+
+	template<typename ...Args>
+	stationary(Args &&...args) : value(std::forward<Args>(args)...) {}
+
+	stationary(const stationary&) = delete;
+	stationary &operator=(const stationary&) = delete;
+};
+template<typename T>
+struct GC::router<stationary<T>>
+{
+	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
+
+	template<typename F>
+	static void route(const stationary<T> &stat, F func) { GC::route(stat.value, func); }
+};
+
+
+
 int main() try
 {
+	const auto hcr_start = std::chrono::high_resolution_clock::now();
+
 	GC::strategy(GC::strategies::manual);
 	
 	{
@@ -433,6 +460,13 @@ int main() try
 			assert(flag);
 		}
 	}
+
+	static_assert(std::is_same<double, GC::iterator_deref_type<std::unordered_set<double>::iterator>>::value, "");
+	static_assert(std::is_same<double, GC::iterator_deref_type<std::set<double>::iterator>>::value, "");
+	static_assert(std::is_same<double, GC::iterator_deref_type<std::vector<double>::iterator>>::value, "");
+	static_assert(std::is_same<double, GC::iterator_deref_type<std::deque<double>::iterator>>::value, "");
+	static_assert(std::is_same<double, GC::iterator_deref_type<std::list<double>::iterator>>::value, "");
+	static_assert(std::is_same<double, GC::iterator_deref_type<std::forward_list<double>::iterator>>::value, "");
 
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<char>::value, "trivial assumption failure");
@@ -495,6 +529,10 @@ int main() try
 		assert_throws(GC::adopt(d_b2), std::invalid_argument);
 	}
 	#endif
+
+
+	GC::ptr<stationary<int>> stationary_test = GC::make<stationary<int>>(65);
+	stationary_test->value = 75;
 
 
 	GC::ptr<atomic_container> atomic_container_obj = GC::make<atomic_container>();
@@ -1018,12 +1056,10 @@ int main() try
 
 				GC::ptr<int> pi;
 
-				for (int i = 0; ; ++i)
+				for (int i = 0; i < 8192; ++i)
 				{
 					GC::ptr<int> temp = GC::make<int>(i);
 					pi = temp;
-
-					std::this_thread::sleep_for(std::chrono::milliseconds(2));
 				}
 
 				std::cerr << "printy\n";
@@ -1050,6 +1086,12 @@ int main() try
 		//t2.join();
 	}
 	/**/
+
+	const auto hcr_stop = std::chrono::high_resolution_clock::now();
+
+	std::cerr
+		<< "\n\nall tests completed successfully\nelapsed time: "
+		<< std::chrono::duration_cast<std::chrono::milliseconds>(hcr_stop - hcr_start).count() << " ms\n";
 
 	std::cin.get();
 	return 0;

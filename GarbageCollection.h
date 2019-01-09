@@ -166,11 +166,7 @@ private: // -- router function usage safety -- //
 	template<typename T>
 	struct is_router_function_object : GC::is_same_any<T, GC::router_fn, GC::mutable_router_fn> {};
 
-	// gets if T is a well-formed router function overload
-	template<typename T, typename F>
-	struct is_well_formed_router_function : GC::is_router_function_object<F> {};
-
-public: // -- router functions -- //
+public: // -- router function definitions -- //
 
 	// THE FOLLOWING INFORMATION IS CRITICAL FOR ANY USAGE OF THIS LIBRARY.
 
@@ -240,56 +236,75 @@ public: // -- router functions -- //
 		// defining this as true in any router<T> specialization marks it as trivial (more efficient algorithms).
 		// this is only safe iff ALL router functions in said specialization are no-op.
 		// otherwise it should be declared false or not declared at all (if not present, false is assumed).
+		// if set to true the router function(s) are ignored entirely (in fact, in this case they don't even need to exist).
 		static constexpr bool is_trivial = true;
-
-		// if this overload is selected, it implies T is a non-gc type - thus we don't need to route to anything
-		template<typename F> static void route(const T &obj, F func) {}
 	};
 
-	// recursively routes to obj - should only be used inside router functions
-	template<typename T, typename F, std::enable_if_t<GC::is_router_function_object<F>::value, int> = 0>
-	static void route(const T &obj, F func)
-	{
-		// make sure the underlying router function is valid
-		static_assert(GC::is_well_formed_router_function<T, F>::value, "underlying router function was ill-formed");
+private: // -- router intrinsics helpers -- //
 
-		// call the underlying router function
-		GC::router<std::remove_cv_t<T>>::route(obj, func);
-	}
-
-	// recursively routes to each object in an iteration range - should only be used inside router functions
-	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<GC::is_router_function_object<F>::value, int> = 0>
-	static void route_range(IterBegin begin, IterEnd end, F func) { for (; begin != end; ++begin) GC::route(*begin, func); }
-
-public: // -- router intrinsics -- //
-
-	// helper impl functions for router_is_trivial - do not use these directly
+	// helper impl functions for has_trivial_router - do not use these directly.
+	// given a router type, creates an overload set that, when passed nullptr, resolves to a single function.
+	// said function's return type denotes if the router has the is_trivial flag set to true.
+	// if the is_trivial flag is not present it is assumed to be false (i.e. assumed non-trivial).
 	template<typename R>
 	static std::false_type __returns_router_is_trivial(void*);
 
 	template<typename R, std::enable_if_t<R::is_trivial, int> = 0>
 	static std::true_type __returns_router_is_trivial(std::nullptr_t);
 
+public: // -- router intrinsics -- //
+
 	// returns a type representing if the router for T is trivial
 	template<typename T>
 	using has_trivial_router = decltype(__returns_router_is_trivial<router<std::remove_cv_t<T>>>(nullptr));
 
-private: // -- plural router intrinsics -- //
+private: // -- plural router intrinsics helpers -- //
 
 	// helper for all_have_trivial_routers - do not use this directly
-	template<typename R1, typename ...RN>
-	struct __all_have_trivial_routers : std::integral_constant<bool, has_trivial_router<R1>::value && __all_have_trivial_routers<RN...>::value> {};
-	
-	template<typename R>
-	struct __all_have_trivial_routers<R> : has_trivial_router<R> {};
+	template<typename T1, typename ...TN>
+	struct __all_have_trivial_routers : std::integral_constant<bool, has_trivial_router<T1>::value && __all_have_trivial_routers<TN...>::value> {};
+
+	template<typename T>
+	struct __all_have_trivial_routers<T> : has_trivial_router<T> {};
+
+public: // -- plural router intrinsics -- //
 
 	// returns a type representing if all R... are trivial routers.
 	// this is equivalent to (has_trivial_router<R>::value && ...) but doesn't require C++17 fold expressions.
-	template<typename ...R>
-	struct all_have_trivial_routers : __all_have_trivial_routers<R...> {};
+	template<typename ...Types>
+	struct all_have_trivial_routers : __all_have_trivial_routers<Types...> {};
 
 	template<>
 	struct all_have_trivial_routers<> : std::true_type {};
+
+public: // -- user-level routing utilites helpers -- //
+
+	// given an iterator type Iter, gets the pure type (no cv-qualifiers and no reference) resulting from dereferencing it.
+	// this effectively gets the pure content type of its associated container.
+	// e.g. unordered_set<double>::iterator would yield double (rather than const double&).
+	template<typename Iter>
+	using iterator_deref_type = std::remove_cv_t<std::remove_reference_t<decltype(**(Iter*)nullptr)>>;
+	
+public: // -- user-level routing utilities -- //
+
+	// recursively routes to obj - should only be used inside router functions
+	template<typename T, typename F, std::enable_if_t<!has_trivial_router<T>::value && is_router_function_object<F>::value, int> = 0>
+	static void route(const T &obj, F func)
+	{
+		// call the underlying router function - only required to be defined for non-trivial routers
+		GC::router<std::remove_cv_t<T>>::route(obj, func);
+	}
+	template<typename T, typename F, std::enable_if_t<has_trivial_router<T>::value && is_router_function_object<F>::value, int> = 0>
+	static void route(const T &obj, F func) {}
+
+	// recursively routes to each object in an iteration range - should only be used inside router functions
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<!has_trivial_router<iterator_deref_type<IterBegin>>::value && is_router_function_object<F>::value, int> = 0>
+	static void route_range(IterBegin begin, IterEnd end, F func)
+	{
+		for (; begin != end; ++begin) GC::route(*begin, func);
+	}
+	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<has_trivial_router<iterator_deref_type<IterBegin>>::value && is_router_function_object<F>::value, int> = 0>
+	static void route_range(IterBegin begin, IterEnd end, F func) {}
 
 private: // -- private types -- //
 
