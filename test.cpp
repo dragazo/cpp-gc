@@ -490,6 +490,16 @@ int main() try
 	static_assert(!GC::has_trivial_router<std::pair<int, GC::ptr<int>>>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<std::tuple<int, GC::ptr<int>>>::value, "trivial assumption failure");
 
+	// ---------------------------------
+
+	static_assert(std::is_same<GC::vector<bool>, std::vector<bool>>::value, "smart wrapper opt check");
+	static_assert(std::is_same<GC::vector<bool_alerter>, std::vector<bool_alerter>>::value, "smart wrapper opt check");
+	static_assert(std::is_same<GC::unique_ptr<long double>, std::unique_ptr<long double>>::value, "smart wrapper opt check");
+	static_assert(std::is_same<GC::unique_ptr<bool_alerter>, std::unique_ptr<bool_alerter>>::value, "smart wrapper opt check");
+	
+	static_assert(!std::is_same<GC::unique_ptr<TreeNode>, std::unique_ptr<TreeNode>>::value, "smart wrapper opt check");
+	static_assert(!std::is_same<GC::list<SymbolTable>, std::list<SymbolTable>>::value, "smart wrapper opt check");
+
 	std::cerr << "-------- ctors --------\n";
 	{
 		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
