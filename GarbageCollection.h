@@ -53,94 +53,19 @@
 // non-zero enables these additional checks - zero disables them.
 #define DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS 1
 
-// ------------------- //
+// -------------------------------- //
 
-// -- utility types -- //
+// -- utility types forward decl -- //
 
-// ------------------- //
+// -------------------------------- //
 
-// this is equivalent to std::scoped_lock - included here because it's really handy and is otherwise C++17 only.
-// you shouldn't use this type by name - you should refer to it by is alias in the GC class i.e. GC::scoped_lock.
+// don't use these directly - use their aliases in the GC class.
+// e.g. don't use __gc_vector, use GC::vector.
+
 template<typename ...Lockable>
-class __gc_scoped_lock
-{
-private: // -- data -- //
+class __gc_scoped_lock;
 
-	std::tuple<Lockable&...> locks;
-
-private: // -- helpers -- //
-
-	// unlocks the mutex with index I and recurses to I+1.
-	// I defaults to 0, so unlock() will unlock all mutexes in order of increasing index.
-	template<std::size_t I = 0>
-	void unlock()
-	{
-		std::get<I>(locks).unlock();
-		unlock<I + 1>();
-	}
-	template<>
-	void unlock<sizeof...(Lockable)>() {}
-
-public: // -- ctor / dtor / asgn -- //
-
-	explicit __gc_scoped_lock(Lockable &...lockable) : locks(lockable...)
-	{
-		std::lock(lockable...);
-	}
-	__gc_scoped_lock(std::adopt_lock_t, Lockable &...lockable) : locks(lockable...)
-	{}
-
-	~__gc_scoped_lock()
-	{
-		unlock();
-	}
-
-	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
-	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
-};
-template<typename Lockable>
-class __gc_scoped_lock<Lockable>
-{
-private: // -- data -- //
-
-	Lockable &lock; // the (single) lockable object
-
-public: // -- ctor / dtor / asgn -- //
-
-	explicit __gc_scoped_lock(Lockable &lockable) : lock(lockable)
-	{
-		lock.lock();
-	}
-	__gc_scoped_lock(std::adopt_lock_t, Lockable &lockable) : lock(lockable)
-	{}
-
-	~__gc_scoped_lock()
-	{
-		lock.unlock();
-	}
-
-	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
-	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
-};
-template<>
-class __gc_scoped_lock<>
-{
-public: // -- ctor / dtor / asgn -- //
-
-	explicit __gc_scoped_lock() = default;
-	__gc_scoped_lock(std::adopt_lock_t) {}
-
-	~__gc_scoped_lock() = default;
-
-	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
-	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
-};
-
-// ---------------------------------- //
-
-// -- gc wrapper impl forward decl -- //
-
-// ---------------------------------- //
+// ----------------------------------------------------
 
 template<typename T, typename Deleter>
 class __gc_unique_ptr;
@@ -198,7 +123,7 @@ private: // -- router function usage safety -- //
 
 	// defines if T is a router function object type - facilitates a type safety mechanism for GC::route().
 	template<typename T>
-	struct is_router_function_object : GC::is_same_any<T, GC::router_fn, GC::mutable_router_fn> {};
+	using is_router_function_object = GC::is_same_any<T, GC::router_fn, GC::mutable_router_fn>;
 
 public: // -- router function definitions -- //
 
@@ -264,8 +189,8 @@ public: // -- router function definitions -- //
 	template<typename T>
 	struct router
 	{
-		// make sure we don't accidentally select a cv-qualified default implementation
-		static_assert(std::is_same<T, std::remove_cv_t<T>>::value, "router type T must not be cv-qualified");
+		// make sure we don't accidentally select a cv/ref-qualified default implementation
+		static_assert(std::is_same<T, std::remove_cv_t<std::remove_reference_t<T>>>::value, "router type T must not be cv/ref-qualified");
 
 		// defining this as true in any router<T> specialization marks it as trivial (more efficient algorithms).
 		// this is only safe iff ALL router functions in said specialization are no-op.
@@ -274,40 +199,46 @@ public: // -- router function definitions -- //
 		static constexpr bool is_trivial = true;
 	};
 
-private: // -- router intrinsics helpers -- //
-
-	// helper impl functions for has_trivial_router - do not use these directly.
-	// given a router type, creates an overload set that, when passed nullptr, resolves to a single function.
-	// said function's return type denotes if the router has the is_trivial flag set to true.
-	// if the is_trivial flag is not present it is assumed to be false (i.e. assumed non-trivial).
-	template<typename R>
-	static std::false_type __returns_router_is_trivial(void*);
-
-	template<typename R, std::enable_if_t<R::is_trivial, int> = 0>
-	static std::true_type __returns_router_is_trivial(std::nullptr_t);
-
 public: // -- router intrinsics -- //
 
-	// returns a type representing if the router for T is trivial
+	// get's if T's router is defined as trivial (i.e. this is true iff T is not a gc type).
+	// if T's router defines is_trivial to true, this value is true.
+	// if T's router defines is_trivial to false or does not define it at all, this value is false.
 	template<typename T>
-	using has_trivial_router = decltype(__returns_router_is_trivial<router<std::remove_cv_t<T>>>(nullptr));
+	struct has_trivial_router
+	{
+	private: // -- helpers -- //
 
-private: // -- plural router intrinsics helpers -- //
+		// given a router type, creates an overload set that, when passed nullptr, resolves to a single function.
+		// said function's return type denotes the proper value.
+		template<typename R>
+		static std::false_type __returns_router_is_trivial(void*);
 
-	// helper for all_have_trivial_routers - do not use this directly
-	template<typename T1, typename ...TN>
-	struct __all_have_trivial_routers : std::integral_constant<bool, has_trivial_router<T1>::value && __all_have_trivial_routers<TN...>::value> {};
+		template<typename R, std::enable_if_t<R::is_trivial, int> = 0>
+		static std::true_type __returns_router_is_trivial(std::nullptr_t);
 
-	template<typename T>
-	struct __all_have_trivial_routers<T> : has_trivial_router<T> {};
+	public: // -- public stuff -- //
 
-public: // -- plural router intrinsics -- //
+		static constexpr bool value = decltype(__returns_router_is_trivial<router<std::remove_cv_t<std::remove_reference_t<T>>>>(nullptr))::value;
+	};
 
-	// returns a type representing if all R... are trivial routers.
-	// this is equivalent to (has_trivial_router<R>::value && ...) but doesn't require C++17 fold expressions.
+	// gets if all Types... are defined as trivial (i.e. this is true iff all the types are non-gc types).
+	// if no types are given, the value is true (i.e. nothing is trivial).
+	// equivalent to the C++17 fold expression (has_trivial_router<Types>::value && ...).
 	template<typename ...Types>
-	struct all_have_trivial_routers : __all_have_trivial_routers<Types...> {};
+	struct all_have_trivial_routers
+	{
+	private: // -- helpers -- //
 
+		// performs the fold expression by stripping off the first type recursively.
+		// you should pass Types... to this to get the proper value.
+		template<typename T1, typename ...TN>
+		static constexpr bool helper_v = has_trivial_router<T1>::value && all_have_trivial_routers<TN...>::value;
+
+	public: // -- public stuff -- //
+
+		static constexpr bool value = helper_v<Types...>;
+	};
 	template<>
 	struct all_have_trivial_routers<> : std::true_type {};
 
@@ -692,7 +623,6 @@ public: // -- ptr -- //
 	public: // -- ctor / dtor / asgn -- //
 
 		atomic_ptr() = default;
-
 		~atomic_ptr() = default;
 
 		atomic_ptr(const atomic_ptr&) = delete;
@@ -810,13 +740,12 @@ public: // -- C-style array router specializations -- //
 	template<typename T, std::size_t N>
 	struct router<T[N]>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<T>::value;
 
 		template<typename F>
 		static void route(const T(&objs)[N], F func)
 		{
-			for (std::size_t i = 0; i < N; ++i) GC::route(objs[i], func);
+			for (const T &i : objs) GC::route(i, func);
 		}
 	};
 
@@ -827,34 +756,23 @@ public: // -- C-style array router specializations -- //
 		// intentionally left blank - we don't know the extent, so we can't route to its contents
 	};
 
-private: // -- tuple routing helpers -- //
+public: // -- stdlib misc router specializations -- //
 
-	// recursively routes to all elements of a tuple with ordinal indicies [0, Len)
-	template<std::size_t Len, typename ...Types>
-	struct __tuple_router
+	template<typename T, std::size_t N>
+	struct router<std::array<T, N>>
 	{
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
 		template<typename F>
-		static void __route(const std::tuple<Types...> &tuple, F func)
+		static void route(const std::array<T, N> &arr, F func)
 		{
-			GC::route(std::get<Len - 1>(tuple), func);
-			__tuple_router<Len - 1, Types...>::__route(tuple, func);
+			GC::route_range(arr.begin(), arr.end(), func);
 		}
 	};
-
-	// base case - does nothing
-	template<typename ...Types>
-	struct __tuple_router<0, Types...>
-	{
-		template<typename F>
-		static void __route(const std::tuple<Types...> &tuple, F func) {}
-	};
-
-public: // -- stdlib misc router specializations -- //
 
 	template<typename T1, typename T2>
 	struct router<std::pair<T1, T2>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = all_have_trivial_routers<T1, T2>::value;
 
 		template<typename F>
@@ -868,26 +786,27 @@ public: // -- stdlib misc router specializations -- //
 	template<typename ...Types>
 	struct router<std::tuple<Types...>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = all_have_trivial_routers<Types...>::value;
+
+		template<typename F>
+		struct helper
+		{
+			// routes to tuple with index I and recurses to I + 1.
+			// as I defaults to 0, route() will route to all tuple elements in order of increasing index.
+			template<std::size_t I = 0>
+			static void route(const std::tuple<Types...> &tuple, F func)
+			{
+				GC::route(std::get<I>(tuple), func);
+				route<I + 1>(tuple, func);
+			}
+			template<>
+			static void route<sizeof...(Types)>(const std::tuple<Types...> &tuple, F func) {}
+		};
 
 		template<typename F>
 		static void route(const std::tuple<Types...> &tuple, F func)
 		{
-			GC::__tuple_router<sizeof...(Types), Types...>::__route(tuple, func);
-		}
-	};
-
-	template<typename T, typename Deleter>
-	struct router<std::unique_ptr<T, Deleter>>
-	{
-		// a container's router is trivial if its contents are trivial
-		static constexpr bool is_trivial = has_trivial_router<T>::value;
-
-		template<typename F>
-		static void route(const std::unique_ptr<T, Deleter> &obj, F func)
-		{
-			if (obj) GC::route(*obj, func);
+			helper<F>::route(tuple, func);
 		}
 	};
 
@@ -900,25 +819,21 @@ public: // -- stdlib misc router specializations -- //
 
 public: // -- stdlib container router specializations -- //
 
-	// source https://en.cppreference.com/w/cpp/container
-
-	template<typename T, std::size_t N>
-	struct router<std::array<T, N>>
+	template<typename T, typename Deleter>
+	struct router<std::unique_ptr<T, Deleter>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<T>::value;
 
 		template<typename F>
-		static void route(const std::array<T, N> &arr, F func)
+		static void route(const std::unique_ptr<T, Deleter> &obj, F func)
 		{
-			GC::route_range(arr.begin(), arr.end(), func);
+			if (obj) GC::route(*obj, func);
 		}
 	};
 
 	template<typename T, typename Allocator>
 	struct router<std::vector<T, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<T>::value;
 
 		template<typename F>
@@ -931,7 +846,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename T, typename Allocator>
 	struct router<std::deque<T, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<T>::value;
 
 		template<typename F>
@@ -944,7 +858,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename T, typename Allocator>
 	struct router<std::forward_list<T, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<T>::value;
 
 		template<typename F>
@@ -957,7 +870,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename T, typename Allocator>
 	struct router<std::list<T, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<T>::value;
 
 		template<typename F>
@@ -970,7 +882,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<std::set<Key, Compare, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<Key>::value;
 
 		template<typename F>
@@ -983,7 +894,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename Compare, typename Allocator>
 	struct router<std::multiset<Key, Compare, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<Key>::value;
 
 		template<typename F>
@@ -996,7 +906,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<std::map<Key, T, Compare, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
 
 		template<typename F>
@@ -1009,7 +918,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename T, typename Compare, typename Allocator>
 	struct router<std::multimap<Key, T, Compare, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
 
 		template<typename F>
@@ -1022,7 +930,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<Key>::value;
 
 		template<typename F>
@@ -1035,7 +942,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = has_trivial_router<Key>::value;
 
 		template<typename F>
@@ -1048,7 +954,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
 
 		template<typename F>
@@ -1061,7 +966,6 @@ public: // -- stdlib container router specializations -- //
 	template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 	struct router<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 	{
-		// a container's router is trivial if its contents are trivial
 		static constexpr bool is_trivial = all_have_trivial_routers<Key, T>::value;
 
 		template<typename F>
@@ -1094,9 +998,11 @@ public: // -- std adapter routers -- //
 	template<typename T, typename Container>
 	struct router<std::stack<T, Container>>
 	{
+		static constexpr bool is_trivial = has_trivial_router<Container>::value;
+
 		template<typename F> static void route(const std::stack<T, Container> &stack, F func)
 		{
-			const auto &container = __get_adapter_container(stack);
+			const Container &container = __get_adapter_container(stack);
 			route_range(container.begin(), container.end(), func);
 		}
 	};
@@ -1104,9 +1010,11 @@ public: // -- std adapter routers -- //
 	template<typename T, typename Container>
 	struct router<std::queue<T, Container>>
 	{
+		static constexpr bool is_trivial = has_trivial_router<Container>::value;
+
 		template<typename F> static void route(const std::queue<T, Container> &queue, F func)
 		{
-			const auto &container = __get_adapter_container(queue);
+			const Container &container = __get_adapter_container(queue);
 			route_range(container.begin(), container.end(), func);
 		}
 	};
@@ -1114,9 +1022,11 @@ public: // -- std adapter routers -- //
 	template<typename T, typename Container, typename Compare>
 	struct router<std::priority_queue<T, Container, Compare>>
 	{
+		static constexpr bool is_trivial = has_trivial_router<Container>::value;
+
 		template<typename F> static void route(const std::priority_queue<T, Container, Compare> &pqueue, F func)
 		{
-			const auto &container = __get_adapter_container(pqueue);
+			const Container &container = __get_adapter_container(pqueue);
 			route_range(container.begin(), container.end(), func);
 		}
 	};
@@ -1124,10 +1034,9 @@ public: // -- std adapter routers -- //
 private: // -- aligned raw memory allocators -- //
 
 	// uses whatever default alignment the stdlib implementation uses (i.e. std::max_align_t).
-	// this is more space-efficient than active alignment, but can only be used for certain types.
+	// this is more space-efficient than active alignment, but can only be used for certain (most) types.
 	struct __passive_aligned_allocator
 	{
-		// allocated size bytes - returns null on failure - no exceptions
 		static void *alloc(std::size_t size) { return std::malloc(size); }
 		static void dealloc(void *p) { std::free(p); }
 	};
@@ -1137,16 +1046,29 @@ private: // -- aligned raw memory allocators -- //
 	template<std::size_t align>
 	struct __active_aligned_allocator
 	{
-		// allocated size bytes - returns null on failure - no exceptions
 		static void *alloc(std::size_t size) { return GC::aligned_malloc(size, align); }
 		static void dealloc(void *p) { GC::aligned_free(p); }
 	};
 
+	// helper function for aligned_allocator_t - do not use this directly
+	template<std::size_t align, std::enable_if_t<(align <= alignof(std::max_align_t)), int> = 0>
+	static __passive_aligned_allocator __returns_aligned_allocator_type();
+
+	template<std::size_t align, std::enable_if_t<(align > alignof(std::max_align_t)), int> = 0>
+	static __active_aligned_allocator<align> __returns_aligned_allocator_type();
+
+	// given zero or more alignment requirements, returns an allocator that is at least as strict as the most strict requirement.
+	// these allocators return null on allocation failure (no exceptions).
+	template<std::size_t ...align>
+	using aligned_allocator_t = decltype(__returns_aligned_allocator_type < std::max({ (std::size_t)1, align... }) > ());
+
+private: // -- checked allocators -- //
+
 	// wrapper for an allocator that additionally performs gc-specific logic.
+	// the allocator you provide must return null on allocation failure - must not throw.
 	template<typename allocator_t>
 	struct __checked_allocator
 	{
-		// allocates size bytes - throws std::bad_alloc on failure
 		static void *alloc(std::size_t size)
 		{
 			// allocate the space
@@ -1168,13 +1090,10 @@ private: // -- aligned raw memory allocators -- //
 		static void dealloc(void *p) { allocator_t::dealloc(p); }
 	};
 
-	// given a type T, returns the type of an aligned allocator that will give the most efficient proper alignment.
-	// these functions do not have definitions - they are meant to be used in decltype context.
-	template<std::size_t align, std::enable_if_t<(align <= alignof(std::max_align_t)), int> = 0>
-	static __checked_allocator<__passive_aligned_allocator> __returns_checked_aligned_allocator_type();
-
-	template<std::size_t align, std::enable_if_t<(align > alignof(std::max_align_t)), int> = 0>
-	static __checked_allocator<__active_aligned_allocator<align>> __returns_checked_aligned_allocator_type();
+	// given zero or more alignment requirements, returns an allocator that is at least as strict as the most strict requirement.
+	// these allocators throw std::bad_alloc on allocation failure.
+	template<std::size_t ...align>
+	using checked_aligned_allocator_t = __checked_allocator<aligned_allocator_t<align...>>;
 
 public: // -- ptr allocation -- //
 
@@ -1189,7 +1108,7 @@ public: // -- ptr allocation -- //
 		typedef std::remove_cv_t<T> element_type;
 		
 		// get the allocator
-		typedef decltype(__returns_checked_aligned_allocator_type<std::max(alignof(element_type), alignof(info))>()) allocator_t;
+		typedef checked_aligned_allocator_t<alignof(element_type), alignof(info)> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1209,8 +1128,8 @@ public: // -- ptr allocation -- //
 		void *const buf = allocator_t::alloc(sizeof(element_type) + sizeof(info));
 
 		// alias the buffer partitions
-		element_type *obj = reinterpret_cast<element_type*>(buf);
-		info         *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + sizeof(element_type));
+		element_type *const obj = reinterpret_cast<element_type*>(buf);
+		info         *const handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + sizeof(element_type));
 
 		// -- construct the object -- //
 
@@ -1254,7 +1173,7 @@ public: // -- ptr allocation -- //
 		const std::size_t scalar_count = count * GC::full_extent<T>::value;
 
 		// get the allocator
-		typedef decltype(__returns_checked_aligned_allocator_type<std::max(alignof(scalar_type), alignof(info))>()) allocator_t;
+		typedef checked_aligned_allocator_t<alignof(scalar_type), alignof(info)> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1274,8 +1193,8 @@ public: // -- ptr allocation -- //
 		void *const buf = allocator_t::alloc(scalar_count * sizeof(scalar_type) + sizeof(info));
 
 		// alias the buffer partitions
-		scalar_type *obj = reinterpret_cast<scalar_type*>(buf);
-		info        *handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + scalar_count * sizeof(scalar_type));
+		scalar_type *const obj = reinterpret_cast<scalar_type*>(buf);
+		info        *const handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + scalar_count * sizeof(scalar_type));
 
 		// -- construct the objects -- //
 
@@ -1302,7 +1221,6 @@ public: // -- ptr allocation -- //
 		}
 
 		// construct the info object
-		// the cast is safe because element_type is either scalar_type or bound array of scalar_type
 		new (handle) info(obj, scalar_count, &_vtable);
 		
 		// -- do the garbage collection aspects -- //
@@ -1364,7 +1282,7 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// get the allocator
-		typedef decltype(__returns_checked_aligned_allocator_type<alignof(info)>()) allocator_t;
+		typedef checked_aligned_allocator_t<alignof(info)> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1421,7 +1339,7 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// get the allocator
-		typedef decltype(__returns_checked_aligned_allocator_type<alignof(info)>()) allocator_t;
+		typedef checked_aligned_allocator_t<alignof(info)> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1976,11 +1894,88 @@ std::basic_ostream<U, V> &operator<<(std::basic_ostream<U, V> &ostr, const std::
 	return ostr;
 }
 
-// ---------------------------- //
+// ------------------------ //
 
-// -- container wrapper impl -- //
+// -- utility types impl -- //
 
-// ---------------------------- //
+// ------------------------ //
+
+template<typename ...Lockable>
+class __gc_scoped_lock
+{
+private: // -- data -- //
+
+	std::tuple<Lockable&...> locks;
+
+private: // -- helpers -- //
+
+	// unlocks the mutex with index I and recurses to I+1.
+	// I defaults to 0, so unlock() will unlock all mutexes in order of increasing index.
+	template<std::size_t I = 0>
+	void unlock()
+	{
+		std::get<I>(locks).unlock();
+		unlock<I + 1>();
+	}
+	template<>
+	void unlock<sizeof...(Lockable)>() {}
+
+public: // -- ctor / dtor / asgn -- //
+
+	explicit __gc_scoped_lock(Lockable &...lockable) : locks(lockable...)
+	{
+		std::lock(lockable...);
+	}
+	__gc_scoped_lock(std::adopt_lock_t, Lockable &...lockable) : locks(lockable...)
+	{}
+
+	~__gc_scoped_lock()
+	{
+		unlock();
+	}
+
+	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
+	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
+};
+template<typename Lockable>
+class __gc_scoped_lock<Lockable>
+{
+private: // -- data -- //
+
+	Lockable &lock; // the (single) lockable object
+
+public: // -- ctor / dtor / asgn -- //
+
+	explicit __gc_scoped_lock(Lockable &lockable) : lock(lockable)
+	{
+		lock.lock();
+	}
+	__gc_scoped_lock(std::adopt_lock_t, Lockable &lockable) : lock(lockable)
+	{}
+
+	~__gc_scoped_lock()
+	{
+		lock.unlock();
+	}
+
+	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
+	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
+};
+template<>
+class __gc_scoped_lock<>
+{
+public: // -- ctor / dtor / asgn -- //
+
+	explicit __gc_scoped_lock() = default;
+	__gc_scoped_lock(std::adopt_lock_t) {}
+
+	~__gc_scoped_lock() = default;
+
+	__gc_scoped_lock(const __gc_scoped_lock&) = delete;
+	__gc_scoped_lock &operator=(const __gc_scoped_lock&) = delete;
+};
+
+// -----------------------------------------------------------
 
 template<typename T, typename Deleter>
 class __gc_unique_ptr

@@ -495,6 +495,28 @@ int main() try
 	static_assert(!GC::has_trivial_router<GC::ptr<GC::ptr<self_ptr>>>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<std::pair<int, GC::ptr<int>>>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<std::tuple<int, GC::ptr<int>>>::value, "trivial assumption failure");
+	
+	// ---------------------------------
+
+	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
+	static_assert(GC::has_trivial_router<int&>::value, "trivial assumption failure");
+	static_assert(GC::has_trivial_router<int&&>::value, "trivial assumption failure");
+
+	static_assert(GC::has_trivial_router<const int>::value, "trivial assumption failure");
+	static_assert(GC::has_trivial_router<const int&>::value, "trivial assumption failure");
+	static_assert(GC::has_trivial_router<const int&&>::value, "trivial assumption failure");
+
+	static_assert(!GC::has_trivial_router<self_ptr>::value, "trivial assumption failure");
+	static_assert(!GC::has_trivial_router<self_ptr&>::value, "trivial assumption failure");
+	static_assert(!GC::has_trivial_router<self_ptr&&>::value, "trivial assumption failure");
+
+	static_assert(!GC::has_trivial_router<const self_ptr>::value, "trivial assumption failure");
+	static_assert(!GC::has_trivial_router<const self_ptr&>::value, "trivial assumption failure");
+	static_assert(!GC::has_trivial_router<const self_ptr&&>::value, "trivial assumption failure");
+	
+	// ---------------------------------
+
+	static_assert(GC::all_have_trivial_routers<>::value, "trivial assumption failure");
 
 	// ---------------------------------
 
