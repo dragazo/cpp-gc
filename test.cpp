@@ -435,21 +435,27 @@ struct GC::router<stationary<T>>
 	static void route(const stationary<T> &stat, F func) { GC::route(stat.value, func); }
 };
 
-
+// begins a timer in a new scope - requires a matching timer end point.
+#define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
+// ends the timer in the current scope - should not be used if there is no timer in the current scope.
+// units is the (unquoted) name of a std::chrono time unit. name is the name of the timer (a c-style string).
+#define TIMER_END(units, name) const auto __timer_end = std::chrono::high_resolution_clock::now(); \
+	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(__timer_end - __timer_begin).count() << " " #units "\n\n"; }
 
 int main() try
 {
-	const auto hcr_start = std::chrono::high_resolution_clock::now();
+	TIMER_BEGIN();
 
 	GC::strategy(GC::strategies::manual);
-	
+
 	{
 		std::atomic<bool> flag;
 		for (int i = 0; i < 4096; ++i)
 		{
 			std::thread test_thread([]()
 			{
-				GC::collect();
+				try { GC::collect(); }
+				catch (...) { std::cerr << "\n\nFLAG TESTER EXCEPTION!!\n\n"; std::abort(); }
 			});
 
 			{
@@ -467,22 +473,22 @@ int main() try
 	static_assert(GC::has_trivial_router<std::string>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<std::pair<int, std::string>>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<std::tuple<int, std::string>>::value, "trivial assumption failure");
-	
+
 	static_assert(GC::has_trivial_router<std::unique_ptr<int>>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<std::unique_ptr<self_ptr>>::value, "trivial assumption failure");
-	
+
 	static_assert(GC::has_trivial_router<int[16]>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<int[16][7]>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<self_ptr[16][7][1]>::value, "trivial assumption failure");
-	
+
 	static_assert(GC::has_trivial_router<std::array<int, 12>>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<std::array<std::array<int, 12>, 12>>::value, "trivial assumption failure");
-	
+
 	static_assert(GC::has_trivial_router<std::vector<int>>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<GC::vector<int>>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<std::unordered_map<int, char*>>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<GC::unordered_map<int, char*>>::value, "trivial assumption failure");
-	
+
 	static_assert(!GC::has_trivial_router<self_ptr>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<GC::ptr<int>>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<GC::ptr<self_ptr>>::value, "trivial assumption failure");
@@ -496,7 +502,7 @@ int main() try
 	static_assert(std::is_same<GC::vector<bool_alerter>, std::vector<bool_alerter>>::value, "smart wrapper opt check");
 	static_assert(std::is_same<GC::unique_ptr<long double>, std::unique_ptr<long double>>::value, "smart wrapper opt check");
 	static_assert(std::is_same<GC::unique_ptr<bool_alerter>, std::unique_ptr<bool_alerter>>::value, "smart wrapper opt check");
-	
+
 	static_assert(!std::is_same<GC::unique_ptr<TreeNode>, std::unique_ptr<TreeNode>>::value, "smart wrapper opt check");
 	static_assert(!std::is_same<GC::list<SymbolTable>, std::list<SymbolTable>>::value, "smart wrapper opt check");
 
@@ -599,7 +605,7 @@ int main() try
 	assert(std::is_same<decltype(arr_test_3.get()) COMMA int(*)[5][6]>::value);
 	assert(std::is_same<decltype(arr_test_4.get()) COMMA int(*)>::value);
 
-	
+
 	GC::ptr<std::stack<int>> stack_ptr = GC::make<std::stack<int>>();
 	GC::ptr<std::queue<int>> queue_ptr = GC::make<std::queue<int>>();
 	GC::ptr<std::priority_queue<int>> priority_queue_ptr = GC::make<std::priority_queue<int>>();
@@ -610,9 +616,9 @@ int main() try
 		queue_ptr->push(i);
 		priority_queue_ptr->push(i);
 	}
-	
+
 	GC::unique_ptr<int> gc_uint(new int(77));
-	
+
 	if (gc_uint != nullptr)
 	{
 		std::cerr << "non null gc unique ptr\n";
@@ -770,16 +776,16 @@ int main() try
 
 
 
-    {
-        auto i1 = GC::make<TreeNode>();
-        auto i2 = GC::make<SymbolTable>();    
-        auto i3 = GC::make<MaybeTreeNode>();
-        
+	{
+		auto i1 = GC::make<TreeNode>();
+		auto i2 = GC::make<SymbolTable>();
+		auto i3 = GC::make<MaybeTreeNode>();
+
 		assert(i1 && i2 && i3);
 
-        i1->left = i1;
+		i1->left = i1;
 
-        GC::collect();
+		GC::collect();
 
 		GC::ptr<const TreeNode> ci1 = i1;
 		GC::ptr<const SymbolTable> ci2 = i2;
@@ -794,12 +800,12 @@ int main() try
 		GC::ptr<MaybeTreeNode> nci3 = GC::constCast<MaybeTreeNode>(ci3);
 
 		//auto i1_ = GC::staticCast<int>(i1);
-    }
-    GC::collect();
-    std::cerr << "\n\n";
+	}
+	GC::collect();
+	std::cerr << "\n\n";
 
 	GC::ptr<std::unordered_multimap<int, GC::ptr<ListNode>>> merp = GC::make<std::unordered_multimap<int, GC::ptr<ListNode>>>();
-	
+
 	GC::ptr<ListNode> node_no_val;
 
 	GC::ptr<ptr_set> ptr_set_test = GC::make<ptr_set>();
@@ -861,7 +867,7 @@ int main() try
 		for (int i = 0; i < 2; ++i)
 			for (int j = 0; j < 2; ++j)
 				for (int k = 0; k < 2; ++k)
-					arr_ptr[i][j][k] = GC::make<int>((i + j)*j + i*j*k + k*i + k + 1);
+					arr_ptr[i][j][k] = GC::make<int>((i + j)*j + i * j*k + k * i + k + 1);
 
 		for (int i = 0; i < 2; ++i)
 			for (int j = 0; j < 2; ++j)
@@ -871,7 +877,7 @@ int main() try
 		GC::collect();
 		std::cerr << "\n\n";
 	}
-	
+
 	sse_t t;
 	t.d[4] = '6';
 	std::cerr << "max align: " << alignof(std::max_align_t) << "\n\n";
@@ -906,7 +912,7 @@ int main() try
 	std::unique_ptr<double> _otest2;
 	std::unique_ptr<double> otest2 = nullptr;
 
-	
+
 
 	GC::ptr<derived> dp = GC::make<derived>();
 	GC::ptr<base1> bp1 = GC::make<base1>();
@@ -928,9 +934,9 @@ int main() try
 
 	//GC::dynamicCast<void>(bp1);
 	//GC::dynamicCast<int>(bp1);
-	
+
 	//GC::dynamicCast<const int>(const_2);
-	
+
 	auto dyn_cast1 = GC::dynamicCast<virtual_type>(bp1);
 	auto dyn_cast2 = GC::dynamicCast<non_virtual_type>(bp1);
 
@@ -949,7 +955,7 @@ int main() try
 
 	GC::ptr<base1> _dp_as_b1 = GC::staticCast<base1>(dp);
 	GC::ptr<base2> _dp_as_b2 = GC::staticCast<base2>(dp);
-	
+
 	assert(dp_as_b1 == _dp_as_b1);
 	assert(dp_as_b2 == _dp_as_b2);
 
@@ -990,83 +996,87 @@ int main() try
 	{
 		std::thread t1([]()
 		{
-			//while (1)
+			try
 			{
-				/*
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-
-
-				std::cerr << "--------------------------------------begin segment\n";
-				GC::ptr<atomic_container> _subptr = atomic_gc_ptr->load();
-				std::cerr << "--------------------------------------       subptr get\n";
-				_subptr->atomic_1 = GC::make<double>(1.1);
-				_subptr->atomic_2 = GC::make<double>(2.2);
-				_subptr->atomic_3 = GC::make<double>(3.3);
-				_subptr->atomic_4 = GC::make<double>(4.4);
-
-				using std::swap;
-
-				swap(_subptr->atomic_1, _subptr->atomic_2);
-
-				//(*atomic_gc_ptr).load()->atomic_1 = GC::make<double>(1.1);
-				//(*atomic_gc_ptr).load()->atomic_2 = GC::make<double>(2.2);
-				//(*atomic_gc_ptr).load()->atomic_3 = GC::make<double>(3.3);
-				//(*atomic_gc_ptr).load()->atomic_4 = GC::make<double>(4.4);
-				std::cerr << "--------------------------------------        end segment\n";
-
-				foo();
-
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*atomic_gc_ptr = GC::make<atomic_container>();
-				*/
-				
-				/**/
-				
-				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
-
-				for (int pass = 0; pass < 1024; ++pass)
+				//while (1)
 				{
-					for (int i = 0; i < 128; ++i)
+					/*
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+
+
+					std::cerr << "--------------------------------------begin segment\n";
+					GC::ptr<atomic_container> _subptr = atomic_gc_ptr->load();
+					std::cerr << "--------------------------------------       subptr get\n";
+					_subptr->atomic_1 = GC::make<double>(1.1);
+					_subptr->atomic_2 = GC::make<double>(2.2);
+					_subptr->atomic_3 = GC::make<double>(3.3);
+					_subptr->atomic_4 = GC::make<double>(4.4);
+
+					using std::swap;
+
+					swap(_subptr->atomic_1, _subptr->atomic_2);
+
+					//(*atomic_gc_ptr).load()->atomic_1 = GC::make<double>(1.1);
+					//(*atomic_gc_ptr).load()->atomic_2 = GC::make<double>(2.2);
+					//(*atomic_gc_ptr).load()->atomic_3 = GC::make<double>(3.3);
+					//(*atomic_gc_ptr).load()->atomic_4 = GC::make<double>(4.4);
+					std::cerr << "--------------------------------------        end segment\n";
+
+					foo();
+
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*atomic_gc_ptr = GC::make<atomic_container>();
+					*/
+
+					/**/
+
+					GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
+
+					for (int pass = 0; pass < 1024; ++pass)
 					{
-						GC::ptr<TreeNode> tree = GC::make<TreeNode>();
-						tree->left = GC::make<TreeNode>();
-						tree->right = GC::make<TreeNode>();
+						for (int i = 0; i < 128; ++i)
+						{
+							GC::ptr<TreeNode> tree = GC::make<TreeNode>();
+							tree->left = GC::make<TreeNode>();
+							tree->right = GC::make<TreeNode>();
 
-						std::string key = tostr(i);
+							std::string key = tostr(i);
 
-						table->update(key, tree); // the one with explicit locks
-						table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
+							table->update(key, tree); // the one with explicit locks
+							table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
+						}
+						table->clear();
+
+						std::cerr << "pass " << pass << '\n';
 					}
-					table->clear();
 
-					std::cerr << "pass " << pass << '\n';
+					std::cerr << "phase 1 completed\n";
+
+					/**/
+
+					GC::ptr<int> pi;
+
+					for (int i = 0; i < 8192; ++i)
+					{
+						GC::ptr<int> temp = GC::make<int>(i);
+						pi = temp;
+					}
+
+					std::cerr << "printy\n";
 				}
-
-				std::cerr << "phase 1 completed\n";
-
-				/**/
-
-				GC::ptr<int> pi;
-
-				for (int i = 0; i < 8192; ++i)
-				{
-					GC::ptr<int> temp = GC::make<int>(i);
-					pi = temp;
-				}
-
-				std::cerr << "printy\n";
 			}
+			catch (...) { std::cerr << "\n\nSYMTAB TEST EXCEPTION!!\n\n"; std::abort(); }
 		});
 		//std::thread t2([]()
 		//{
@@ -1084,17 +1094,48 @@ int main() try
 			//*atomic_gc_ptr = GC::make<atomic_container>();
 		}
 		//});
-		
+
 		t1.join();
 		//t2.join();
 	}
 	/**/
 
-	const auto hcr_stop = std::chrono::high_resolution_clock::now();
+	GC::collect();
 
-	std::cerr
-		<< "\n\nall tests completed successfully\nelapsed time: "
-		<< std::chrono::duration_cast<std::chrono::milliseconds>(hcr_stop - hcr_start).count() << " ms\n";
+	{
+		TIMER_BEGIN();
+		
+		std::thread threads[4];
+
+		for (auto &i : threads) i = std::thread([]()
+		{
+			try
+			{
+				GC::ptr<std::size_t> x, y, z, w;
+
+				for (std::size_t i = 0; i < 1000000; ++i)
+				{
+					// make 3 unique objects
+					x = GC::make<std::size_t>(i);
+					y = GC::make<std::size_t>(i);
+					z = GC::make<std::size_t>(i);
+
+					// rotate them 3 times
+					w = x; x = y; y = z; z = w;
+					w = x; x = y; y = z; z = w;
+					w = x; x = y; y = z; z = w;
+				}
+			}
+			catch (...) { std::cerr << "\n\nINTERFETENCE EXCEPTION!!\n\n"; std::abort(); }
+		});
+
+		for (auto &i : threads) i.join();
+
+		TIMER_END(milliseconds, "interference test");
+	}
+
+
+	TIMER_END(milliseconds, "all tests");
 
 	std::cin.get();
 	return 0;
