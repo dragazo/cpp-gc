@@ -524,9 +524,17 @@ int main() try
 	static_assert(std::is_same<GC::vector<bool_alerter>, std::vector<bool_alerter>>::value, "smart wrapper opt check");
 	static_assert(std::is_same<GC::unique_ptr<long double>, std::unique_ptr<long double>>::value, "smart wrapper opt check");
 	static_assert(std::is_same<GC::unique_ptr<bool_alerter>, std::unique_ptr<bool_alerter>>::value, "smart wrapper opt check");
+	
+	static_assert(std::is_same<GC::stack<bool_alerter>, std::stack<bool_alerter>>::value, "smart wrapper opt check");
+	static_assert(std::is_same<GC::queue<std::pair<double, int>>, std::queue<std::pair<double, int>>>::value, "smart wrapper opt check");
+	static_assert(std::is_same<GC::priority_queue<std::tuple<double, int>>, std::priority_queue<std::tuple<double, int>>>::value, "smart wrapper opt check");
 
 	static_assert(!std::is_same<GC::unique_ptr<TreeNode>, std::unique_ptr<TreeNode>>::value, "smart wrapper opt check");
 	static_assert(!std::is_same<GC::list<SymbolTable>, std::list<SymbolTable>>::value, "smart wrapper opt check");
+
+	static_assert(!std::is_same<GC::stack<TreeNode>, std::stack<TreeNode>>::value, "smart wrapper opt check");
+	static_assert(!std::is_same<GC::queue<std::pair<double, TreeNode>>, std::queue<std::pair<double, TreeNode>>>::value, "smart wrapper opt check");
+	static_assert(!std::is_same<GC::priority_queue<std::tuple<SymbolTable>>, std::priority_queue<std::tuple<SymbolTable>>>::value, "smart wrapper opt check");
 
 	std::cerr << "-------- ctors --------\n";
 	{
