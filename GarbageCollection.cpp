@@ -140,43 +140,29 @@ bool GC::obj_list::contains(info *obj) const noexcept
 	return false;
 }
 
-// ----------------------------- //
+// --------------- //
 
-// -- collection synchronizer -- //
+// -- gc module -- //
 
-// ----------------------------- //
+// --------------- //
 
-std::mutex GC::collection_synchronizer::internal_mutex;
+void GC::disjoint_module::__mark_sweep(info *obj)
+{
+	// mark this handle
+	obj->marked = true;
 
-std::thread::id GC::collection_synchronizer::collector_thread;
+	// for each outgoing arc
+	obj->route(+[](const smart_handle &arc)
+	{
+		// get the current arc value - this is only safe because we're in a collect action
+		info *raw = arc.raw_handle();
 
-// ---------------------------------------------------------------------
+		// if it hasn't been marked, recurse to it (only if non-null)
+		if (raw && !raw->marked) shared().__mark_sweep(raw);
+	});
+}
 
-GC::obj_list GC::collection_synchronizer::objs;
-
-std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots;
-
-std::unordered_set<GC::info*> GC::collection_synchronizer::root_objs;
-
-GC::obj_list GC::collection_synchronizer::del_list;
-
-// ---------------------------------------------------------------------
-
-bool GC::collection_synchronizer::cache_ref_count_del_actions = false;
-std::unordered_set<GC::info*> GC::collection_synchronizer::ref_count_del_cache;
-
-// ---------------------------------------------------------------------
-
-std::unordered_set<GC::info*> GC::collection_synchronizer::objs_add_cache;
-
-std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots_add_cache;
-std::unordered_set<GC::info*const*> GC::collection_synchronizer::roots_remove_cache;
-
-std::unordered_map<GC::info**, GC::info*> GC::collection_synchronizer::handle_repoint_cache;
-
-// ---------------------------------------------------------------------
-
-GC::collection_synchronizer::collection_sentry::collection_sentry()
+void GC::disjoint_module::collect()
 {
 	// -- begin the collection action -- //
 
@@ -185,7 +171,7 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 
 		// this only succeeds if there's not currently a collection action in progress.
 		// this ensures that we don't have back-to-back collections and that collections don't block one another.
-		if (collector_thread != std::thread::id()) { success = false; return; }
+		if (collector_thread != std::thread::id()) return;
 
 		// otherwise mark the calling thread as the collector thread
 		collector_thread = std::this_thread::get_id();
@@ -206,8 +192,6 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 
 		// the del list should also be empty
 		assert(del_list.empty());
-
-		success = true;
 	}
 
 	// -- initialize the collection data -- //
@@ -225,7 +209,7 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 
 		// route to mutable arcs and directly unroot from the collector-only root set.
 		// this is only safe because we're guaranteed to be the (only) collector at this point.
-		i->mutable_route(+[](const smart_handle &arc) { roots.erase(&arc.raw_handle()); });
+		i->mutable_route(+[](const smart_handle &arc) { shared().roots.erase(&arc.raw_handle()); });
 	}
 
 	// clear the root objs set
@@ -285,111 +269,142 @@ GC::collection_synchronizer::collection_sentry::collection_sentry()
 		for (auto root : roots)
 			if (*root) root_objs.insert(*root);
 	}
-}
-GC::collection_synchronizer::collection_sentry::~collection_sentry()
-{
-	// only do this if the construction was successful
-	if (success)
+
+	// -----------------------------------------------------------
+
+	#if GC_COLLECT_MSG
+	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
+	#endif
+
+	// -- mark and sweep -- //
+
+	// perform a mark sweep from each root object
+	for (info *i : root_objs) __mark_sweep(i);
+
+	// -- clean anything not marked -- //
+
+	// for each item in the gc database
+	for (info *i = objs.front(), *next; i; i = next)
 	{
-		// we've now divided the old obj list into two partitions:
-		// the reachable objects are still in the obj list.
-		// the unreachable objects are now in the del list.
-		// ref count deletion caching is still in effect.
+		next = i->next;
 
-		// destroy unreachable objects
-		for (info *i = del_list.front(); i; i = i->next) i->destroy();
+		// if it hasn't been marked, mark it for deletion
+		if (!i->marked)
+		{
+			// mark it for deletion
+			objs.remove(i);
+			del_list.add(i);
 
-		// now we've destroyed the unreachable objects but there may be cached deletions from ref count logic.
-		// we'll now resume immediate ref count deletions.
-		// we can't resume immediate ref count deletions prior to destroying the unreachable objs because it could double delete.
-		// e.g. could drop an unreachable obj ref count to 0 and insta-delete on its own before we get to it.
-		// even if we made a check for double delete, it would still deallocate the info object as well and would cause even more headache.
-		// we know this usage is safe because there's no way a reachable object could ref count delete an unreachable object.
+			#if GC_COLLECT_MSG
+			++collect_count;
+			#endif
+		}
+	}
+
+	#if GC_COLLECT_MSG
+	std::cerr << "collecting - deleting: " << collect_count << '\n';
+	#endif
+
+	// -----------------------------------------------------------
+
+	// we've now divided the old obj list into two partitions:
+	// the reachable objects are still in the obj list.
+	// the unreachable objects are now in the del list.
+	// ref count deletion caching is still in effect.
+
+	// destroy unreachable objects
+	for (info *i = del_list.front(); i; i = i->next) i->destroy();
+
+	// now we've destroyed the unreachable objects but there may be cached deletions from ref count logic.
+	// we'll now resume immediate ref count deletions.
+	// we can't resume immediate ref count deletions prior to destroying the unreachable objs because it could double delete.
+	// e.g. could drop an unreachable obj ref count to 0 and insta-delete on its own before we get to it.
+	// even if we made a check for double delete, it would still deallocate the info object as well and would cause even more headache.
+	// we know this usage is safe because there's no way a reachable object could ref count delete an unreachable object.
 		
-		// resume immediate ref count deletions.
-		{
-			std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	// resume immediate ref count deletions.
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-			// stop caching ref count deletion actions (i.e. resume immediate ref count deletions)
-			cache_ref_count_del_actions = false;
+		// stop caching ref count deletion actions (i.e. resume immediate ref count deletions)
+		cache_ref_count_del_actions = false;
 
-			// if an unreachable object is in the ref count del cache purge it (to avoid the double delete issue for unreachable objs).
-			// we know this'll work because the unreachable objects are unreachable from reachable objects (hence the name).
-			// thus, since we already called unreachable destructors, there will be no further ref count logic for unreachables.
+		// if an unreachable object is in the ref count del cache purge it (to avoid the double delete issue for unreachable objs).
+		// we know this'll work because the unreachable objects are unreachable from reachable objects (hence the name).
+		// thus, since we already called unreachable destructors, there will be no further ref count logic for unreachables.
 
-			// purge unreachable objects from the ref count del cache (to avoid double deletions - see above).
-			for (info *i = del_list.front(); i; i = i->next) ref_count_del_cache.erase(i);
+		// purge unreachable objects from the ref count del cache (to avoid double deletions - see above).
+		for (info *i = del_list.front(); i; i = i->next) ref_count_del_cache.erase(i);
 
-			// after the double-deletion purge, remove remaining ref count del cache objects from the obj list.
-			// we do this now because enabling immediate ref count del logic means the obj list can be modified by any holder of the mutex.
-			for (auto i : ref_count_del_cache) objs.remove(i);
-		}
+		// after the double-deletion purge, remove remaining ref count del cache objects from the obj list.
+		// we do this now because enabling immediate ref count del logic means the obj list can be modified by any holder of the mutex.
+		for (auto i : ref_count_del_cache) objs.remove(i);
+	}
 
-		// we now have lock-free exclusive ownership of the ref count del cache.
+	// we now have lock-free exclusive ownership of the ref count del cache.
 
-		// deallocate memory
-		// done after calling ALL unreachable dtors so that the dtors can access the info objects safely.
-		// this is because we might be deleting objects whose reference count is not zero.
-		// which means they could potentially hold live gc references to other objects in del list and try to refer to their info objects.
-		for (info *i = del_list.front(), *next; i; i = next)
-		{
-			next = i->next; // dealloc() will deallocate the info object as well, so grab the next object now
-			i->dealloc();
-		}
+	// deallocate memory
+	// done after calling ALL unreachable dtors so that the dtors can access the info objects safely.
+	// this is because we might be deleting objects whose reference count is not zero.
+	// which means they could potentially hold live gc references to other objects in del list and try to refer to their info objects.
+	for (info *i = del_list.front(), *next; i; i = next)
+	{
+		next = i->next; // dealloc() will deallocate the info object as well, so grab the next object now
+		i->dealloc();
+	}
 
-		// clear the del list (we already deallocated the resources above)
-		del_list.unsafe_clear();
-		assert(del_list.empty()); // just to make sure
+	// clear the del list (we already deallocated the resources above)
+	del_list.unsafe_clear();
+	assert(del_list.empty()); // just to make sure
 
-		// remember, we still have lock-free exclusive ownership of the ref count del cache from above.
-		// process the cached ref count deletions.
-		for (auto i : ref_count_del_cache)
-		{
-			// we don't need to do all destructors before all deallocators like we did above.
-			// this is because we know the ref count for these is zero (because they were cached ref count deletion).
-			// this means we don't have the same risks as above (i.e. live references being forcibly severed).
+	// remember, we still have lock-free exclusive ownership of the ref count del cache from above.
+	// process the cached ref count deletions.
+	for (auto i : ref_count_del_cache)
+	{
+		// we don't need to do all destructors before all deallocators like we did above.
+		// this is because we know the ref count for these is zero (because they were cached ref count deletion).
+		// this means we don't have the same risks as above (i.e. live references being forcibly severed).
 
-			i->destroy();
-			i->dealloc();
-		}
-		ref_count_del_cache.clear();
+		i->destroy();
+		i->dealloc();
+	}
+	ref_count_del_cache.clear();
 
-		// end the collection action
-		// must be after dtors/deallocs to ensure that if they call collect() it'll no-op (otherwise very slow).
-		// additionally, must be after those to ensure the caches are fully emptied as the last atomic step.
-		// also, if this came before dtors, the reference count system could fall to 0 and result in double dtor.
-		{
-			std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	// end the collection action
+	// must be after dtors/deallocs to ensure that if they call collect() it'll no-op (otherwise very slow).
+	// additionally, must be after those to ensure the caches are fully emptied as the last atomic step.
+	// also, if this came before dtors, the reference count system could fall to 0 and result in double dtor.
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-			// mark that there is no longer a collector thread
-			collector_thread = std::thread::id();
+		// mark that there is no longer a collector thread
+		collector_thread = std::thread::id();
 
-			// apply all the cached obj add actions that occurred during the collection action
-			for (auto i : objs_add_cache) objs.add(i);
-			objs_add_cache.clear();
+		// apply all the cached obj add actions that occurred during the collection action
+		for (auto i : objs_add_cache) objs.add(i);
+		objs_add_cache.clear();
 
-			// apply cached root actions
-			for (auto i : roots_add_cache) roots.insert(i);
-			roots_add_cache.clear();
+		// apply cached root actions
+		for (auto i : roots_add_cache) roots.insert(i);
+		roots_add_cache.clear();
 
-			// apply cached unroot actions
-			for (auto i : roots_remove_cache) roots.erase(i);
-			roots_remove_cache.clear();
+		// apply cached unroot actions
+		for (auto i : roots_remove_cache) roots.erase(i);
+		roots_remove_cache.clear();
 
-			// apply all the cached handle repoint actions
-			for (auto i : handle_repoint_cache) *i.first = i.second;
-			handle_repoint_cache.clear();
-		}
+		// apply all the cached handle repoint actions
+		for (auto i : handle_repoint_cache) *i.first = i.second;
+		handle_repoint_cache.clear();
 	}
 }
 
-bool GC::collection_synchronizer::this_is_collector_thread()
+bool GC::disjoint_module::this_is_collector_thread()
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	return collector_thread == std::this_thread::get_id();
 }
 
-void GC::collection_synchronizer::schedule_handle_create_null(info *&handle)
+void GC::disjoint_module::schedule_handle_create_null(info *&handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -399,7 +414,7 @@ void GC::collection_synchronizer::schedule_handle_create_null(info *&handle)
 	// root it
 	__schedule_handle_root(handle);
 }
-void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(info *&handle, info *new_obj)
+void GC::disjoint_module::schedule_handle_create_bind_new_obj(info *&handle, info *new_obj)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -425,7 +440,7 @@ void GC::collection_synchronizer::schedule_handle_create_bind_new_obj(info *&han
 	// otherwise we need to cache the request
 	else objs_add_cache.insert(new_obj);
 }
-void GC::collection_synchronizer::schedule_handle_create_alias(info *&handle, info *const &src_handle)
+void GC::disjoint_module::schedule_handle_create_alias(info *&handle, info *const &src_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -439,7 +454,7 @@ void GC::collection_synchronizer::schedule_handle_create_alias(info *&handle, in
 	__schedule_handle_root(handle);
 }
 
-void GC::collection_synchronizer::schedule_handle_destroy(info *const &handle)
+void GC::disjoint_module::schedule_handle_destroy(info *const &handle)
 {
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 
@@ -457,7 +472,7 @@ void GC::collection_synchronizer::schedule_handle_destroy(info *const &handle)
 	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
 
-void GC::collection_synchronizer::schedule_handle_unroot(info *const &handle)
+void GC::disjoint_module::schedule_handle_unroot(info *const &handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	
@@ -465,7 +480,7 @@ void GC::collection_synchronizer::schedule_handle_unroot(info *const &handle)
 	__schedule_handle_unroot(handle);
 }
 
-void GC::collection_synchronizer::schedule_handle_repoint(info *&handle, info *const &new_value)
+void GC::disjoint_module::schedule_handle_repoint(info *&handle, info *const &new_value)
 {
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 	
@@ -486,7 +501,7 @@ void GC::collection_synchronizer::schedule_handle_repoint(info *&handle, info *c
 		__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 	}
 }
-void GC::collection_synchronizer::schedule_handle_repoint_null(info *&handle)
+void GC::disjoint_module::schedule_handle_repoint_null(info *&handle)
 {
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 
@@ -499,7 +514,7 @@ void GC::collection_synchronizer::schedule_handle_repoint_null(info *&handle)
 	// decrement old target reference count
 	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
-void GC::collection_synchronizer::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
+void GC::disjoint_module::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -518,7 +533,7 @@ void GC::collection_synchronizer::schedule_handle_repoint_swap(info *&handle_a, 
 	}
 }
 
-void GC::collection_synchronizer::__schedule_handle_root(info *const &handle)
+void GC::disjoint_module::__schedule_handle_root(info *const &handle)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -536,7 +551,7 @@ void GC::collection_synchronizer::__schedule_handle_root(info *const &handle)
 		roots_remove_cache.erase(&handle); // ensure the sets are disjoint
 	}
 }
-void GC::collection_synchronizer::__schedule_handle_unroot(info *const &handle)
+void GC::disjoint_module::__schedule_handle_unroot(info *const &handle)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -555,7 +570,7 @@ void GC::collection_synchronizer::__schedule_handle_unroot(info *const &handle)
 	}
 }
 
-void GC::collection_synchronizer::__raw_schedule_handle_repoint(info *&handle, info *target)
+void GC::disjoint_module::__raw_schedule_handle_repoint(info *&handle, info *target)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -570,7 +585,7 @@ void GC::collection_synchronizer::__raw_schedule_handle_repoint(info *&handle, i
 	else handle_repoint_cache[&handle] = target;
 }
 
-GC::info *GC::collection_synchronizer::__get_current_target(info *const &handle)
+GC::info *GC::disjoint_module::__get_current_target(info *const &handle)
 {
 	// find new_value's repoint target from the cache.
 	// const cast is safe because we won't be modifying it (just for lookup in the repoint cache).
@@ -581,7 +596,7 @@ GC::info *GC::collection_synchronizer::__get_current_target(info *const &handle)
 	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : handle;
 }
 
-void GC::collection_synchronizer::__MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
+void GC::disjoint_module::__MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
 {
 	// decrement the reference count
 	// if it falls to zero we need to perform ref count deletion logic
@@ -630,59 +645,9 @@ void GC::collection_synchronizer::__MUST_BE_LAST_ref_count_dec(info *target, std
 
 // ---------------- //
 
-void GC::__mark_sweep(info *handle)
-{
-	// mark this handle
-	handle->marked = true;
-
-	// for each outgoing arc
-	handle->route(+[](const smart_handle &arc)
-	{
-		// get the current arc value - this is only safe because we're in a collect action
-		info *raw = arc.raw_handle();
-
-		// if it hasn't been marked, recurse to it (only if non-null)
-		if (raw && !raw->marked) __mark_sweep(raw);
-	});
-}
-
 void GC::collect()
 {
-	// begin a collection action - if that fails early exit.
-	// this is in an outer scope because all mutexes must be unlocked prior to this object's destructor.
-	collection_synchronizer::collection_sentry sentry;
-	if (!sentry) return;
-
-	#if GC_COLLECT_MSG
-	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
-	#endif
-
-	// -- mark and sweep -- //
-
-	// perform a mark sweep from each root object
-	for (info *i : sentry.get_root_objs()) __mark_sweep(i);
-
-	// -- clean anything not marked -- //
-
-	// for each item in the gc database
-	for (info *i = sentry.get_objs().front(); i; )
-	{
-		// if it hasn't been marked, mark it for deletion
-		if (!i->marked)
-		{
-			// mark it for deletion (internally unlinks it from obj database)
-			i = sentry.mark_delete(i);
-
-			#if GC_COLLECT_MSG
-			++collect_count;
-			#endif
-		}
-		else i = i->next;
-	}
-
-	#if GC_COLLECT_MSG
-	std::cerr << "collecting - deleting: " << collect_count << '\n';
-	#endif
+	disjoint_module::shared().collect();
 }
 
 // ------------------------------ //
@@ -693,7 +658,7 @@ void GC::collect()
 
 void GC::router_unroot(const smart_handle &arc)
 {
-	collection_synchronizer::schedule_handle_unroot(arc.raw_handle());
+	disjoint_module::shared().schedule_handle_unroot(arc.raw_handle());
 }
 
 // --------------------- //

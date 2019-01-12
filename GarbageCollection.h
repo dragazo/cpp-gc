@@ -338,7 +338,7 @@ private: // -- private types -- //
 		// initializes the info handle to null and marks it as a root.
 		smart_handle(std::nullptr_t = nullptr)
 		{
-			collection_synchronizer::schedule_handle_create_null(handle);
+			disjoint_module::shared().schedule_handle_create_null(handle);
 		}
 
 		// initializes the info handle with the specified value and marks it as a root.
@@ -346,19 +346,19 @@ private: // -- private types -- //
 		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
 		smart_handle(info *init, bind_new_obj_t)
 		{
-			collection_synchronizer::schedule_handle_create_bind_new_obj(handle, init);
+			disjoint_module::shared().schedule_handle_create_bind_new_obj(handle, init);
 		}
 		
 		// constructs a new smart handle to alias another
 		smart_handle(const smart_handle &other)
 		{
-			collection_synchronizer::schedule_handle_create_alias(handle, other.handle);
+			disjoint_module::shared().schedule_handle_create_alias(handle, other.handle);
 		}
 
 		// unroots the internal handle.
 		~smart_handle()
 		{
-			collection_synchronizer::schedule_handle_destroy(handle);
+			disjoint_module::shared().schedule_handle_destroy(handle);
 		}
 
 		// repoints this smart_handle to other - equivalent to this->reset(other)
@@ -376,18 +376,18 @@ private: // -- private types -- //
 		// safely repoints the underlying raw handle at the new handle's object.
 		void reset(const smart_handle &new_value)
 		{
-			collection_synchronizer::schedule_handle_repoint(handle, new_value.handle);
+			disjoint_module::shared().schedule_handle_repoint(handle, new_value.handle);
 		}
 		// safely repoints the underlying raw handle at no object (null).
 		void reset()
 		{
-			collection_synchronizer::schedule_handle_repoint_null(handle);
+			disjoint_module::shared().schedule_handle_repoint_null(handle);
 		}
 
 		// safely swaps the underlying raw handles.
 		void swap(smart_handle &other)
 		{
-			collection_synchronizer::schedule_handle_repoint_swap(handle, other.handle);
+			disjoint_module::shared().schedule_handle_repoint_swap(handle, other.handle);
 		}
 		friend void swap(smart_handle &a, smart_handle &b) { a.swap(b); }
 	};
@@ -566,11 +566,11 @@ public: // -- ptr -- //
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
 		element_type &operator[](std::ptrdiff_t index) const { return get()[index]; }
 
-		// returns a ptr to an item in an array. only defined if T is an array type.
-		// the returned ptr is an owner of the entire array, so the array will not be deallocated while it exists.
-		// undefined behavior if index is out of bounds.
+		// returns a ptr to the element with the specified index (no bounds checking).
+		// said ptr aliases the entire array - the array will not be deleted while the alias is still reachable.
+		// exactly equivalent to GC::alias(p.get() + index, p).
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
-		ptr<element_type> get(std::ptrdiff_t index) const { return {get() + index, handle}; }
+		ptr<element_type> alias(std::ptrdiff_t index) const { return {get() + index, handle}; }
 
 	public: // -- comparison -- //
 
@@ -1380,6 +1380,18 @@ public: // -- ptr allocation -- //
 		return res;
 	}
 
+	// creates a new ptr that points to obj, which is logically considered to be part of src's pointed-to object.
+	// src's pointed-to object will not be deleted while the alias is still reachable.
+	// thus, the created ptr is an owner of the entire object src points to, but only points to obj.
+	// creating an alias to an alias correctly binds to the original object.
+	// while allowed, it is ill-advised to alias a part of src's pointed-to object that could be deleted (e.g. element of std::vector).
+	// if obj or src is null, creates a null ptr that does not alias an object.
+	template<typename T, typename U>
+	static ptr<T> alias(T *obj, const ptr<U> &src)
+	{
+		return obj && src ? ptr<T>(obj, src.handle) : ptr<T>();
+	}
+
 	// triggers a full garbage collection pass.
 	// objects that are not in use will be deleted.
 	// objects that are in use will not be moved (i.e. pointers will still be valid).
@@ -1532,13 +1544,13 @@ private: // -- sentries -- //
 
 private: // -- collection synchronizer -- //
 
-	class collection_synchronizer
+	class disjoint_module
 	{
 	private: // -- synchronization -- //
 
-		static std::mutex internal_mutex; // mutex used only for internal synchronization
+		std::mutex internal_mutex; // mutex used only for internal synchronization
 
-		static std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
+		std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
 
 	private: // -- collector-only resources -- //
 
@@ -1548,7 +1560,7 @@ private: // -- collection synchronizer -- //
 		
 		// the list of all objects currently under gc consideration.
 		// during a collection action, any unreachable object in this list is subject to deletion.
-		static obj_list objs;
+		obj_list objs;
 
 		// the set of all rooted handles - DO NOT USE THIS FOR COLLECTION LOGIC.
 		// the roots in this set are subject to deletion by arbitrary running threads after the sentry construction.
@@ -1556,7 +1568,7 @@ private: // -- collection synchronizer -- //
 		// note: a root is the address of an info* (i.e. info**) not the info* itself.
 		// this is because the same rooted handle can be repointed to a different object and still be a root.
 		// this is what supplies information to the root_objs set for the collector.
-		static std::unordered_set<info*const*> roots;
+		std::unordered_set<info*const*> roots;
 
 		// the set of all objects that are pointed-to by rooted handles (guaranteed not to contain null).
 		// this should not be modified directly - should only be manipulated by a valid sentry.
@@ -1567,13 +1579,13 @@ private: // -- collection synchronizer -- //
 		//    this would be a problem later on in the collector, as we'd need to dereference the handle to get the obj to sweep.
 		//    but with this approach that's not an issue for the collector, because it won't ever need to be dereferenced again.
 		//    and we know the root obj won't be destroyed because the collector is the only one allowed to do that.
-		static std::unordered_set<info*> root_objs;
+		std::unordered_set<info*> root_objs;
 
 		// the list of objects that should be destroyed after a collector pass.
 		// this should not be modified directly - should only be manipulated by a valid sentry.
 		// when an object is marked for deletion (i.e. unreachable) it is removed from objs and added to this list.
 		// the sentry dtor will handle the logic of deleting the objects.
-		static obj_list del_list;
+		obj_list del_list;
 
 	private: // -- modified caches -- //
 
@@ -1585,13 +1597,13 @@ private: // -- collection synchronizer -- //
 		// if true, cache the request in ref_count_del_cache.
 		// thus if false, the cache is considered a collector-only resource and must not be modified.
 		// if this is false, it is safe to directly modify the obj list under normal mutex lock.
-		static bool cache_ref_count_del_actions;
+		bool cache_ref_count_del_actions;
 
 		// the shared resource cache for ref count deletion actions.
 		// objects in this cache MUST currently be in the obj list (NOT in the obj add cache).
 		// DO NOT unlink objects from the obj list when you put them in this list (just a cache).
 		// see cache_ref_count_del_actions for how to use this cache properly.
-		static std::unordered_set<info*> ref_count_del_cache;
+		std::unordered_set<info*> ref_count_del_cache;
 
 	private: // -- caches -- //
 
@@ -1605,141 +1617,87 @@ private: // -- collection synchronizer -- //
 
 		// the scheduled obj add operations.
 		// used by new obj insertion during a collection action.
-		static std::unordered_set<info*> objs_add_cache;
+		std::unordered_set<info*> objs_add_cache;
 
 		// the scheduled root add/remove operations.
 		// these sets must at all times be disjoint.
-		static std::unordered_set<info*const*> roots_add_cache;
-		static std::unordered_set<info*const*> roots_remove_cache;
+		std::unordered_set<info*const*> roots_add_cache;
+		std::unordered_set<info*const*> roots_remove_cache;
 
 		// cache used to support non-blocking handle repoint actions.
 		// it is structured such that M[&raw_handle] is what it should be repointed to.
-		static std::unordered_map<info**, info*> handle_repoint_cache; 
+		std::unordered_map<info**, info*> handle_repoint_cache; 
 
-	public: // -- types -- //
+	private: // -- ctor / dtor / asgn -- //
 
-		// a sentry object that manages synchronization of a collect action, as well as granting access to the data to act on.
-		// you should (default) construct an object of this type before beginning a collect action (and before acquiring any long-running mutexes).
-		// you must then ensure the operation was successful (i.e. operator bool() = true).
-		// if it is successful, you can continue the collect action, otherwise you must abort the collection without raising an error.
-		class collection_sentry
-		{
-		private: // -- data -- //
+		disjoint_module() : cache_ref_count_del_actions(false) {}
 
-			bool success; // the success flag (if we successfully began a collection action)
+		disjoint_module(const disjoint_module&) = delete;
+		disjoint_module &operator=(const disjoint_module&) = delete;
 
-		public: // -- ctor / dtor / asgn / etc -- //
+	private: // -- helpers -- //
 
-			collection_sentry(const collection_sentry&) = delete;
-			collection_sentry &operator=(const collection_sentry&) = delete;
-
-			// begins a collection action - this must be performed before any collection pass.
-			// if there is already a collection action in progress, marks as failure.
-			// otherwise the calling thread is marked as the collector thread, all cached database modifications are applied, and marks as success.
-			// the success/failure flag can be checked via operator bool (true is success).
-			// if this operation does not succeed, it is undefined behavior to continue the collection pass.
-			collection_sentry();
-
-			// ends a collection action - this must be performed after any collection pass.
-			// this will delete everything marked for deletion by mark_delete() before ending the collection action.
-			// this must be called regardless of if the sentry construction resulted in a valid collection action (i.e. operator bool).
-			~collection_sentry();
-
-			// returns true iff the sentry construction was successful and the collection action can continue.
-			explicit operator bool() const noexcept { return success; }
-			// returns true iff the sentry construction failed and the collection action cannot be continued.
-			bool operator!() const noexcept { return !success; }
-
-		public: // -- data access -- //
-
-			// gets the objs database.
-			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			auto &get_objs()
-			{
-				assert(success);
-				return collection_synchronizer::objs;
-			}
-
-			// gets the roots database.
-			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			auto &get_root_objs()
-			{
-				assert(success);
-				return collection_synchronizer::root_objs;
-			}
-
-			// marks obj for deletion - obj must not have already been marked for deletion.
-			// this automatically removes obj from the obj database.
-			// it is undefined behavior to call this function if the sentry construction failed (see operator bool).
-			// returns the address of the next object (i.e. obj->next).
-			info *mark_delete(info *obj)
-			{
-				assert(success);
-
-				info *next = obj->next;
-
-				objs.remove(obj);
-				del_list.add(obj);
-
-				return next;
-			}
-		};
+		// performs the mark sweep logic for collect()
+		void __mark_sweep(info *obj);
 
 	public: // -- interface -- //
 
-		// returns true iff the calling thread is the current collector thread
-		static bool this_is_collector_thread();
+		// performs a collection action on (only) this disjoint gc module
+		void collect();
+
+		// returns true iff the calling thread is the current collector thread for (only) this disjoint module
+		bool this_is_collector_thread();
 
 		// schedules a handle creation action that points to null.
 		// raw_handle need not be initialized prior to this call.
-		static void schedule_handle_create_null(info *&handle);
+		void schedule_handle_create_null(info *&handle);
 		// schedules a handle creation action that points to a new object - inserts new_obj into the obj database.
 		// new_obj must not already exist in the gc database (see create alias below).
 		// the reference count for new_obj is initialized to 1.
 		// raw_handle need not be initialized prior to this call.
-		static void schedule_handle_create_bind_new_obj(info *&handle, info *new_obj);
+		void schedule_handle_create_bind_new_obj(info *&handle, info *new_obj);
 		// schedules a handle creation action that points at a pre-existing handle - marks the new handle as a root.
 		// raw_handle need not be initialized prior to this call.
 		// increments the reference count of the referenced target.
-		static void schedule_handle_create_alias(info *&raw_handle, info *const &src_handle);
+		void schedule_handle_create_alias(info *&raw_handle, info *const &src_handle);
 
 		// schedules a handle deletion action - unroots the handle and purges it from the handle repoint cache.
 		// for any call to schedule_handle_create_*(), said handle must be sent here before the end of its lifetime.
 		// calling this function implies that the handle no longer exists as far as the gc systems are concerned.
 		// reference counting and other gc logic will commence due to the gc reference being destroyed.
-		static void schedule_handle_destroy(info *const &handle);
+		void schedule_handle_destroy(info *const &handle);
 
 		// schedules a handle unroot operation - unmarks handle as a root.
-		static void schedule_handle_unroot(info *const &raw_handle);
+		void schedule_handle_unroot(info *const &raw_handle);
 
 		// schedules a handle repoint action.
 		// handle shall eventually be repointed to null before the next collection action.
 		// automatically performs reference counting logic.
-		static void schedule_handle_repoint_null(info *&handle);
+		void schedule_handle_repoint_null(info *&handle);
 		// schedules a handle repoint action.
 		// handle shall eventually be repointed to new_value before the next collection action.
 		// automatically performs reference counting logic.
-		static void schedule_handle_repoint(info *&handle, info *const &new_value);
+		void schedule_handle_repoint(info *&handle, info *const &new_value);
 		// schedules a handle repoint action that swaps the pointed-to info objects of two handles atomically.
 		// handle_a shall eventually point to whatever handle_b used to point to and vice versa.
-		static void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
+		void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
 
 	private: // -- private interface (unsafe) -- //
 		
 		// marks handle as a root - internal_mutex should be locked
-		static void __schedule_handle_root(info *const &handle);
+		void __schedule_handle_root(info *const &handle);
 		// unmarks handle as a root - internal_mutex should be locked
-		static void __schedule_handle_unroot(info *const &handle);
+		void __schedule_handle_unroot(info *const &handle);
 
 		// the underlying function for all handle repoint actions.
 		// handles the logic of managing the repoint cache for repointing handle to target.
 		// DOES NOT HANDLE REFERENCE COUNT LOGIC - DO THAT ON YOUR OWN.
-		static void __raw_schedule_handle_repoint(info *&handle, info *target);
+		void __raw_schedule_handle_repoint(info *&handle, info *target);
 
 		// gets the current target info object of new_value.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of value.
-		static info *__get_current_target(info *const &handle);
+		info *__get_current_target(info *const &handle);
 
 		// performs the reference count decrement logic on target (allowed to be null).
 		// internal_lock is the (already-owned) lock on internal_mutex that was taken previously.
@@ -1748,7 +1706,12 @@ private: // -- collection synchronizer -- //
 		// otherwise does nothing (aside from the reference count decrement).
 		// handles all deletion logic internally.
 		// THIS MUST BE THE LAST THING YOU DO UNDER INTERNAL_MUTEX LOCK.
-		static void __MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
+		void __MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
+
+	public: // -- factory accessors -- //
+
+		// gets the shared gc module
+		static disjoint_module &shared() { static disjoint_module m; return m; }
 	};
 
 private: // -- data -- //
@@ -1779,9 +1742,6 @@ private: // -- private interface -- //
 	// otherwise = GC::mutex must not be locked prior to invocation.
 	// -----------------------------------------------------------------
 	
-	// performs a mark sweep operation from the given handle.
-	static void __mark_sweep(info *handle);
-
 	// the first invocation of this function begins a new thread to perform timed garbage collection.
 	// all subsequent invocations do nothing.
 	static void start_timed_collect();

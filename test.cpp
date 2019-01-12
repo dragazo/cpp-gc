@@ -589,19 +589,43 @@ int main() try
 
 		{
 			auto arr = GC::make<alert_t[]>(4);
-			holder = arr.get(2);
+			holder = arr.alias(2);
 		}
 		std::cerr << "destroyed array\n";
 	}
 	std::cerr << "----------------\n\n";
 
 
-	GC::ptr<int[6]> arr_test_0;
-	GC::ptr<int[5][6]> arr_test_1;
-	GC::ptr<int[][6]> arr_test_2;
-	GC::ptr<int[][5][6]> arr_test_3;
-	GC::ptr<int[]> arr_test_4;
+	static_assert(std::is_same<int(*)[6], decltype(std::declval<GC::ptr<int[6]>>().get())>::value, "ptr type error");
+	static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[6][8]>>().get())>::value, "ptr type error");
+	static_assert(std::is_same<int(*)[8], decltype(std::declval<GC::ptr<int[][8]>>().get())>::value, "ptr type error");
+	static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[][6][8]>>().get())>::value, "ptr type error");
+
+
+	GC::ptr<int[6]> arr_test_0 = GC::make<int[6]>();
+	GC::ptr<int[5][6]> arr_test_1 = GC::make<int[5][6]>();
+	GC::ptr<int[][6]> arr_test_2 = GC::make<int[][6]>(12);
+	GC::ptr<int[][5][6]> arr_test_3 = GC::make<int[][5][6]>(14);
+	GC::ptr<int[]> arr_test_4 = GC::make<int[]>(16);
+
 	GC::ptr<virtual_type> arr_test_5;
+
+	GC::ptr<int> arr_sub_0_0 = GC::alias(*arr_test_0 + 4, arr_test_0);
+
+	assert(arr_sub_0_0 != nullptr);
+
+	GC::ptr<int[6]> arr_sub_1_0 = GC::alias(*arr_test_1 + 2, arr_test_0);
+	GC::ptr<int[6]> arr_sub_1_1 = GC::alias(&(*arr_test_1)[2], arr_test_0);
+
+	assert(arr_sub_1_0 != nullptr);
+	assert(arr_sub_1_0 == arr_sub_1_1);
+
+	GC::ptr<int> arr_sub_1_2 = GC::alias(*(*arr_test_1 + 2) + 3, arr_test_1);
+	GC::ptr<int> arr_sub_1_3 = GC::alias((*arr_test_1)[2] + 3, arr_test_1);
+	GC::ptr<int> arr_sub_1_4 = GC::alias(&(*arr_test_1)[2][3], arr_test_1);
+	
+	assert(arr_sub_1_2 != nullptr);
+	assert(arr_sub_1_2 == arr_sub_1_3 && arr_sub_1_3 == arr_sub_1_4);
 
 	GC::ptr<int> sc_test_0;
 
