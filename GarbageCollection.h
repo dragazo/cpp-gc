@@ -464,6 +464,31 @@ public: // -- array typing helpers -- //
 	template<typename T> using remove_unbound_extent_t = typename remove_unbound_extent<T>::type;
 	template<typename T> using remove_bound_extent_t = typename remove_bound_extent<T>::type;
 
+public: // -- cv type helping -- //
+
+	// a type representing if T is not cv qualified
+	template<typename T>
+	using no_cv = std::is_same<T, std::remove_cv_t<T>>;
+
+	// copies the cv qualifiers from From and applies them to To.
+	// if To is initially cv-qualified, those qualifiers are dropped prior to performing the cv copying process.
+	template<typename From, typename To>
+	struct copy_cv
+	{
+	private: // -- helpers -- //
+
+		typedef std::remove_cv_t<To> Dest;
+		typedef std::conditional_t<std::is_const<From>::value, const Dest, Dest> C_Dest;
+		typedef std::conditional_t<std::is_volatile<From>::value, volatile C_Dest, C_Dest> CV_Dest;
+
+	public: // -- interface -- //
+
+		typedef CV_Dest type;
+	};
+
+	template<typename From, typename To>
+	using copy_cv_t = typename copy_cv<From, To>::type;
+
 public: // -- mutex helpers -- //
 
 	// equivalent to std::scoped_lock - included here because it's handy and is otherwise only available in C++17 and up
@@ -1432,12 +1457,12 @@ public: // -- wrapper traits -- //
 	// the wrapped type must be gc-ready with a properly-mutexed router function.
 	// the unwrapped type need not be gc-ready - this is allowed to be identical to the wrapped type.
 	// applying unwrapped or wrapped more than once should yield the same type (e.g. wrapped<wrapped<T>> = wrapped<T>).
-	// the default implementation returns T unmodified for both types.
+	// the default implementation returns T for both types if T is not cv qualified, otherwise refers to the non-cv T wrapper_traits.
 	template<typename T>
 	struct wrapper_traits
 	{
-		typedef T unwrapped;
-		typedef T wrapped;
+		typedef std::conditional_t<no_cv<T>::value, T, copy_cv_t<T, typename wrapper_traits<std::remove_cv_t<T>>::unwrapped_type>> unwrapped_type;
+		typedef std::conditional_t<no_cv<T>::value, T, copy_cv_t<T, typename wrapper_traits<std::remove_cv_t<T>>::wrapped_type>> wrapped_type;
 	};
 
 	// given a type T, gets an equivalent type that is not necessarily gc-ready

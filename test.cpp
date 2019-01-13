@@ -536,6 +536,18 @@ int main() try
 	static_assert(!std::is_same<GC::queue<std::pair<double, TreeNode>>, std::queue<std::pair<double, TreeNode>>>::value, "smart wrapper opt check");
 	static_assert(!std::is_same<GC::priority_queue<std::tuple<SymbolTable>>, std::priority_queue<std::tuple<SymbolTable>>>::value, "smart wrapper opt check");
 
+	// ---------------------------------
+
+	static_assert(std::is_same<const GC::make_wrapped_t<GC::vector<int>>, GC::make_wrapped_t<const std::vector<int>>>::value, "wrapped const test");
+	static_assert(std::is_same<const GC::make_wrapped_t<std::vector<TreeNode>>, GC::make_wrapped_t<const std::vector<TreeNode>>>::value, "wrapped const test");
+	static_assert(std::is_same<volatile GC::make_wrapped_t<std::vector<TreeNode>>, GC::make_wrapped_t<volatile GC::vector<TreeNode>>>::value, "wrapped const test");
+	static_assert(std::is_same<const volatile GC::make_wrapped_t<std::vector<TreeNode>>, const GC::make_wrapped_t<volatile std::vector<TreeNode>>>::value, "wrapped const test");
+	static_assert(std::is_same<const GC::make_wrapped_t<volatile std::vector<TreeNode>>, const volatile GC::make_wrapped_t<volatile GC::vector<TreeNode>>>::value, "wrapped const test");
+	static_assert(std::is_same<const GC::make_wrapped_t<const volatile std::vector<TreeNode>>, const volatile GC::make_wrapped_t<const volatile std::vector<TreeNode>>>::value, "wrapped const test");
+	static_assert(std::is_same<GC::make_wrapped_t<const volatile GC::vector<TreeNode>>, GC::make_wrapped_t<const volatile std::vector<TreeNode>>>::value, "wrapped const test");
+
+	// ---------------------------------
+
 	std::cerr << "-------- ctors --------\n";
 	{
 		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
