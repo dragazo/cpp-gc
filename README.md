@@ -9,8 +9,8 @@ With `cpp-gc` in place, all you'd need to do to fix the above example is change 
 Contents:
 
 * [How It Works](#how-it-works)
-* [Guarantees](#guarantees)
 * [GC Strategy](#gc-strategy)
+* [Guarantees](#guarantees)
 * [Formal Definitions](#formal-definitions)
 * [Router Functions](#router-functions)
 * [Built-in Router Functions](#built-in-router-functions)
@@ -21,41 +21,28 @@ Contents:
 
 ## How it Works
 
-`cpp-gc` is designed to be **streamlined and minimalistic**. Very few things are visible to the user. The most important things to know are:
+`cpp-gc` is a very powerful library with a lot of built-in features. However, there are only a few things that you *really* need to know about in terms of functions and types:
+
 * `GC` - Static class containing types and functions that help you **manage your memory conveniently**.
 * `GC::ptr<T>` - The shining star of `cpp-gc` - represents an **autonomous garbage-collected pointer**.
-* `GC::atomic_ptr<T>` - An atomic version of `GC::ptr<T>` that's safe to read/write from several threads. Equivalent to `std::atomic<GC::ptr<T>>`.
-* `GC::make<T>(Args&&...)` - Constructs a new dynamic object and puts it in gc control. Used like `std::make_shared`.
-* `GC::adopt<T>(T*)` - Adopts a pre-existing object into gc control. Like the `T*` constructor of e.g. `std::shared_ptr<T>`.
+* `GC::atomic_ptr<T>` - An **atomic** version of `GC::ptr<T>` that's safe to read/write from several threads. Equivalent to `std::atomic<GC::ptr<T>>`.
+* `GC::make<T>()` - Constructs a new dynamic object and puts it in gc control. Used like `std::make_shared`.
+* `GC::adopt<T>()` - Adopts a pre-existing object into gc control. Like the `T*` constructor of `std::shared_ptr<T>`.
+* `GC::alias<T, U>()` - Aliases a sub-object of an object under gc control. Like the aliasing constructor of `std::shared_ptr<T>`
 * `GC::collect()` - Triggers a full garbage collection pass *(see below)*.
 
-When you allocate an object via `GC::make<T>` or bind a pre-existing object with `GC::adopt<T>` it creates a new garbage-collected object with a reference count of 1. Just like `std::shared_ptr`, it will automatically manage the reference count and delete the object **immediately** when the reference count hits zero *(except in one case - see [Guarantees](#guarantees))*. What does this mean? Well this means if `std::shared_ptr` worked for you before, it'll work for you now exactly the same *(though a bit slower due to having extra things to manage)*.
+When you allocate an object via `GC::make<T>` or bind a pre-existing object with `GC::adopt<T>` it creates a new garbage-collected object with a reference count of 1. Just like `std::shared_ptr`, it will automatically manage the reference count and delete the object **immediately** when the reference count hits zero *(except in one case - see [Guarantees](#guarantees))*. What does this mean? Well this means if `std::shared_ptr` worked for you before, `GC::ptr` will function almost identically *(though a bit slower due to having extra things to manage)*.
 
 `GC::collect()` triggers a full garbage collection pass, which accounts for cycles using the typical mark-and-sweep algorithm. This is rather slow compared to the other method `cpp-gc` uses to manage non-cyclic references, but is required if you do in fact have cycles. So when should you call it? Probably never. I'll explain:
-
-## Guarantees
-
-The following guarantees are made for all objects under gc control assuming all objects present have cpp-gc compliant router functions (see below) and are not destroyed by external code:
-
-* Adding an object to gc control (i.e. `GC::make<T>` or `GC::adopt<T>`) offers the strong exception guarantee and is O(1).
-* Once under gc control, the object shall not be relocated - i.e. raw pointers to said object will never be invalidated.
-* The allocating form of gc object insertion (i.e. `GC::make<T>`) shall allocate a block of memory suitably aligned for type `T` even if `T` is an overaligned type.
-* Any function or utility exposed by the cpp-gc interface is written in such a way that deadlocks are impossible under any circumstance.
-* Invoking a garbage collection (i.e. `GC::collect()`) while another garbage collection is running in any thread is non-blocking and indeed no-op.
-* A reference count shall be maintained for each object under gc control. When this reference count reaches zero the object is immediately deleted unless it is currently under collection consideration by an active call to `GC::collect()`, in which case the object is guaranteed to be destroyed before the end of said call to `GC::collect()`.
-
-Given the same assumptions of objects under gc control, the following (non-)guarantees are made by cpp-gc:
-
-* The thread that destroys an object under gc control is undefined. If your object requires the same thread that made it to destroy it (e.g. `std::unique_lock<std::mutex>`), it should not be used directly by cpp-gc.
 
 ## GC Strategy
 
 `cpp-gc` has several "strategy" options for automatically deciding when to perform a full garbage collect pass. This is controlled by a bitfield enum called `GC::strategies`.
 
 The available strategy options are:
-* `manual` - No automatic collection (except non-cyclic dependencies, which are always handled automatically and immediately).
+* `manual` - No automatic collection (except non-cyclic dependencies, which are always handled automatically once the reference count hits zero).
 * `timed` - Collect from a background thread on a regular basis.
-* `allocfail` - Collect every time a call to `GC::make<T>(Args...)` fails to allocate space.
+* `allocfail` - Collect every time a call to `GC::make<T>()` or `GC::adopt<T>()` fails to allocate space.
 
 `GC::strategy()` allows you to read/write the strategy to use.
 
@@ -64,6 +51,20 @@ The available strategy options are:
 The default strategy is `timed | allocfail`, with the time set to 60 seconds.
 
 Typically, if you want to use non-default settings, you should set them up as soon as possible on program start and not modify them again.
+
+## Guarantees
+
+The following guarantees are made for all objects under gc control assuming all objects present have `cpp-gc`-compliant router functions (see below) and are not destroyed by external code:
+
+* Adding an object to gc control (i.e. `GC::make<T>()` or `GC::adopt<T>()`) offers the strong exception guarantee and is O(1).
+* Once under gc control, the object shall not be relocated - i.e. raw pointers to said object will never be invalidated.
+* The allocating form of gc object insertion (i.e. `GC::make<T>()`) shall allocate a block of memory suitably-aligned for type `T` even if `T` is an over-aligned type.
+* Invoking a garbage collection (i.e. `GC::collect()`) while another garbage collection is running in any thread is non-blocking and indeed no-op.
+* A reference count shall be maintained for each object under gc control. When this reference count reaches zero the object is immediately deleted unless it is currently under collection consideration by an active call to `GC::collect()`, in which case the object is at least guaranteed to be destroyed before the end of said call to `GC::collect()`.
+
+Given the same assumptions of objects under gc control, the following (non-)guarantees are made by cpp-gc:
+
+* The thread that destroys an object under gc control is undefined. If your object requires the same thread that made it to destroy it (e.g. `std::unique_lock<std::mutex>`), it should not be used directly by cpp-gc.
 
 ## Formal Definitions
 
@@ -79,7 +80,7 @@ At any point in time, the owned object is considered to be part of its owner (i.
 The simplest form of ownership is a by-value member.
 Another common category of owned object is a by-value container (e.g. the contents of `std::vector`, `std::list`, `std::set`, etc.).
 Another case is a uniquely-owning pointer or reference - e.g. pointed-to object of `std::unique_ptr`, or any other (potentially-smart) pointer/reference to an object you know you own uniquely.
-Of course, these cases can be mixed - e.g. a by-value member `std::unique_ptr` which is a uniquely-owning pointer to a by-value container `std::vector` of a gc type.
+Of course, these cases can be mixed - e.g. a by-value member `std::unique_ptr` which is a uniquely-owning pointer to a by-value container `std::vector` of a gc type `T`.
 
 It is important to remember that a container type like `std::vector<T>` is a gc type if `T` is a gc type (because it thus contains or "owns" gc objects).
 
@@ -110,11 +111,11 @@ The following is critical and easily forgotten:
 All mutating actions in a mutable gc object (e.g. adding items to a `std::vector<GC::ptr<T>>`) must occur in a manner mutually exclusive with the object's router function.
 This is because any thread may at any point make routing requests to any number of objects under gc management in any order and for any purpose.
 Thus, if you have e.g. a `std::vector<GC::ptr<T>>`, you should also have a mutex to guard it on insertion/deletion/reordering of elements and for the router function.
-Additionally, if your router function locks one or more mutexes, performing any actions that may self-route (e.g. a full garbage collection) will deadlock if any of the locks are still held.
+Additionally, if your router function locks one or more mutexes, performing any actions that may self-route (e.g. a full garbage collection via `GC::collect()`) may deadlock if any of the locks are still held when the call is made.
 This can be fixed by either unlocking the mutex(es) prior to performing the self-routing action or by switching to a recursive mutex.
 This would likely need to be encapsulated by methods of your class to ensure external code can't violate this requirement (it is undefined behavior to violate this).
 
-On the bright side, cpp-gc has wrappers for all standard containers that internally apply all of this logic without the need to remember it.
+On the bright side, `cpp-gc` has wrappers for all standard containers that internally apply all of this logic without the need to remember it.
 So, you could use a `GC::vector<GC::ptr<T>>` instead of a `std::vector<GC::ptr<T>>` and avoid the need to be careful or encapsulate anything.
 
 The following requirements pertain to router functions:
