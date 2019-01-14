@@ -110,6 +110,8 @@ The following is critical and easily forgotten:
 All mutating actions in a mutable gc object (e.g. adding items to a `std::vector<GC::ptr<T>>`) must occur in a manner mutually exclusive with the object's router function.
 This is because any thread may at any point make routing requests to any number of objects under gc management in any order and for any purpose.
 Thus, if you have e.g. a `std::vector<GC::ptr<T>>`, you should also have a mutex to guard it on insertion/deletion/reordering of elements and for the router function.
+Additionally, if your router function locks one or more mutexes, performing any actions that may self-route (e.g. a full garbage collection) will deadlock if any of the locks are still held.
+This can be fixed by either unlocking the mutex(es) prior to performing the self-routing action or by switching to a recursive mutex.
 This would likely need to be encapsulated by methods of your class to ensure external code can't violate this requirement (it is undefined behavior to violate this).
 
 On the bright side, cpp-gc has wrappers for all standard containers that internally apply all of this logic without the need to remember it.

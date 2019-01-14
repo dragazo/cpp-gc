@@ -146,7 +146,7 @@ bool GC::obj_list::contains(info *obj) const noexcept
 
 // --------------- //
 
-void GC::disjoint_module::__mark_sweep(info *obj)
+void GC::disjoint_module::mark_sweep(info *obj)
 {
 	// mark this handle
 	obj->marked = true;
@@ -158,7 +158,7 @@ void GC::disjoint_module::__mark_sweep(info *obj)
 		info *raw = arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
-		if (raw && !raw->marked) shared().__mark_sweep(raw);
+		if (raw && !raw->marked) shared().mark_sweep(raw);
 	});
 }
 
@@ -279,7 +279,7 @@ void GC::disjoint_module::collect()
 	// -- mark and sweep -- //
 
 	// perform a mark sweep from each root object
-	for (info *i : root_objs) __mark_sweep(i);
+	for (info *i : root_objs) mark_sweep(i);
 
 	// -- clean anything not marked -- //
 

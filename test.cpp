@@ -675,6 +675,10 @@ int main() try
 	GC::ptr<std::stack<int>> stack_ptr = GC::make<std::stack<int>>();
 	GC::ptr<std::queue<int>> queue_ptr = GC::make<std::queue<int>>();
 	GC::ptr<std::priority_queue<int>> priority_queue_ptr = GC::make<std::priority_queue<int>>();
+	
+	assert(stack_ptr == stack_ptr.get());
+	assert(queue_ptr == queue_ptr.get());
+	assert(priority_queue_ptr == priority_queue_ptr.get());
 
 	for (int i = 0; i < 8; ++i)
 	{
@@ -684,6 +688,12 @@ int main() try
 	}
 
 	GC::unique_ptr<int> gc_uint(new int(77));
+
+	GC::ptr<int[]> non_const_arr = GC::make<int[]>(16);
+	GC::ptr<const int[]> const_arr = non_const_arr;
+
+	assert(GC::constCast<const int[]>(non_const_arr) == const_arr);
+	assert(GC::constCast<int[]>(const_arr) == non_const_arr);
 
 	if (gc_uint != nullptr)
 	{
@@ -1192,7 +1202,7 @@ int main() try
 					w = x; x = y; y = z; z = w;
 				}
 			}
-			catch (...) { std::cerr << "\n\nINTERFETENCE EXCEPTION!!\n\n"; std::abort(); }
+			catch (...) { std::cerr << "\n\nINTERFERENCE EXCEPTION!!\n\n"; std::abort(); }
 		});
 
 		for (auto &i : threads) i.join();

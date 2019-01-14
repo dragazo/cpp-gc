@@ -53,6 +53,10 @@
 // non-zero enables these additional checks - zero disables them.
 #define DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS 1
 
+// if nonzero, several debugging features are enabled:
+// 1) GC::ptr will be set to null upon destruction
+#define DRAGAZO_GARBAGE_COLLECT_DEBUGGING_FEATURES 1
+
 // -------------------------------- //
 
 // -- utility types forward decl -- //
@@ -172,6 +176,8 @@ public: // -- router function definitions -- //
 	// all mutating actions in a mutable gc object (e.g. adding items to a std::vector<GC::ptr<T>>) must occur in a manner mutually exclusive with the object's router function.
 	// this is because any thread may at any point make routing requests to any number of objects under gc management in any order and for any purpose.
 	// thus, if you have e.g. a std::vector<GC::ptr<T>>, you should also have a mutex to guard it on insertion/deletion/reordering of elements and for the router function.
+	// additionally, if your router function locks one or more mutexes, performing any actions that may self-route (e.g. a full garbage collection) will deadlock if any of the locks are still held.
+	// this can be fixed by either unlocking the mutex(es) prior to performing the self-routing action or by switching to a recursive mutex.
 	// this would likely need to be encapsulated by methods of your class to ensure external code can't violate this requirement (it is undefined behavior to violate this).
 
 	// on the bright side, cpp-gc has wrappers for all standard containers that internally apply all of this logic without the need to remember it.
@@ -310,7 +316,7 @@ private: // -- private types -- //
 
 	public: // -- special resources -- //
 
-		// reference count - should only be used by collection sync function under internal_mutex lock
+		// reference count - should only be used by disjoint module function under internal_mutex lock
 		std::size_t ref_count;
 
 		// mark flag - should only be used by the collector
@@ -326,6 +332,7 @@ private: // -- private types -- //
 
 	// represents a raw_handle_t value with encapsulated syncronization logic.
 	// you should not use raw_handle_t directly - use this instead.
+	// NOT THREADSAFE - read/write from several threads on an instance of this object is undefined behavior.
 	class smart_handle
 	{
 	private: // -- data -- //
@@ -500,7 +507,7 @@ public: // -- ptr -- //
 	// a self-managed garbage-collected pointer to type T.
 	// if T is an unbound array, it is considered the "array" form, otherwise it is the "scalar" form.
 	// scalar and array forms may offer different interfaces.
-	// this type is not internally synchronized (i.e. not thread safe).
+	// NOT THREADSAFE - this type is NOT internally synchronized.
 	// thus read/writes from several threads to the same ptr are undefined behavior (see atomic_ptr).
 	template<typename T>
 	struct ptr
@@ -515,8 +522,15 @@ public: // -- ptr -- //
 		// pointer to the object - this is only used for object access and is entirely unimportant as far a gc is concerned
 		element_type *obj;
 
-		// the raw handle wraper - this is where all the important gc logic takes place
+		// the raw handle wrapper - this is where all the important gc logic takes place
 		smart_handle handle;
+
+		// IMPORTANT: at all times during a ptr instance's lifetime: obj == null <=> handle == null
+		// however, handle cannot be checked for null (in a fast manner due to atomicity).
+		// violation of this constraint is undefined behavior.
+		// therefore, context must be used to guarantee this.
+		// e.g. constructing a new ptr can test this by testing the info* object passed to the obj insertion function for the gc database.
+		// e.g. a pre-existing ptr will be assumed to satisfy this.
 
 		friend class GC;
 
@@ -524,12 +538,18 @@ public: // -- ptr -- //
 
 		// changes what handle we should use, properly unlinking ourselves from the old one and linking to the new one.
 		// the new handle must come from a pre-existing ptr object.
-		// _obj must be properly sourced from _handle->obj and non-null if _handle is non-null.
-		// if _handle (and _obj) is null, the resulting state is empty.
+		// new_obj must be properly-sourced from new_handle->obj and non-null if new_handle is non-null.
+		// if new_handle (and new_obj) is null, the resulting state is empty.
 		void reset(element_type *new_obj, const smart_handle &new_handle)
 		{
 			obj = new_obj;
 			handle.reset(new_handle);
+		}
+		// as reset(nullptr, nullptr) but avoids the intermediate conversion from nullptr to smart_handle
+		void reset()
+		{
+			obj = nullptr;
+			handle.reset();
 		}
 
 		// constructs a new ptr instance with the specified obj and pre-existing handle.
@@ -538,9 +558,9 @@ public: // -- ptr -- //
 
 		// constructs a new ptr instance with the specified obj and handle.
 		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
-		// _handle is automatically added to the gc database.
-		// _handle must not have been sourced via handle.raw_handle().
-		ptr(element_type *_obj, info *_handle, bind_new_obj_t) : obj(_obj), handle(_handle, GC::bind_new_obj) {}
+		// new_handle is automatically added to the gc database.
+		// new_handle must NOT have been sourced via handle.raw_handle().
+		ptr(element_type *new_obj, info *new_handle, bind_new_obj_t) : obj(new_obj), handle(new_handle, GC::bind_new_obj) {}
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -549,8 +569,13 @@ public: // -- ptr -- //
 
 		~ptr()
 		{
+			#if DRAGAZO_GARBAGE_COLLECT_DEBUGGING_FEATURES
+
 			// set obj to null (better to get nullptr exceptions than segfaults)
+			// doing/not doing this doesn't matter for the obj/handle nullity assertion because we've ended the ptr's lifetime.
 			obj = nullptr;
+
+			#endif
 		}
 
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
@@ -573,18 +598,18 @@ public: // -- ptr -- //
 			return *this;
 		}
 
-		ptr &operator=(std::nullptr_t) { reset(nullptr, nullptr); return *this; }
+		ptr &operator=(std::nullptr_t) { reset(); return *this; }
 
 	public: // -- obj access -- //
 
 		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
-		element_type *get() const { return obj; }
+		element_type *get() const noexcept { return obj; }
 
 		element_type &operator*() const { return *get(); }
-		element_type *operator->() const { return get(); }
+		element_type *operator->() const noexcept { return get(); }
 
 		// returns true iff this ptr points to a managed object (non-null)
-		explicit operator bool() const { return get() != nullptr; }
+		explicit operator bool() const noexcept { return get() != nullptr; }
 
 	public: // -- array obj access -- //
 
@@ -595,32 +620,33 @@ public: // -- ptr -- //
 
 		// returns a ptr to the element with the specified index (no bounds checking).
 		// said ptr aliases the entire array - the array will not be deleted while the alias is still reachable.
+		// if this pointer does not refer to an object, the returned ptr is null and does not alias anything.
 		// exactly equivalent to GC::alias(p.get() + index, p).
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
-		ptr<element_type> alias(std::ptrdiff_t index) const { return {get() + index, handle}; }
+		ptr<element_type> alias(std::ptrdiff_t index) const { return GC::alias(get() + index, *this); }
 
 	public: // -- comparison -- //
 
-		friend bool operator==(const ptr &a, const ptr &b) { return a.get() == b.get(); }
-		friend bool operator!=(const ptr &a, const ptr &b) { return a.get() != b.get(); }
-		friend bool operator<(const ptr &a, const ptr &b) { return a.get() < b.get(); }
-		friend bool operator<=(const ptr &a, const ptr &b) { return a.get() <= b.get(); }
-		friend bool operator>(const ptr &a, const ptr &b) { return a.get() > b.get(); }
-		friend bool operator>=(const ptr &a, const ptr &b) { return a.get() >= b.get(); }
+		friend bool operator==(const ptr &a, const ptr &b) noexcept { return a.get() == b.get(); }
+		friend bool operator!=(const ptr &a, const ptr &b) noexcept { return a.get() != b.get(); }
+		friend bool operator<(const ptr &a, const ptr &b) noexcept { return a.get() < b.get(); }
+		friend bool operator<=(const ptr &a, const ptr &b) noexcept { return a.get() <= b.get(); }
+		friend bool operator>(const ptr &a, const ptr &b) noexcept { return a.get() > b.get(); }
+		friend bool operator>=(const ptr &a, const ptr &b) noexcept { return a.get() >= b.get(); }
 
-		friend bool operator==(const ptr &a, std::nullptr_t b) { return a.get() == b; }
-		friend bool operator!=(const ptr &a, std::nullptr_t b) { return a.get() != b; }
-		friend bool operator<(const ptr &a, std::nullptr_t b) { return a.get() < b; }
-		friend bool operator<=(const ptr &a, std::nullptr_t b) { return a.get() <= b; }
-		friend bool operator>(const ptr &a, std::nullptr_t b) { return a.get() > b; }
-		friend bool operator>=(const ptr &a, std::nullptr_t b) { return a.get() >= b; }
+		friend bool operator==(const ptr &a, const element_type *b) noexcept { return a.get() == b; }
+		friend bool operator!=(const ptr &a, const element_type *b) noexcept { return a.get() != b; }
+		friend bool operator<(const ptr &a, const element_type *b) noexcept { return a.get() < b; }
+		friend bool operator<=(const ptr &a, const element_type *b) noexcept { return a.get() <= b; }
+		friend bool operator>(const ptr &a, const element_type *b) noexcept { return a.get() > b; }
+		friend bool operator>=(const ptr &a, const element_type *b) noexcept { return a.get() >= b; }
 
-		friend bool operator==(std::nullptr_t a, const ptr &b) { return a == b.get(); }
-		friend bool operator!=(std::nullptr_t a, const ptr &b) { return a != b.get(); }
-		friend bool operator<(std::nullptr_t a, const ptr &b) { return a < b.get(); }
-		friend bool operator<=(std::nullptr_t a, const ptr &b) { return a <= b.get(); }
-		friend bool operator>(std::nullptr_t a, const ptr &b) { return a > b.get(); }
-		friend bool operator>=(std::nullptr_t a, const ptr &b) { return a >= b.get(); }
+		friend bool operator==(const element_type *a, const ptr &b) noexcept { return a == b.get(); }
+		friend bool operator!=(const element_type *a, const ptr &b) noexcept { return a != b.get(); }
+		friend bool operator<(const element_type *a, const ptr &b) noexcept { return a < b.get(); }
+		friend bool operator<=(const element_type *a, const ptr &b) noexcept { return a <= b.get(); }
+		friend bool operator>(const element_type *a, const ptr &b) noexcept { return a > b.get(); }
+		friend bool operator>=(const element_type *a, const ptr &b) noexcept { return a >= b.get(); }
 
 	public: // -- swap -- //
 
@@ -715,7 +741,7 @@ public: // -- ptr casting -- //
 	template<typename To, typename From, std::enable_if_t<std::is_convertible<From, To>::value || std::is_same<std::remove_cv_t<To>, std::remove_cv_t<From>>::value, int> = 0>
 	static ptr<To> staticCast(const GC::ptr<From> &p)
 	{
-		return p.obj ? ptr<To>(static_cast<typename ptr<To>::element_type*>(p.obj), p.handle) : ptr<To>();
+		return ptr<To>(static_cast<typename ptr<To>::element_type*>(p.obj), p.handle);
 	}
 
 	template<typename To, typename From, std::enable_if_t<std::is_polymorphic<From>::value && !std::is_array<To>::value, int> = 0>
@@ -753,7 +779,6 @@ public: // -- core router specializations -- //
 		template<typename F> static void route(const atomic_ptr<T> &atomic, F func)
 		{
 			// we avoid calling any gc functions by not actually using the load function - we just use the object directly.
-			// locking is safe because all ptr operations are non-blocking and thus this can never result in a deadlock.
 
 			std::lock_guard<std::mutex> lock(atomic.mutex);
 
@@ -878,7 +903,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::deque<T, Allocator> &deque, F func)
 		{
-			route_range(deque.begin(), deque.end(), func);
+			GC::route_range(deque.begin(), deque.end(), func);
 		}
 	};
 
@@ -890,7 +915,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::forward_list<T, Allocator> &list, F func)
 		{
-			route_range(list.begin(), list.end(), func);
+			GC::route_range(list.begin(), list.end(), func);
 		}
 	};
 
@@ -902,7 +927,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::list<T, Allocator> &list, F func)
 		{
-			route_range(list.begin(), list.end(), func);
+			GC::route_range(list.begin(), list.end(), func);
 		}
 	};
 	
@@ -914,7 +939,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::set<Key, Compare, Allocator> &set, F func)
 		{
-			route_range(set.begin(), set.end(), func);
+			GC::route_range(set.begin(), set.end(), func);
 		}
 	};
 
@@ -926,7 +951,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::multiset<Key, Compare, Allocator> &set, F func)
 		{
-			route_range(set.begin(), set.end(), func);
+			GC::route_range(set.begin(), set.end(), func);
 		}
 	};
 
@@ -938,7 +963,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::map<Key, T, Compare, Allocator> &map, F func)
 		{
-			route_range(map.begin(), map.end(), func);
+			GC::route_range(map.begin(), map.end(), func);
 		}
 	};
 
@@ -950,7 +975,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::multimap<Key, T, Compare, Allocator> &map, F func)
 		{
-			route_range(map.begin(), map.end(), func);
+			GC::route_range(map.begin(), map.end(), func);
 		}
 	};
 
@@ -962,7 +987,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func)
 		{
-			route_range(set.begin(), set.end(), func);
+			GC::route_range(set.begin(), set.end(), func);
 		}
 	};
 
@@ -974,7 +999,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func)
 		{
-			route_range(set.begin(), set.end(), func);
+			GC::route_range(set.begin(), set.end(), func);
 		}
 	};
 
@@ -986,7 +1011,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, F func)
 		{
-			route_range(map.begin(), map.end(), func);
+			GC::route_range(map.begin(), map.end(), func);
 		}
 	};
 
@@ -998,7 +1023,7 @@ public: // -- stdlib container router specializations -- //
 		template<typename F>
 		static void route(const std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func)
 		{
-			route_range(map.begin(), map.end(), func);
+			GC::route_range(map.begin(), map.end(), func);
 		}
 	};
 
@@ -1030,7 +1055,7 @@ public: // -- std adapter routers -- //
 		template<typename F> static void route(const std::stack<T, Container> &stack, F func)
 		{
 			const Container &container = __get_adapter_container(stack);
-			route_range(container.begin(), container.end(), func);
+			GC::route(container, func);
 		}
 	};
 
@@ -1042,7 +1067,7 @@ public: // -- std adapter routers -- //
 		template<typename F> static void route(const std::queue<T, Container> &queue, F func)
 		{
 			const Container &container = __get_adapter_container(queue);
-			route_range(container.begin(), container.end(), func);
+			GC::route(container, func);
 		}
 	};
 
@@ -1054,15 +1079,16 @@ public: // -- std adapter routers -- //
 		template<typename F> static void route(const std::priority_queue<T, Container, Compare> &pqueue, F func)
 		{
 			const Container &container = __get_adapter_container(pqueue);
-			route_range(container.begin(), container.end(), func);
+			GC::route(container, func);
 		}
 	};
 
 private: // -- aligned raw memory allocators -- //
 
-	// uses whatever default alignment the stdlib implementation uses (i.e. std::max_align_t).
+	// passively aligns blocks of memory to whatever default alignment the stdlib implementation uses (i.e. std::max_align_t).
 	// this is more space-efficient than active alignment, but can only be used for certain (most) types.
-	struct __passive_aligned_allocator
+	// returns null on allocation failure (no exceptions).
+	struct passive_aligned_allocator
 	{
 		static void *alloc(std::size_t size) { return std::malloc(size); }
 		static void dealloc(void *p) { std::free(p); }
@@ -1070,31 +1096,44 @@ private: // -- aligned raw memory allocators -- //
 
 	// actively aligns blocks of memory to the given alignment.
 	// this is less space-efficient than passive alignment, but must be used for over-aligned types.
+	// returns null on allocation failure (no exceptions).
 	template<std::size_t align>
-	struct __active_aligned_allocator
+	struct active_aligned_allocator
 	{
+		static_assert(align != 0 && (align & (align - 1)) == 0, "align must be a power of 2");
+
 		static void *alloc(std::size_t size) { return GC::aligned_malloc(size, align); }
 		static void dealloc(void *p) { GC::aligned_free(p); }
 	};
 
-	// helper function for aligned_allocator_t - do not use this directly
-	template<std::size_t align, std::enable_if_t<(align <= alignof(std::max_align_t)), int> = 0>
-	static __passive_aligned_allocator __returns_aligned_allocator_type();
+	// given zero or more types, provides an allocator type whose alignment is suitable for all specified types.
+	// returns null on allocation failure (no exceptions).
+	template<typename ...Types>
+	struct aligned_allocator
+	{
+	private: // -- helpers -- //
 
-	template<std::size_t align, std::enable_if_t<(align > alignof(std::max_align_t)), int> = 0>
-	static __active_aligned_allocator<align> __returns_aligned_allocator_type();
+		template<std::size_t align, std::enable_if_t<(align <= alignof(std::max_align_t)), int> = 0>
+		static passive_aligned_allocator __returns_aligned_allocator_type();
 
-	// given zero or more alignment requirements, returns an allocator that is at least as strict as the most strict requirement.
-	// these allocators return null on allocation failure (no exceptions).
-	template<std::size_t ...align>
-	using aligned_allocator_t = decltype(__returns_aligned_allocator_type < std::max({ (std::size_t)1, align... }) > ());
+		template<std::size_t align, std::enable_if_t<(align > alignof(std::max_align_t)), int> = 0>
+		static active_aligned_allocator<align> __returns_aligned_allocator_type();
+
+	public: // -- interface -- //
+
+		typedef decltype(__returns_aligned_allocator_type < std::max({ (std::size_t)1, alignof(Types)... }) > ()) type;
+	};
+
+	template<typename ...Types>
+	using aligned_allocator_t = typename aligned_allocator<Types...>::type;
 
 private: // -- checked allocators -- //
 
 	// wrapper for an allocator that additionally performs gc-specific logic.
 	// the allocator you provide must return null on allocation failure - must not throw.
+	// the resulting wrapped allocator (this type) throws std::bad_alloc on allocation failure.
 	template<typename allocator_t>
-	struct __checked_allocator
+	struct checked_allocator
 	{
 		static void *alloc(std::size_t size)
 		{
@@ -1117,10 +1156,10 @@ private: // -- checked allocators -- //
 		static void dealloc(void *p) { allocator_t::dealloc(p); }
 	};
 
-	// given zero or more alignment requirements, returns an allocator that is at least as strict as the most strict requirement.
-	// these allocators throw std::bad_alloc on allocation failure.
-	template<std::size_t ...align>
-	using checked_aligned_allocator_t = __checked_allocator<aligned_allocator_t<align...>>;
+	// given zero or more types, provides a checked allocator type whose alignment is suitable for all specified types.
+	// throws std::bad_alloc on allocation failure.
+	template<typename ...Types>
+	using checked_aligned_allocator_t = checked_allocator<aligned_allocator_t<Types...>>;
 
 public: // -- ptr allocation -- //
 
@@ -1135,7 +1174,7 @@ public: // -- ptr allocation -- //
 		typedef std::remove_cv_t<T> element_type;
 		
 		// get the allocator
-		typedef checked_aligned_allocator_t<alignof(element_type), alignof(info)> allocator_t;
+		typedef checked_aligned_allocator_t<element_type, info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1200,7 +1239,7 @@ public: // -- ptr allocation -- //
 		const std::size_t scalar_count = count * GC::full_extent<T>::value;
 
 		// get the allocator
-		typedef checked_aligned_allocator_t<alignof(scalar_type), alignof(info)> allocator_t;
+		typedef checked_aligned_allocator_t<scalar_type, info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1309,7 +1348,7 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// get the allocator
-		typedef checked_aligned_allocator_t<alignof(info)> allocator_t;
+		typedef checked_aligned_allocator_t<info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1366,7 +1405,7 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// get the allocator
-		typedef checked_aligned_allocator_t<alignof(info)> allocator_t;
+		typedef checked_aligned_allocator_t<info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1691,8 +1730,9 @@ private: // -- collection synchronizer -- //
 
 	private: // -- helpers -- //
 
-		// performs the mark sweep logic for collect()
-		void __mark_sweep(info *obj);
+		// performs the mark sweep logic for collect().
+		// internal_mutex must NOT be locked prior to invocation.
+		void mark_sweep(info *obj);
 
 	public: // -- interface -- //
 
