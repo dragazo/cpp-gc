@@ -57,6 +57,18 @@
 // 1) GC::ptr will be set to null upon destruction
 #define DRAGAZO_GARBAGE_COLLECT_DEBUGGING_FEATURES 1
 
+// if nonzero, uses a GC::ignore_collect_sentry inside stdlib wrapper methods where the router mutex is locked and arbitrary code will be executed.
+// otherwise does not use an ignore sentry (faster and makes GC::collect() not fail spuriously due to being ignored by a wrapper from another thread).
+// this prevents deadlocks in the case where the ctor/dtor/asgn of the container's element type may call GC::collect().
+// instead, i would recommend leaving this off and just make a personal rule to never call GC::collect() from ctor/dtor/asgn functions.
+#define DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS 0
+
+// if nonzero, uses a recursive mutex inside stdlib wrappers for router synchronization logic; otherwise uses a normal mutex.
+// this is basically just a toned-down version of USE_IGNORE_COLLECT_IN_WRAPPERS as it makes calling GC:collect() from the same thread that holds the mutex safe.
+// while i still recommend having a personal rule to never call GC::collect() from ctor/dtor/asgn functions, i suggest you leave this on for safety.
+// you never know when a type you hold in a templated context will have e.g. a dtor that executes arbitrary code for the holder.
+#define DRAGAZO_GARBAGE_COLLECT_USE_RECURSIVE_MUTEX_IN_WRAPPERS 1
+
 // -------------------------------- //
 
 // -- utility types forward decl -- //
@@ -70,6 +82,16 @@
 
 template<typename ...Lockable>
 class __gc_scoped_lock;
+
+// ----------------------------------------------------
+
+// the type of mutex to use inside stdlib wrappers
+
+#if DRAGAZO_GARBAGE_COLLECT_USE_RECURSIVE_MUTEX_IN_WRAPPERS
+typedef std::recursive_mutex __gc_wrapper_mutex_t;
+#else
+typedef std::mutex __gc_wrapper_mutex_t;
+#endif
 
 // ----------------------------------------------------
 
@@ -1558,6 +1580,27 @@ public: // -- stdlib adapter aliases -- //
 	template<typename T, typename Container = std::vector<T>, typename Compare = std::less<typename Container::value_type>>
 	using priority_queue = std::priority_queue<T, make_wrapped_t<Container>, Compare>;
 
+public: // -- collection logic utilities -- //
+
+	// a sentry object that controls the ignore feature of GC::collect().
+	// on construction, begins an ignore action; on destruction ends it.
+	// while this object exists, calls to GC::collect() from any thread bound to the same disjoint gc module will be ignored.
+	// this is typically only used for preventing deadlock situations caused by calling GC::collect() while a router mutex is held.
+	class ignore_collect_sentry
+	{
+	private: // -- data -- //
+
+		std::size_t prev_count;
+
+	public: // -- ctor / dtor / asgn -- //
+
+		ignore_collect_sentry() { prev_count = disjoint_module::shared().begin_ignore_collect(); }
+		~ignore_collect_sentry() { disjoint_module::shared().end_ignore_collect(); }
+
+		// returns true iff there were no ignore actions in progress prior to the start of this one.
+		bool no_prev_ignores() const noexcept { return prev_count == 0; }
+	};
+
 private: // -- containers -- //
 
 	// a container of info objects - implemented as a doubly-linked list for fast removal from the middle.
@@ -1635,15 +1678,17 @@ private: // -- sentries -- //
 		bool operator!() const noexcept { return _value; }
 	};
 
-private: // -- collection synchronizer -- //
+private: // -- gc disjoint module -- //
 
-	class disjoint_module
+	class disjoint_module final
 	{
 	private: // -- synchronization -- //
 
 		std::mutex internal_mutex; // mutex used only for internal synchronization
 
 		std::thread::id collector_thread; // the thread id of the collector - none implies no collection is currently processing
+
+		std::size_t ignore_collect_count = 0; // the number of sources requesting collect actions to be ignored for this module
 
 	private: // -- collector-only resources -- //
 
@@ -1690,7 +1735,7 @@ private: // -- collection synchronizer -- //
 		// if true, cache the request in ref_count_del_cache.
 		// thus if false, the cache is considered a collector-only resource and must not be modified.
 		// if this is false, it is safe to directly modify the obj list under normal mutex lock.
-		bool cache_ref_count_del_actions;
+		bool cache_ref_count_del_actions = false;
 
 		// the shared resource cache for ref count deletion actions.
 		// objects in this cache MUST currently be in the obj list (NOT in the obj add cache).
@@ -1723,7 +1768,8 @@ private: // -- collection synchronizer -- //
 
 	private: // -- ctor / dtor / asgn -- //
 
-		disjoint_module() : cache_ref_count_del_actions(false) {}
+		disjoint_module() = default;
+		~disjoint_module() = default;
 
 		disjoint_module(const disjoint_module&) = delete;
 		disjoint_module &operator=(const disjoint_module&) = delete;
@@ -1775,6 +1821,14 @@ private: // -- collection synchronizer -- //
 		// schedules a handle repoint action that swaps the pointed-to info objects of two handles atomically.
 		// handle_a shall eventually point to whatever handle_b used to point to and vice versa.
 		void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
+
+		// begins an ignore collect action for this disjoint module.
+		// returns the number of (active) ignore collect actions prior to the start of this one.
+		// e.g. if this returns zero there were no prior ignore collect actions.
+		// the same thread that called this must later call end_ignore_collect() exactly once.
+		std::size_t begin_ignore_collect();
+		// ends an ignore collect action that was previously started by the calling thread.
+		void end_ignore_collect();
 
 	private: // -- private interface (unsafe) -- //
 		
@@ -2040,7 +2094,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unique_ptr>;
 
@@ -2076,9 +2130,14 @@ public: // -- ctor / dtor -- //
 
 	// !! ADD DELETER OBJ CTORS (3-4) https://en.cppreference.com/w/cpp/memory/__gc_unique_ptr/__gc_unique_ptr
 
-	__gc_unique_ptr(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_unique_ptr(wrapped_t &&other) noexcept
@@ -2087,9 +2146,14 @@ public: // -- ctor / dtor -- //
 	}
 
 	template<typename U, typename E>
-	__gc_unique_ptr(__gc_unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr(__gc_unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	template<typename U, typename E>
@@ -2105,72 +2169,122 @@ public: // -- ctor / dtor -- //
 
 public: // -- asgn -- //
 
-	__gc_unique_ptr &operator=(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr &operator=(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
-	__gc_unique_ptr &operator=(wrapped_t &&other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr &operator=(wrapped_t &&other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	template<typename U, typename E>
-	__gc_unique_ptr &operator=(__gc_unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr &operator=(__gc_unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	template<typename U, typename E>
-	__gc_unique_ptr &operator=(std::unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr &operator=(std::unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_unique_ptr &operator=(std::nullptr_t) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	__gc_unique_ptr &operator=(std::nullptr_t) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = nullptr;
 		return *this;
 	}
 
 public: // -- management -- //
 
-	pointer release() noexcept(noexcept(std::declval<std::mutex>().lock()))
+	pointer release() noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().release();
 	}
 
-	void reset(pointer ptr = pointer()) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	void reset(pointer ptr = pointer()) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reset(ptr);
 	}
 
 	template<typename U, typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
-	void reset(U other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	void reset(U other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reset(other); // std::unique_ptr doesn't know about cpp-gc stuff, so there's no way this can go wrong mutex-wise
 	}
 
 	template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
-	void reset(std::nullptr_t = nullptr) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	void reset(std::nullptr_t = nullptr) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reset(nullptr);
 	}
 
-	void swap(__gc_unique_ptr &other) noexcept(noexcept(std::declval<std::mutex>().lock()))
+	void swap(__gc_unique_ptr &other) noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_unique_ptr &a, __gc_unique_ptr &b) { a.swap(b); }
@@ -2199,7 +2313,7 @@ struct GC::router<__gc_unique_ptr<T, Deleter>>
 	template<typename F>
 	static void route(const __gc_unique_ptr<T, Deleter> &obj, F func)
 	{
-		std::lock_guard<std::mutex> lock(obj.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(obj.mutex);
 		GC::route(obj.wrapped(), func);
 	}
 };
@@ -2260,7 +2374,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_vector>;
 
@@ -2301,7 +2415,7 @@ public: // -- ctor / dtor -- //
 		new (buffer) wrapped_t(alloc);
 	}
 
-	__gc_vector(size_type count, const T& value = T(), const Allocator &alloc = Allocator())
+	__gc_vector(size_type count, const T& value, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, value, alloc);
 	}
@@ -2337,7 +2451,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_vector(__gc_vector &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_vector(wrapped_t &&other)
@@ -2347,7 +2466,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_vector(__gc_vector &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_vector(wrapped_t &&other, const Allocator &alloc)
@@ -2369,53 +2493,93 @@ public: // -- asgn -- //
 
 	__gc_vector &operator=(const __gc_vector &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_vector &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_vector &operator=(__gc_vector &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_vector &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_vector &operator=(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
 
 	void assign(size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(count, value);
 	}
 
 	template<typename InputIt>
 	void assign(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(first, last);
 	}
 
 	void assign(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(ilist);
 	}
 
@@ -2467,20 +2631,35 @@ public: // -- size / cap -- //
 
 	void reserve(size_type new_cap)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reserve(new_cap);
 	}
 	size_type capacity() const noexcept { return wrapped().capacity(); }
 
 	void shrink_to_fit()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().shrink_to_fit();
 	}
 
-	void clear() noexcept(noexcept(std::declval<std::mutex>().lock()))
+	void clear() noexcept(noexcept(std::declval<__gc_wrapper_mutex_t>().lock()))
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -2488,49 +2667,89 @@ public: // -- insert / erase -- //
 
 	iterator insert(const_iterator pos, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, value);
 	}
 	iterator insert(const_iterator pos, T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, std::move(value));
 	}
 
 	iterator insert(const_iterator pos, size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, count, value);
 	}
 
 	template<typename InputIt>
 	iterator insert(const_iterator pos, InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, first, last);
 	}
 
 	iterator insert(const_iterator pos, std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, ilist);
 	}
 
 	template<typename ...Args>
 	iterator emplace(const_iterator pos, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
@@ -2538,25 +2757,45 @@ public: // -- push / pop -- //
 
 	void push_back(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_back(value);
 	}
 	void push_back(T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_back(std::move(value));
 	}
 
 	template<typename ...Args>
 	decltype(auto) emplace_back(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_back(std::forward<Args>(args)...);
 	}
 
 	void pop_back()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().pop_back();
 	}
 
@@ -2564,12 +2803,22 @@ public: // -- resize -- //
 
 	void resize(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count);
 	}
 	void resize(size_type count, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count, value);
 	}
 
@@ -2577,7 +2826,12 @@ public: // -- swap -- //
 
 	void swap(__gc_vector &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_vector &a, __gc_vector &b) { a.swap(b); }
@@ -2600,7 +2854,7 @@ struct GC::router<__gc_vector<T, Allocator>>
 	template<typename F>
 	static void route(const __gc_vector<T, Allocator> &vec, F func)
 	{
-		std::lock_guard<std::mutex> lock(vec.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(vec.mutex);
 		GC::route(vec.wrapped(), func);
 	}
 };
@@ -2614,7 +2868,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // the router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // the router synchronizer
 
 	friend struct GC::router<__gc_deque>;
 
@@ -2691,7 +2945,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_deque(__gc_deque &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_deque(wrapped_t &&other)
@@ -2701,7 +2960,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_deque(__gc_deque &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_deque(wrapped_t &&other, const Allocator &alloc)
@@ -2723,53 +2987,93 @@ public: // -- asgn -- //
 
 	__gc_deque &operator=(const __gc_deque &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_deque &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_deque &operator=(__gc_deque &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_deque &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_deque &operator=(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
 
 	void assign(size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(count, value);
 	}
 
 	template<typename InputIt>
 	void assign(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(first, last);
 	}
 
 	void assign(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(ilist);
 	}
 
@@ -2818,20 +3122,35 @@ public: // -- size / cap -- //
 
 	void reserve(size_type new_cap)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reserve(new_cap);
 	}
 	size_type capacity() const noexcept { return wrapped().capacity(); }
 
 	void shrink_to_fit()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().shrink_to_fit();
 	}
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -2839,49 +3158,89 @@ public: // -- insert / erase -- //
 
 	iterator insert(const_iterator pos, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, value);
 	}
 	iterator insert(const_iterator pos, T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, std::move(value));
 	}
 
 	iterator insert(const_iterator pos, size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, count, value);
 	}
 
 	template<typename InputIt>
 	iterator insert(const_iterator pos, InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, first, last);
 	}
 
 	iterator insert(const_iterator pos, std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, ilist);
 	}
 
 	template<typename ...Args>
 	iterator emplace(const_iterator pos, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
@@ -2889,49 +3248,89 @@ public: // -- push / pop -- //
 
 	void push_back(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_back(value);
 	}
 	void push_back(T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_back(std::move(value));
 	}
 
 	template<typename ...Args>
 	decltype(auto) emplace_back(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_back(std::forward<Args>(args)...);
 	}
 
 	void pop_back()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().pop_back();
 	}
 
 	void push_front(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_front(value);
 	}
 	void push_front(T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_front(std::move(value));
 	}
 
 	template<typename ...Args>
 	decltype(auto) emplace_front(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_front(std::forward<Args>(args)...);
 	}
 
 	void pop_front()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().pop_front();
 	}
 
@@ -2939,12 +3338,22 @@ public: // -- resize -- //
 
 	void resize(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count);
 	}
 	void resize(size_type count, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count, value);
 	}
 
@@ -2952,7 +3361,12 @@ public: // -- swap -- //
 
 	void swap(__gc_deque &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_deque &a, __gc_deque &b) { a.swap(b); }
@@ -2975,7 +3389,7 @@ struct GC::router<__gc_deque<T, Allocator>>
 	template<typename F>
 	static void route(const __gc_deque<T, Allocator> &vec, F func)
 	{
-		std::lock_guard<std::mutex> lock(vec.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(vec.mutex);
 		GC::route(vec.wrapped(), func);
 	}
 };
@@ -2989,7 +3403,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_forward_list>;
 
@@ -3063,7 +3477,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_forward_list(__gc_forward_list &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_forward_list(wrapped_t &&other)
@@ -3073,7 +3492,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_forward_list(__gc_forward_list &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_forward_list(wrapped_t &&other, const Allocator &alloc)
@@ -3095,53 +3519,93 @@ public: // -- asgn -- //
 
 	__gc_forward_list &operator=(const __gc_forward_list &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_forward_list &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_forward_list &operator=(__gc_forward_list &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_forward_list &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_forward_list &operator=(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
 
 	void assign(size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(count, value);
 	}
 
 	template<typename InputIt>
 	void assign(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(first, last);
 	}
 
 	void assign(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(ilist);
 	}
 
@@ -3176,7 +3640,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -3184,49 +3653,89 @@ public: // -- insert / erase -- //
 
 	iterator insert_after(const_iterator pos, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_after(pos, value);
 	}
 	iterator insert_after(const_iterator pos, T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_after(pos, std::move(value));
 	}
 
 	iterator insert_after(const_iterator pos, size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_after(pos, count, value);
 	}
 
 	template<typename InputIt>
 	iterator insert_after(const_iterator pos, InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_after(pos, first, last);
 	}
 
 	iterator insert_after(const_iterator pos, std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_after(pos, ilist);
 	}
 
 	template<typename ...Args>
 	iterator emplace_after(const_iterator pos, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_after(pos, std::forward<Args>(args)...);
 	}
 
 	iterator erase_after(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase_after(pos);
 	}
 	iterator erase_after(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase_after(first, last);
 	}
 
@@ -3234,25 +3743,45 @@ public: // -- push / pop -- //
 
 	void push_front(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_front(value);
 	}
 	void push_front(T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_front(std::move(value));
 	}
 
 	template<typename ...Args>
 	decltype(auto) emplace_front(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_front(std::forward<Args>(args)...);
 	}
 
 	void pop_front()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().pop_front();
 	}
 
@@ -3260,12 +3789,22 @@ public: // -- resize -- //
 
 	void resize(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count);
 	}
 	void resize(size_type count, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count, value);
 	}
 
@@ -3273,7 +3812,12 @@ public: // -- swap -- //
 
 	void swap(__gc_forward_list &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_forward_list &a, __gc_forward_list &b) { a.swap(b); }
@@ -3291,25 +3835,45 @@ public: // -- merge -- //
 
 	void merge(__gc_forward_list &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other.wrapped());
 	}
 	void merge(__gc_forward_list &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other.wrapped()));
 	}
 
 	template<typename Compare>
 	void merge(__gc_forward_list &other, Compare comp)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other.wrapped(), comp);
 	}
 	template<typename Compare>
 	void merge(__gc_forward_list &&other, Compare comp)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other.wrapped()), comp);
 	}
 
@@ -3317,25 +3881,45 @@ public: // -- merge -- //
 
 	void merge(wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other);
 	}
 	void merge(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other));
 	}
 
 	template<typename Compare>
 	void merge(wrapped_t &other, Compare comp)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other, comp);
 	}
 	template<typename Compare>
 	void merge(wrapped_t &&other, Compare comp)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other), comp);
 	}
 
@@ -3343,34 +3927,64 @@ public: // -- splice -- //
 
 	void splice_after(const_iterator pos, __gc_forward_list &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other.wrapped());
 	}
 	void splice_after(const_iterator pos, __gc_forward_list &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other.wrapped()));
 	}
 
 	void splice_after(const_iterator pos, __gc_forward_list &other, const_iterator it)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other.wrapped(), it);
 	}
 	void splice_after(const_iterator pos, __gc_forward_list &&other, const_iterator it)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other.wrapped()), it);
 	}
 
 	void splice_after(const_iterator pos, __gc_forward_list &other, const_iterator first, const_iterator last)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other.wrapped(), first, last);
 	}
 	void splice_after(const_iterator pos, __gc_forward_list &&other, const_iterator first, const_iterator last)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
 	}
 
@@ -3378,34 +3992,64 @@ public: // -- splice -- //
 
 	void splice_after(const_iterator pos, wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other);
 	}
 	void splice_after(const_iterator pos, wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other));
 	}
 
 	void splice_after(const_iterator pos, wrapped_t &other, const_iterator it)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other, it);
 	}
 	void splice_after(const_iterator pos, wrapped_t &&other, const_iterator it)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other), it);
 	}
 
 	void splice_after(const_iterator pos, wrapped_t &other, const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other, first, last);
 	}
 	void splice_after(const_iterator pos, wrapped_t &&other, const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other), first, last);
 	}
 
@@ -3413,14 +4057,24 @@ public: // -- remove -- //
 
 	decltype(auto) remove(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().remove(value);
 	}
 
 	template<typename UnaryPredicate>
 	decltype(auto) remove_if(UnaryPredicate p)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().remove_if(p);
 	}
 
@@ -3428,31 +4082,56 @@ public: // -- ordering -- //
 
 	void reverse() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reverse();
 	}
 
 	decltype(auto) unique()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().unique();
 	}
 	template<typename BinaryPredicate>
 	decltype(auto) unique(BinaryPredicate p)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().unique(p);
 	}
 
 	void sort()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().sort();
 	}
 	template<typename Compare>
 	void sort(Compare comp)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().sort(comp);
 	}
 };
@@ -3465,7 +4144,7 @@ struct GC::router<__gc_forward_list<T, Allocator>>
 	template<typename F>
 	static void route(const __gc_forward_list<T, Allocator> &list, F func)
 	{
-		std::lock_guard<std::mutex> lock(list.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(list.mutex);
 		GC::route(list.wrapped(), func);
 	}
 };
@@ -3479,7 +4158,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_list>;
 
@@ -3556,7 +4235,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_list(__gc_list &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_list(wrapped_t &&other)
@@ -3566,7 +4250,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_list(__gc_list &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_list(wrapped_t &&other, const Allocator &alloc)
@@ -3588,53 +4277,93 @@ public: // -- asgn -- //
 
 	__gc_list &operator=(const __gc_list &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_list &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_list &operator=(__gc_list &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_list &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_list &operator=(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
 
 	void assign(size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(count, value);
 	}
 
 	template<typename InputIt>
 	void assign(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(first, last);
 	}
 
 	void assign(std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().assign(ilist);
 	}
 
@@ -3677,7 +4406,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -3685,49 +4419,89 @@ public: // -- insert / erase -- //
 
 	iterator insert(const_iterator pos, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, value);
 	}
 	iterator insert(const_iterator pos, T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, std::move(value));
 	}
 
 	iterator insert(const_iterator pos, size_type count, const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, count, value);
 	}
 
 	template<typename InputIt>
 	iterator insert(const_iterator pos, InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, first, last);
 	}
 
 	iterator insert(const_iterator pos, std::initializer_list<T> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(pos, ilist);
 	}
 
 	template<typename ...Args>
 	iterator emplace(const_iterator pos, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(pos, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
@@ -3735,49 +4509,89 @@ public: // -- push / pop -- //
 
 	void push_back(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_back(value);
 	}
 	void push_back(T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_back(std::move(value));
 	}
 
 	template<typename ...Args>
 	decltype(auto) emplace_back(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_back(std::forward<Args>(args)...);
 	}
 
 	void pop_back()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().pop_back();
 	}
 
 	void push_front(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_front(value);
 	}
 	void push_front(T &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().push_front(std::move(value));
 	}
 
 	template<typename ...Args>
 	decltype(auto) emplace_front(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_front(std::forward<Args>(args)...);
 	}
 
 	void pop_front()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().pop_front();
 	}
 
@@ -3785,12 +4599,22 @@ public: // -- resize -- //
 
 	void resize(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count);
 	}
 	void resize(size_type count, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().resize(count, value);
 	}
 
@@ -3798,7 +4622,12 @@ public: // -- swap -- //
 
 	void swap(__gc_list &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_list &a, __gc_list &b) { a.swap(b); }
@@ -3816,25 +4645,45 @@ public: // -- merge -- //
 
 	void merge(__gc_list &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other.wrapped());
 	}
 	void merge(__gc_list &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other.wrapped()));
 	}
 
 	template<typename Compare>
 	void merge(__gc_list &other, Compare comp)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other.wrapped(), comp);
 	}
 	template<typename Compare>
 	void merge(__gc_list &&other, Compare comp)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other.wrapped()), comp);
 	}
 
@@ -3842,25 +4691,45 @@ public: // -- merge -- //
 
 	void merge(wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other);
 	}
 	void merge(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other));
 	}
 
 	template<typename Compare>
 	void merge(wrapped_t &other, Compare comp)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(other, comp);
 	}
 	template<typename Compare>
 	void merge(wrapped_t &&other, Compare comp)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().merge(std::move(other), comp);
 	}
 
@@ -3868,34 +4737,64 @@ public: // -- splice -- //
 
 	void splice_after(const_iterator pos, __gc_list &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other.wrapped());
 	}
 	void splice_after(const_iterator pos, __gc_list &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other.wrapped()));
 	}
 
 	void splice_after(const_iterator pos, __gc_list &other, const_iterator it)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other.wrapped(), it);
 	}
 	void splice_after(const_iterator pos, __gc_list &&other, const_iterator it)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other.wrapped()), it);
 	}
 
 	void splice_after(const_iterator pos, __gc_list &other, const_iterator first, const_iterator last)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other.wrapped(), first, last);
 	}
 	void splice_after(const_iterator pos, __gc_list &&other, const_iterator first, const_iterator last)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
 	}
 
@@ -3903,34 +4802,64 @@ public: // -- splice -- //
 
 	void splice_after(const_iterator pos, wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other);
 	}
 	void splice_after(const_iterator pos, wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other));
 	}
 
 	void splice_after(const_iterator pos, wrapped_t &other, const_iterator it)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other, it);
 	}
 	void splice_after(const_iterator pos, wrapped_t &&other, const_iterator it)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other), it);
 	}
 
 	void splice_after(const_iterator pos, wrapped_t &other, const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, other, first, last);
 	}
 	void splice_after(const_iterator pos, wrapped_t &&other, const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().splice_after(pos, std::move(other), first, last);
 	}
 
@@ -3938,14 +4867,24 @@ public: // -- remove -- //
 
 	decltype(auto) remove(const T &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().remove(value);
 	}
 
 	template<typename UnaryPredicate>
 	decltype(auto) remove_if(UnaryPredicate p)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().remove_if(p);
 	}
 
@@ -3953,31 +4892,56 @@ public: // -- ordering -- //
 
 	void reverse() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reverse();
 	}
 
 	decltype(auto) unique()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().unique();
 	}
 	template<typename BinaryPredicate>
 	decltype(auto) unique(BinaryPredicate p)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().unique(p);
 	}
 
 	void sort()
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().sort();
 	}
 	template<typename Compare>
 	void sort(Compare comp)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().sort(comp);
 	}
 };
@@ -3990,7 +4954,7 @@ struct GC::router<__gc_list<T, Allocator>>
 	template<typename F>
 	static void route(const __gc_list<T, Allocator> &list, F func)
 	{
-		std::lock_guard<std::mutex> lock(list.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(list.mutex);
 		GC::route(list.wrapped(), func);
 	}
 };
@@ -4004,7 +4968,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_set>;
 
@@ -4090,7 +5054,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_set(__gc_set &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_set(wrapped_t &&other)
@@ -4100,7 +5069,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_set(__gc_set &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_set(wrapped_t &&other, const Allocator &alloc)
@@ -4126,33 +5100,58 @@ public: // -- asgn -- //
 
 	__gc_set &operator=(const __gc_set &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_set &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_set &operator=(__gc_set &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+
+		#endif
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_set &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_set &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -4188,7 +5187,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -4196,36 +5200,66 @@ public: // -- insert / erase -- //
 
 	std::pair<iterator, bool> insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 	std::pair<iterator, bool> insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -4233,12 +5267,22 @@ public: // -- insert / erase -- //
 
 	insert_return_type insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
@@ -4247,30 +5291,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	std::pair<iterator, bool> emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(key);
 	}
 
@@ -4278,7 +5347,12 @@ public: // -- swap -- //
 
 	void swap(__gc_set &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_set &a, __gc_set &b) { a.swap(b); }
@@ -4289,12 +5363,22 @@ public: // -- extract -- //
 
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 
@@ -4367,7 +5451,7 @@ struct GC::router<__gc_set<Key, Compare, Allocator>>
 	template<typename F>
 	static void route(const __gc_set<Key, Compare, Allocator> &set, F func)
 	{
-		std::lock_guard<std::mutex> lock(set.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(set.mutex);
 		GC::route(set.wrapped(), func);
 	}
 };
@@ -4381,7 +5465,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_multiset>;
 
@@ -4466,7 +5550,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_multiset(__gc_multiset &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_multiset(wrapped_t &&other)
@@ -4476,7 +5565,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_multiset(__gc_multiset &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_multiset(wrapped_t &&other, const Allocator &alloc)
@@ -4502,33 +5596,58 @@ public: // -- asgn -- //
 
 	__gc_multiset &operator=(const __gc_multiset &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_multiset &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_multiset &operator=(__gc_multiset &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_multiset &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_multiset &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -4564,7 +5683,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -4572,36 +5696,66 @@ public: // -- insert / erase -- //
 
 	iterator insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 	iterator insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -4609,12 +5763,22 @@ public: // -- insert / erase -- //
 
 	iterator insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
@@ -4623,30 +5787,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	std::pair<iterator, bool> emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(key);
 	}
 
@@ -4654,7 +5843,12 @@ public: // -- swap -- //
 
 	void swap(__gc_multiset &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_multiset &a, __gc_multiset &b) { a.swap(b); }
@@ -4664,12 +5858,22 @@ public: // -- extract -- //
 	#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 	#endif
@@ -4741,7 +5945,7 @@ struct GC::router<__gc_multiset<Key, Compare, Allocator>>
 	template<typename F>
 	static void route(const __gc_multiset<Key, Compare, Allocator> &set, F func)
 	{
-		std::lock_guard<std::mutex> lock(set.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(set.mutex);
 		GC::route(set.wrapped(), func);
 	}
 };
@@ -4755,7 +5959,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_map>;
 
@@ -4844,7 +6048,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_map(__gc_map &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_map(wrapped_t &&other)
@@ -4854,7 +6063,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_map(__gc_map &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_map(wrapped_t &&other, const Allocator &alloc)
@@ -4880,33 +6094,58 @@ public: // -- asgn -- //
 
 	__gc_map &operator=(const __gc_map &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_map &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_map &operator=(__gc_map &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_map &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_map &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -4922,12 +6161,22 @@ public: // -- element access -- //
 
 	T &operator[](const Key &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped()[key];
 	}
 	T &operator[](Key &&key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped()[std::move(key)];
 	}
 
@@ -4958,7 +6207,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -4966,39 +6220,69 @@ public: // -- insert / erase -- //
 
 	std::pair<iterator, bool> insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 	template<typename P>
 	std::pair<iterator, bool> insert(P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::forward<P>(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 
 	template<typename P>
 	iterator insert(const_iterator hint, P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::forward<P>(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -5006,75 +6290,135 @@ public: // -- insert / erase -- //
 
 	std::pair<iterator, bool> insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(wrapped));
 	}
 
 	insert_return_type insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
 	template<typename M>
 	std::pair<iterator, bool> insert_or_assign(const key_type &k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(k, std::forward<M>(obj));
 	}
 	template<typename M>
 	std::pair<iterator, bool> insert_or_assign(key_type &&k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(std::move(k), std::forward<M>(obj));
 	}
 
 	template<typename M>
 	std::pair<iterator, bool> insert_or_assign(const_iterator hint, const key_type &k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(hint, k, std::forward<M>(obj));
 	}
 	template<typename M>
 	std::pair<iterator, bool> insert_or_assign(const_iterator hint, key_type &&k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(hint, std::move(k), std::forward<M>(obj));
 	}
 
 	template<typename ...Args>
 	std::pair<iterator, bool> try_emplace(const key_type &k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(k, std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	std::pair<iterator, bool> try_emplace(key_type &&k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(std::move(k), std::forward<Args>(args)...);
 	}
 
 	template<typename ...Args>
 	iterator try_emplace(const_iterator hint, const key_type &k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(hint, k, std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator try_emplace(const_iterator hint, key_type &&k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(hint, std::move(k), std::forward<Args>(args)...);
 	}
 
@@ -5083,30 +6427,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	std::pair<iterator, bool> emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &k)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(k);
 	}
 
@@ -5114,7 +6483,12 @@ public: // -- swap -- //
 
 	void swap(__gc_map &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_map &a, __gc_map &b) { a.swap(b); }
@@ -5125,12 +6499,22 @@ public: // -- extract -- //
 
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 
@@ -5203,7 +6587,7 @@ struct GC::router<__gc_map<Key, T, Compare, Allocator>>
 	template<typename F>
 	static void route(const __gc_map<Key, T, Compare, Allocator> &map, F func)
 	{
-		std::lock_guard<std::mutex> lock(map.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(map.mutex);
 		GC::route(map.wrapped(), func);
 	}
 };
@@ -5217,7 +6601,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_multimap>;
 
@@ -5305,7 +6689,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_multimap(__gc_multimap &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_multimap(wrapped_t &&other)
@@ -5315,7 +6704,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_multimap(__gc_multimap &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_multimap(wrapped_t &&other, const Allocator &alloc)
@@ -5341,33 +6735,58 @@ public: // -- asgn -- //
 
 	__gc_multimap &operator=(const __gc_multimap &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_multimap &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_multimap &operator=(__gc_multimap &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_multimap &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_multimap &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -5403,7 +6822,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -5411,39 +6835,69 @@ public: // -- insert / erase -- //
 
 	iterator insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 	template<typename P>
 	iterator insert(P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::forward<P>(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 
 	template<typename P>
 	iterator insert(const_iterator hint, P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::forward<P>(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -5451,23 +6905,43 @@ public: // -- insert / erase -- //
 
 	iterator insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(wrapped));
 	}
 
 	iterator insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
@@ -5476,30 +6950,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	iterator emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &k)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(k);
 	}
 
@@ -5507,7 +7006,12 @@ public: // -- swap -- //
 
 	void swap(__gc_multimap &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_multimap &a, __gc_multimap &b) { a.swap(b); }
@@ -5518,12 +7022,22 @@ public: // -- extract -- //
 
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 
@@ -5596,7 +7110,7 @@ struct GC::router<__gc_multimap<Key, T, Compare, Allocator>>
 	template<typename F>
 	static void route(const __gc_multimap<Key, T, Compare, Allocator> &map, F func)
 	{
-		std::lock_guard<std::mutex> lock(map.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(map.mutex);
 		GC::route(map.wrapped(), func);
 	}
 };
@@ -5610,7 +7124,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_set>;
 
@@ -5718,7 +7232,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_set(__gc_unordered_set &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_unordered_set(wrapped_t &&other)
@@ -5728,7 +7247,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_set(__gc_unordered_set &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_unordered_set(wrapped_t &&other, const Allocator &alloc)
@@ -5763,33 +7287,58 @@ public: // -- asgn -- //
 
 	__gc_unordered_set &operator=(const __gc_unordered_set &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_unordered_set &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_unordered_set &operator=(__gc_unordered_set &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_unordered_set &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_unordered_set &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -5817,7 +7366,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -5825,36 +7379,66 @@ public: // -- insert / erase -- //
 
 	std::pair<iterator, bool> insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 	std::pair<iterator, bool> insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -5862,12 +7446,22 @@ public: // -- insert / erase -- //
 
 	insert_return_type insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
@@ -5876,30 +7470,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	std::pair<iterator, bool> emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+
+		#endif
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(key);
 	}
 
@@ -5907,7 +7526,12 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_set &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_unordered_set &a, __gc_unordered_set &b) { a.swap(b); }
@@ -5918,12 +7542,22 @@ public: // -- extract -- //
 
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 
@@ -5980,19 +7614,34 @@ public: // -- hash policy -- //
 	float max_load_factor() const { return wrapped().max_load_factor(); }
 	void max_load_factor(float ml)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().max_load_factor(ml);
 	}
 
 	void rehash(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().rehash(count);
 	}
 
 	void reserve(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reserve(count);
 	}
 
@@ -6015,7 +7664,7 @@ struct GC::router<__gc_unordered_set<Key, Hash, KeyEqual, Allocator>>
 	template<typename F>
 	static void route(const __gc_unordered_set<Key, Hash, KeyEqual, Allocator> &set, F func)
 	{
-		std::lock_guard<std::mutex> lock(set.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(set.mutex);
 		GC::route(set.wrapped(), func);
 	}
 };
@@ -6029,7 +7678,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_multiset>;
 
@@ -6136,7 +7785,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_multiset(__gc_unordered_multiset &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_unordered_multiset(wrapped_t &&other)
@@ -6146,7 +7800,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_multiset(__gc_unordered_multiset &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_unordered_multiset(wrapped_t &&other, const Allocator &alloc)
@@ -6181,33 +7840,58 @@ public: // -- asgn -- //
 
 	__gc_unordered_multiset &operator=(const __gc_unordered_multiset &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_unordered_multiset &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_unordered_multiset &operator=(__gc_unordered_multiset &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_unordered_multiset &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_unordered_multiset &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -6235,7 +7919,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -6243,36 +7932,66 @@ public: // -- insert / erase -- //
 
 	iterator insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 	iterator insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -6280,12 +7999,22 @@ public: // -- insert / erase -- //
 
 	iterator insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
@@ -6294,30 +8023,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	iterator emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(key);
 	}
 
@@ -6325,7 +8079,12 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_multiset &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_unordered_multiset &a, __gc_unordered_multiset &b) { a.swap(b); }
@@ -6336,12 +8095,22 @@ public: // -- extract -- //
 
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 
@@ -6398,19 +8167,34 @@ public: // -- hash policy -- //
 	float max_load_factor() const { return wrapped().max_load_factor(); }
 	void max_load_factor(float ml)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().max_load_factor(ml);
 	}
 
 	void rehash(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().rehash(count);
 	}
 
 	void reserve(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reserve(count);
 	}
 
@@ -6433,7 +8217,7 @@ struct GC::router<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 	template<typename F>
 	static void route(const __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator> &set, F func)
 	{
-		std::lock_guard<std::mutex> lock(set.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(set.mutex);
 		GC::route(set.wrapped(), func);
 	}
 };
@@ -6447,7 +8231,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_map>;
 
@@ -6557,7 +8341,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_map(__gc_unordered_map &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_unordered_map(wrapped_t &&other)
@@ -6567,7 +8356,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_map(__gc_unordered_map &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_unordered_map(wrapped_t &&other, const Allocator &alloc)
@@ -6602,33 +8396,58 @@ public: // -- assign -- //
 
 	__gc_unordered_map &operator=(const __gc_unordered_map &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_unordered_map &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_unordered_map &operator=(__gc_unordered_map &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_unordered_map &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_unordered_map &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -6656,7 +8475,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -6664,40 +8488,70 @@ public: // -- insert / erase -- //
 
 	std::pair<iterator, bool> insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 
 	template<typename P>
 	std::pair<iterator, bool> insert(P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::forward<P>(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 
 	template<typename P>
 	iterator insert(const_iterator hint, P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::forward<P>(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -6705,75 +8559,135 @@ public: // -- insert / erase -- //
 
 	std::pair<iterator, bool> insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(value));
 	}
 
 	insert_return_type insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
 	template<typename M>
 	std::pair<iterator, bool> insert_or_assign(const key_type &k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(k, std::forward<M>(obj));
 	}
 	template<typename M>
 	std::pair<iterator, bool> insert_or_assign(key_type &&k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(std::move(k), std::forward<M>(obj));
 	}
 
 	template<typename M>
 	iterator insert_or_assign(const_iterator hint, const key_type &k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(hint, k, std::forward<M>(obj));
 	}
 	template<typename M>
 	iterator insert_or_assign(const_iterator hint, key_type &&k, M &&obj)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert_or_assign(hint, std::move(k), std::forward<M>(obj));
 	}
 
 	template<typename ...Args>
 	std::pair<iterator, bool> try_emplace(const key_type &k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(k, std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	std::pair<iterator, bool> try_emplace(key_type &&k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(std::move(k), std::forward<Args>(args)...);
 	}
 
 	template<typename ...Args>
 	iterator try_emplace(const_iterator hint, const key_type &k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(hint, k, std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator try_emplace(const_iterator hint, key_type &&k, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().try_emplace(hint, std::move(k), std::forward<Args>(args)...);
 	}
 
@@ -6782,30 +8696,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	std::pair<iterator, bool> emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &k)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(k);
 	}
 
@@ -6813,7 +8752,12 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_map &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_unordered_map &a, __gc_unordered_map &b) { a.swap(b); }
@@ -6824,12 +8768,22 @@ public: // -- extract -- //
 
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 
@@ -6844,12 +8798,22 @@ public: // -- element access -- //
 
 	T &operator[](const Key &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped()[key];
 	}
 	T &operator[](Key &&key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex); // operator[] performs an insertion if key doesn't exist
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped()[std::move(key)];
 	}
 
@@ -6902,19 +8866,34 @@ public: // -- hash policy -- //
 	float max_load_factor() const { return wrapped().max_load_factor(); }
 	void max_load_factor(float ml)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().max_load_factor(ml);
 	}
 
 	void rehash(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().rehash(count);
 	}
 
 	void reserve(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reserve(count);
 	}
 
@@ -6937,7 +8916,7 @@ struct GC::router<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 	template<typename F>
 	static void route(const __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator> &map, F func)
 	{
-		std::lock_guard<std::mutex> lock(map.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(map.mutex);
 		GC::route(map.wrapped(), func);
 	}
 };
@@ -6951,7 +8930,7 @@ private: // -- data -- //
 
 	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
 
-	mutable std::mutex mutex; // router synchronizer
+	mutable __gc_wrapper_mutex_t mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_multimap>;
 
@@ -7060,7 +9039,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_multimap(__gc_unordered_multimap &&other)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	__gc_unordered_multimap(wrapped_t &&other)
@@ -7070,7 +9054,12 @@ public: // -- ctor / dtor -- //
 
 	__gc_unordered_multimap(__gc_unordered_multimap &&other, const Allocator &alloc)
 	{
-		std::lock_guard<std::mutex> lock(other.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
 	__gc_unordered_multimap(wrapped_t &&other, const Allocator &alloc)
@@ -7105,33 +9094,58 @@ public: // -- assign -- //
 
 	__gc_unordered_multimap &operator=(const __gc_unordered_multimap &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	__gc_unordered_multimap &operator=(const wrapped_t &other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = other;
 		return *this;
 	}
 
 	__gc_unordered_multimap &operator=(__gc_unordered_multimap &&other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	__gc_unordered_multimap &operator=(wrapped_t &&other)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = std::move(other);
 		return *this;
 	}
 
 	__gc_unordered_multimap &operator=(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped() = ilist;
 		return *this;
 	}
@@ -7159,7 +9173,12 @@ public: // -- size / cap -- //
 
 	void clear() noexcept
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().clear();
 	}
 
@@ -7167,40 +9186,70 @@ public: // -- insert / erase -- //
 
 	iterator insert(const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(value);
 	}
 
 	template<typename P>
 	iterator insert(P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::forward<P>(value));
 	}
 
 	iterator insert(const_iterator hint, const value_type &value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, value);
 	}
 
 	template<typename P>
 	iterator insert(const_iterator hint, P &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::forward<P>(value));
 	}
 
 	template<typename InputIt>
 	void insert(InputIt first, InputIt last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(first, last);
 	}
 
 	void insert(std::initializer_list<value_type> ilist)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().insert(ilist);
 	}
 
@@ -7208,23 +9257,43 @@ public: // -- insert / erase -- //
 
 	iterator insert(value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(value));
 	}
 	iterator insert(const_iterator hint, value_type &&value)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+
+		#endif
 		return wrapped().insert(hint, std::move(value));
 	}
 
 	iterator insert(node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(std::move(nh));
 	}
 	iterator insert(const_iterator hint, node_type &&nh)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().insert(hint, std::move(nh));
 	}
 
@@ -7233,30 +9302,55 @@ public: // -- insert / erase -- //
 	template<typename ...Args>
 	iterator emplace(Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace(std::forward<Args>(args)...);
 	}
 	template<typename ...Args>
 	iterator emplace_hint(const_iterator hint, Args &&...args)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().emplace_hint(hint, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+
+		#endif
 		return wrapped().erase(pos);
 	}
 	iterator erase(const_iterator first, const_iterator last)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(first, last);
 	}
 
 	size_type erase(const key_type &k)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().erase(k);
 	}
 
@@ -7264,7 +9358,12 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_multimap &other)
 	{
-		GC::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
+		GC::scoped_lock<__gc_wrapper_mutex_t, __gc_wrapper_mutex_t> locks(this->mutex, other.mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().swap(other.wrapped());
 	}
 	friend void swap(__gc_unordered_multimap &a, __gc_unordered_multimap &b) { a.swap(b); }
@@ -7274,12 +9373,22 @@ public: // -- extract -- //
 	#if DRAGAZO_GARBAGE_COLLECT_CPP_VERSION_ID >= 17
 	node_type extract(const_iterator pos)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(pos);
 	}
 	node_type extract(const key_type &key)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		return wrapped().extract(key);
 	}
 	#endif
@@ -7335,19 +9444,34 @@ public: // -- hash policy -- //
 	float max_load_factor() const { return wrapped().max_load_factor(); }
 	void max_load_factor(float ml)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().max_load_factor(ml);
 	}
 
 	void rehash(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().rehash(count);
 	}
 
 	void reserve(size_type count)
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(this->mutex);
+
+		#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+		GC::ignore_collect_sentry ignore_sentry;
+		#endif
+
 		wrapped().reserve(count);
 	}
 
@@ -7370,7 +9494,7 @@ struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 	template<typename F>
 	static void route(const __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator> &map, F func)
 	{
-		std::lock_guard<std::mutex> lock(map.mutex);
+		std::lock_guard<__gc_wrapper_mutex_t> lock(map.mutex);
 		GC::route(map.wrapped(), func);
 	}
 };

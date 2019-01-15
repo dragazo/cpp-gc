@@ -1,6 +1,8 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <mutex>
+#include <shared_mutex>
 #include <chrono>
 #include <cstddef>
 #include <cassert>
@@ -434,6 +436,59 @@ struct GC::router<stationary<T>>
 	template<typename F>
 	static void route(const stationary<T> &stat, F func) { GC::route(stat.value, func); }
 };
+
+
+
+
+
+
+void spooky_scary_dont_do_this()
+{
+	GC::collect();
+	#if DRAGAZO_GARBAGE_COLLECT_USE_IGNORE_COLLECT_IN_WRAPPERS
+	std::thread([] { GC::collect(); }).join();
+	#endif
+}
+
+struct ctor_collect_t
+{
+	ctor_collect_t() { spooky_scary_dont_do_this(); }
+};
+template<>
+struct GC::router<ctor_collect_t>
+{
+	template<typename F>
+	static void route(const ctor_collect_t &v, F f) {}
+};
+
+struct dtor_collect_t
+{
+	~dtor_collect_t() { spooky_scary_dont_do_this(); }
+};
+template<>
+struct GC::router<dtor_collect_t>
+{
+	template<typename F>
+	static void route(const dtor_collect_t &v, F f) {}
+};
+
+struct ctor_dtor_collect_t
+{
+	ctor_dtor_collect_t() { spooky_scary_dont_do_this(); }
+	~ctor_dtor_collect_t() { spooky_scary_dont_do_this(); }
+};
+template<>
+struct GC::router<ctor_dtor_collect_t>
+{
+	template<typename F>
+	static void route(const ctor_dtor_collect_t &v, F f) {}
+};
+
+
+
+
+
+
 
 // begins a timer in a new scope - requires a matching timer end point.
 #define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
@@ -1175,6 +1230,42 @@ int main() try
 		//t2.join();
 	}
 	/**/
+
+	std::cerr << "\n\n";
+
+	try
+	{
+		sizeof(std::mutex);
+		sizeof(std::recursive_mutex);
+
+		sizeof(std::timed_mutex);
+		sizeof(std::recursive_timed_mutex);
+
+		sizeof(std::shared_timed_mutex);
+
+		std::cerr << "beginning ctor collect vec\n";
+		auto ctor_vec = GC::make<GC::vector<ctor_collect_t>>();
+		ctor_vec->reserve(20);
+		for (int i = 0; i < 10; ++i) ctor_vec->emplace_back();
+
+		std::cerr << "beginning dtor collect vec\n";
+		auto dtor_vec = GC::make<GC::vector<dtor_collect_t>>((std::size_t)10);
+		while (!dtor_vec->empty()) dtor_vec->pop_back();
+
+		std::cerr << "beginning ctor/dtor collect vec\n";
+		auto ctor_dtor_vec = GC::make<GC::vector<ctor_dtor_collect_t>>();
+		ctor_dtor_vec->reserve(20);
+		for (int i = 0; i < 10; ++i) ctor_dtor_vec->emplace_back();
+		std::cerr << "half\n";
+		while (!ctor_dtor_vec->empty()) ctor_dtor_vec->pop_back();
+
+		std::cerr << "completed ctor/dtor deadlock tests\n\n";
+	}
+	catch (const std::exception &ex)
+	{
+		std::cerr << "CTOR/DTOR VEC TEST EXCEPTION!!\n" << ex.what() << "\n\n";
+		std::cin.get();
+	}
 
 	GC::collect();
 

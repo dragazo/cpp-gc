@@ -164,6 +164,11 @@ void GC::disjoint_module::mark_sweep(info *obj)
 
 void GC::disjoint_module::collect()
 {
+	// -- apply collect ignore logic -- //
+
+	ignore_collect_sentry ignore_collect_sentry_o;
+	if (!ignore_collect_sentry_o.no_prev_ignores()) return;
+	
 	// -- begin the collection action -- //
 
 	{
@@ -531,6 +536,18 @@ void GC::disjoint_module::schedule_handle_repoint_swap(info *&handle_a, info *&h
 
 		// there's no need for reference counting logic in a swap operation
 	}
+}
+
+std::size_t GC::disjoint_module::begin_ignore_collect()
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	return ignore_collect_count++;
+}
+void GC::disjoint_module::end_ignore_collect()
+{
+	std::lock_guard<std::mutex> internal_lock(internal_mutex);
+	assert(ignore_collect_count != 0);
+	--ignore_collect_count;
 }
 
 void GC::disjoint_module::__schedule_handle_root(info *const &handle)
