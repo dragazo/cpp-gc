@@ -487,6 +487,15 @@ struct GC::router<ctor_dtor_collect_t>
 
 
 
+std::mutex __io_mutex;
+// prints stuff to cerr in a thread-safe fashion
+template<typename ...Args>
+void sync_err_print(Args &&...args)
+{
+	std::lock_guard<std::mutex> io_lock(__io_mutex);
+	int _[] = { ((std::cerr << std::forward<Args>(args)), 0)... };
+}
+
 
 
 
@@ -1272,9 +1281,11 @@ int main() try
 	{
 		TIMER_BEGIN();
 		
-		std::thread threads[4];
+		GC::thread threads[4];
 
-		for (auto &i : threads) i = std::thread([]()
+		//for (auto &i : threads) i = GC::thread(GC::primary_disjunction, []()
+		//for (auto &i : threads) i = GC::thread(GC::inherit_disjunction, []()
+		for (auto &i : threads) i = GC::thread(GC::new_disjunction, []()
 		{
 			try
 			{
@@ -1294,6 +1305,8 @@ int main() try
 				}
 			}
 			catch (...) { std::cerr << "\n\nINTERFERENCE EXCEPTION!!\n\n"; std::abort(); }
+
+			sync_err_print("finished interference thread with no errors\n");
 		});
 
 		for (auto &i : threads) i.join();

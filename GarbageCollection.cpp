@@ -158,21 +158,19 @@ void GC::disjoint_module::mark_sweep(info *obj)
 		info *raw = arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
-		if (raw && !raw->marked) shared().mark_sweep(raw);
+		if (raw && !raw->marked) local()->mark_sweep(raw);
 	});
 }
 
 void GC::disjoint_module::collect()
 {
-	// -- apply collect ignore logic -- //
-
-	ignore_collect_sentry ignore_collect_sentry_o;
-	if (!ignore_collect_sentry_o.no_prev_ignores()) return;
-	
 	// -- begin the collection action -- //
 
 	{
 		std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+		// we'll ignore this action if there are any active collect ignore flags for this disjoint module
+		if (ignore_collect_count > 0) return;
 
 		// this only succeeds if there's not currently a collection action in progress.
 		// this ensures that we don't have back-to-back collections and that collections don't block one another.
@@ -214,7 +212,7 @@ void GC::disjoint_module::collect()
 
 		// route to mutable arcs and directly unroot from the collector-only root set.
 		// this is only safe because we're guaranteed to be the (only) collector at this point.
-		i->mutable_route(+[](const smart_handle &arc) { shared().roots.erase(&arc.raw_handle()); });
+		i->mutable_route(+[](const smart_handle &arc) { local()->roots.erase(&arc.raw_handle()); });
 	}
 
 	// clear the root objs set
@@ -656,6 +654,134 @@ void GC::disjoint_module::__MUST_BE_LAST_ref_count_dec(info *target, std::unique
 	}
 }
 
+// ------------------------------- //
+
+// -- special disjunction stuff -- //
+
+// ------------------------------- //
+
+GC::primary_disjunction_t GC::primary_disjunction;
+GC::inherit_disjunction_t GC::inherit_disjunction;
+GC::new_disjunction_t GC::new_disjunction;
+
+const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary()
+{
+	// not thread_local because the primary disjunction must exist for the entire program runtime.
+	// the default value creates that actual collection module.
+	static std::shared_ptr<disjoint_module> m = std::make_shared<disjoint_module>();
+
+	return m;
+}
+
+std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local()
+{
+	// thread_local because this is a thread-specific owning handle.
+	// the default value points the current thread to use the primary disjunction.
+	thread_local std::shared_ptr<disjoint_module> m = primary();
+
+	return m;
+}
+
+std::shared_ptr<GC::disjoint_module> GC::disjoint_module_container::create_new_disjunction()
+{
+	// create a new disjoint module
+	auto m = std::make_shared<disjoint_module>();
+
+	// add it to the disjunction database
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+		// if we're not collecting, we need to put it immediately in the disjunction list
+		if (!collecting) disjunctions.emplace_back(m);
+		// otherwise we need to cache the add action
+		else disjunction_add_cache.emplace_back(m);
+	}
+
+	// return 
+	return m;
+}
+
+void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect()
+{
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+		// we should not already be collecting (this is background collector only)
+		assert(!collecting);
+
+		// enter collecting mode
+		collecting = true;
+
+		// the add cache should be empty (just came out of a non-collecting phase)
+		assert(disjunction_add_cache.empty());
+	}
+
+	// for each stored disjunction:
+	// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
+	// (otherwise we need to constantly update the end iterator after each erasure).
+	for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+	{
+		// lock down a handle to the disjunction
+		auto handle = i->lock();
+
+		// if it's valid, perform a collection
+		if (handle)
+		{
+			handle->collect();
+			++i;
+		}
+		// otherwise it's invalid (dangling) - erase it
+		else i = disjunctions.erase(i);
+	}
+
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+		// exit collecting mode
+		collecting = false;
+
+		// apply all the cached disjunction insertions
+		disjunctions.splice(disjunctions.begin(), disjunction_add_cache);
+		disjunction_add_cache.clear(); // just to be sure
+	}
+}
+void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___cull()
+{
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+		// we should not already be collecting (this is background collector only)
+		assert(!collecting);
+
+		// enter collecting mode (just for lock-free resource access - we won't actually be collecting)
+		collecting = true;
+
+		// the add cache should be empty (just came out of a non-collecting phase)
+		assert(disjunction_add_cache.empty());
+	}
+
+	// for each stored disjunction:
+	// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
+	// (otherwise we need to constantly update the end iterator after each erasure).
+	for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+	{
+		// if this is a dangling pointer, erase it
+		if (i->expired()) i = disjunctions.erase(i);
+		else ++i;
+	}
+
+	{
+		std::lock_guard<std::mutex> internal_lock(internal_mutex);
+
+		// exit collecting mode
+		collecting = false;
+
+		// apply all the cached disjunction insertions
+		disjunctions.splice(disjunctions.begin(), disjunction_add_cache);
+		disjunction_add_cache.clear(); // just to be sure
+	}
+}
+
 // ---------------- //
 
 // -- collection -- //
@@ -664,7 +790,7 @@ void GC::disjoint_module::__MUST_BE_LAST_ref_count_dec(info *target, std::unique
 
 void GC::collect()
 {
-	disjoint_module::shared().collect();
+	disjoint_module::local()->collect();
 }
 
 // ------------------------------ //
@@ -675,7 +801,7 @@ void GC::collect()
 
 void GC::router_unroot(const smart_handle &arc)
 {
-	disjoint_module::shared().schedule_handle_unroot(arc.raw_handle());
+	disjoint_module::local()->schedule_handle_unroot(arc.raw_handle());
 }
 
 // --------------------- //
@@ -711,8 +837,17 @@ void GC::__timed_collect_func()
 			// if we're using timed strategy
 			if ((int)strategy() & (int)strategies::timed)
 			{
-				// run a collect pass
-				collect();
+				// run a collect pass for the primary disjunction
+				disjoint_module::primary()->collect();
+
+				// run a collect pass for all the dynamic disjunctions
+				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect();
+			}
+			// otherwise perform any other relevant logic
+			else
+			{
+				// even if we don't perform a dynamic disjunction collection, we need to cull dangling references
+				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___cull();
 			}
 		}
 	}

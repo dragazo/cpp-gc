@@ -69,6 +69,16 @@
 // you never know when a type you hold in a templated context will have e.g. a dtor that executes arbitrary code for the holder.
 #define DRAGAZO_GARBAGE_COLLECT_USE_RECURSIVE_MUTEX_IN_WRAPPERS 1
 
+// to ease mutex contention among threads, cpp-gc allows you to partition threads into specific disjunction groups for gc.
+// only threads in the same disjunction can share objects - it is undefined behavior to violate this.
+// if this setting is nonzero, violating disjunction boundaries results in an exception in the violating thread instead of undefined behavior.
+// this only applies to pointing a GC::ptr at an object from a different object disjunction set.
+// you could potentially also violate this by using raw pointers to access the object (or even worse - add mutable roots to it) - THESE CASES ARE NOT CHECKED.
+// because violating gc disjunctions is particularly-bad undefined behavior I HIGHLY SUGGEST YOU LEAVE THIS ON ALWAYS!!
+// however, if you're SUPER DUPER confident you don't violate this, you can disable it to save space and time (not worth the risk).
+// e.g. if your program will only ever run on a single thread this can safely be disabled with no chance of violation.
+#define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS 1
+
 // -------------------------------- //
 
 // -- utility types forward decl -- //
@@ -296,6 +306,8 @@ public: // -- user-level routing utilities -- //
 private: // -- private types -- //
 
 	struct info;
+	
+	class disjoint_module;
 
 	// the virtual function table type for info objects.
 	struct info_vtable
@@ -323,9 +335,16 @@ private: // -- private types -- //
 
 		const info_vtable *const vtable; // virtual function table to use
 
+		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+		disjoint_module *const disjunction;
+		#endif
+
 		// populates info - ref count starts at 1 - prev/next are undefined
-		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
-			: obj(_obj), count(_count), vtable(_vtable)
+		info(void *_obj, std::size_t _count, const info_vtable *_vtable, disjoint_module *_disj)
+			: obj(_obj), count(_count), vtable(_vtable),
+			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+			disjunction(_disj)
+			#endif
 		{}
 
 	public: // -- vtable helpers -- //
@@ -369,7 +388,7 @@ private: // -- private types -- //
 		// initializes the info handle to null and marks it as a root.
 		smart_handle(std::nullptr_t = nullptr)
 		{
-			disjoint_module::shared().schedule_handle_create_null(handle);
+			disjoint_module::local()->schedule_handle_create_null(handle);
 		}
 
 		// initializes the info handle with the specified value and marks it as a root.
@@ -377,19 +396,19 @@ private: // -- private types -- //
 		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
 		smart_handle(info *init, bind_new_obj_t)
 		{
-			disjoint_module::shared().schedule_handle_create_bind_new_obj(handle, init);
+			disjoint_module::local()->schedule_handle_create_bind_new_obj(handle, init);
 		}
 		
 		// constructs a new smart handle to alias another
 		smart_handle(const smart_handle &other)
 		{
-			disjoint_module::shared().schedule_handle_create_alias(handle, other.handle);
+			disjoint_module::local()->schedule_handle_create_alias(handle, other.handle);
 		}
 
 		// unroots the internal handle.
 		~smart_handle()
 		{
-			disjoint_module::shared().schedule_handle_destroy(handle);
+			disjoint_module::local()->schedule_handle_destroy(handle);
 		}
 
 		// repoints this smart_handle to other - equivalent to this->reset(other)
@@ -407,18 +426,18 @@ private: // -- private types -- //
 		// safely repoints the underlying raw handle at the new handle's object.
 		void reset(const smart_handle &new_value)
 		{
-			disjoint_module::shared().schedule_handle_repoint(handle, new_value.handle);
+			disjoint_module::local()->schedule_handle_repoint(handle, new_value.handle);
 		}
 		// safely repoints the underlying raw handle at no object (null).
 		void reset()
 		{
-			disjoint_module::shared().schedule_handle_repoint_null(handle);
+			disjoint_module::local()->schedule_handle_repoint_null(handle);
 		}
 
 		// safely swaps the underlying raw handles.
 		void swap(smart_handle &other)
 		{
-			disjoint_module::shared().schedule_handle_repoint_swap(handle, other.handle);
+			disjoint_module::local()->schedule_handle_repoint_swap(handle, other.handle);
 		}
 		friend void swap(smart_handle &a, smart_handle &b) { a.swap(b); }
 	};
@@ -1227,7 +1246,7 @@ public: // -- ptr allocation -- //
 		catch (...) { allocator_t::dealloc(buf); throw; }
 
 		// construct the info object
-		new (handle) info(obj, 1, &_vtable);
+		new (handle) info(obj, 1, &_vtable, disjoint_module::local().get());
 
 		// -- do the garbage collection aspects -- //
 
@@ -1309,7 +1328,7 @@ public: // -- ptr allocation -- //
 		}
 
 		// construct the info object
-		new (handle) info(obj, scalar_count, &_vtable);
+		new (handle) info(obj, scalar_count, &_vtable, disjoint_module::local().get());
 		
 		// -- do the garbage collection aspects -- //
 
@@ -1394,7 +1413,7 @@ public: // -- ptr allocation -- //
 		catch (...) { Deleter()(obj); throw; }
 
 		// construct the info object
-		new (handle) info(obj, 1, &_vtable);
+		new (handle) info(obj, 1, &_vtable, disjoint_module::local().get());
 
 		// -- do the garbage collection aspects -- //
 
@@ -1451,7 +1470,7 @@ public: // -- ptr allocation -- //
 		catch (...) { Deleter()(obj); throw; }
 
 		// construct the info object
-		new (handle) info(obj, count, &_vtable);
+		new (handle) info(obj, count, &_vtable, disjoint_module::local().get());
 
 		// -- do the garbage collection aspects -- //
 
@@ -1580,6 +1599,91 @@ public: // -- stdlib adapter aliases -- //
 	template<typename T, typename Container = std::vector<T>, typename Compare = std::less<typename Container::value_type>>
 	using priority_queue = std::priority_queue<T, make_wrapped_t<Container>, Compare>;
 
+public: // -- gc-specific threading stuff -- //
+
+	// specifies that the new thread should use the primary disjunction (i.e. the one created on initial program start - what the primary thread uses).
+	// this is what std::thread and any other os-specific threading utility uses (only because they can't be overridden in standard C++).
+	// you'll probably want to avoid using this option - inherit_disjunction is almost always the better, faster, safer choice.
+	static struct primary_disjunction_t {} primary_disjunction;
+	// specifies that the new thread should inherit its parent's disjunction.
+	static struct inherit_disjunction_t {} inherit_disjunction;
+	// specifies that the new thread should be in its own (new) disjunction.
+	static struct new_disjunction_t {} new_disjunction;
+
+	class thread
+	{
+	private: // -- data -- //
+
+		std::thread t; // the wrapped thread
+
+	public: // -- typedefs -- //
+
+		typedef std::thread::native_handle_type native_handle_type;
+		
+		typedef std::thread::id id;
+
+	public: // -- ctor / dtor / asgn --//
+
+		thread() noexcept = default;
+		~thread() = default;
+
+		thread(thread &&other) noexcept : t(std::move(other.t)) {}
+		thread(std::thread &&other) noexcept : t(std::move(other)) {}
+
+		thread &operator=(thread &&other) noexcept { t = std::move(other.t); return *this; }
+		thread &operator=(std::thread &&other) noexcept { t = std::move(other); return *this; }
+
+		template<typename Function, typename ...Args>
+		explicit thread(primary_disjunction_t, Function &&f, Args &&...args) : t(std::forward<Function>(f), std::forward<Args>(args)...) {}
+
+		template<typename Function, typename ...Args>
+		explicit thread(inherit_disjunction_t, Function &&f, Args &&...args) : t([](std::shared_ptr<disjoint_module> parent_module, auto &&ff, auto &&...fargs)
+		{
+			// now that we're a new thread, repoint our local disjunction handle to our parent
+			disjoint_module::local() = parent_module;
+
+			// then invoke the user function
+			std::forward<decltype(ff)>(ff)(std::forward<decltype(fargs)>(fargs)...);
+
+		}, disjoint_module::local(), std::forward<Function>(f), std::forward<Args>(args)...)
+		{}
+
+		template<typename Function, typename ...Args>
+		explicit thread(new_disjunction_t, Function &&f, Args &&...args) : t([](auto &&ff, auto &&...fargs)
+		{
+			// now that we're a new thread, repoint our local disjunction handle to a new disjunction
+			disjoint_module::local() = disjoint_module_container::get().create_new_disjunction();
+
+			// then invoke the user function
+			std::forward<decltype(ff)>(ff)(std::forward<decltype(fargs)>(fargs)...);
+
+		}, std::forward<Function>(f), std::forward<Args>(args)...)
+		{}
+
+	public: // -- observers -- //
+
+		bool joinable() const noexcept { return t.joinable(); }
+
+		std::thread::id get_id() const noexcept { return t.get_id(); }
+
+		native_handle_type native_handle() { return t.native_handle(); }
+
+		static unsigned int hardware_concurrency() noexcept { return std::thread::hardware_concurrency(); }
+
+	public: // -- operations -- //
+
+		void join() { t.join(); }
+
+		void detach() { t.detach(); }
+
+		void swap(thread &other) noexcept { t.swap(other.t); }
+		void swap(std::thread &other) noexcept { t.swap(other); }
+
+		friend void swap(thread &a, thread &b) noexcept { using std::swap; swap(a.t, b.t); }
+		friend void swap(thread &a, std::thread &b) noexcept { using std::swap; swap(a.t, b); }
+		friend void swap(std::thread &a, thread &b) noexcept { using std::swap; swap(a, b.t); }
+	};
+
 public: // -- collection logic utilities -- //
 
 	// a sentry object that controls the ignore feature of GC::collect().
@@ -1594,8 +1698,8 @@ public: // -- collection logic utilities -- //
 
 	public: // -- ctor / dtor / asgn -- //
 
-		ignore_collect_sentry() { prev_count = disjoint_module::shared().begin_ignore_collect(); }
-		~ignore_collect_sentry() { disjoint_module::shared().end_ignore_collect(); }
+		ignore_collect_sentry() { prev_count = disjoint_module::local()->begin_ignore_collect(); }
+		~ignore_collect_sentry() { disjoint_module::local()->end_ignore_collect(); }
 
 		// returns true iff there were no ignore actions in progress prior to the start of this one.
 		bool no_prev_ignores() const noexcept { return prev_count == 0; }
@@ -1680,6 +1784,9 @@ private: // -- sentries -- //
 
 private: // -- gc disjoint module -- //
 
+	// provides the gc logic for all objects from a single disjunction.
+	// i.e. all objects and GC::ptr info from the set of all threads that can share gc objects with one another.
+	// it is undefined behavior to point to or access a gc object from a different disjunction.
 	class disjoint_module final
 	{
 	private: // -- synchronization -- //
@@ -1766,7 +1873,7 @@ private: // -- gc disjoint module -- //
 		// it is structured such that M[&raw_handle] is what it should be repointed to.
 		std::unordered_map<info**, info*> handle_repoint_cache; 
 
-	private: // -- ctor / dtor / asgn -- //
+	public: // -- ctor / dtor / asgn -- //
 
 		disjoint_module() = default;
 		~disjoint_module() = default;
@@ -1858,8 +1965,63 @@ private: // -- gc disjoint module -- //
 
 	public: // -- factory accessors -- //
 
-		// gets the shared gc module
-		static disjoint_module &shared() { static disjoint_module m; return m; }
+		// gets the primary disjunction - the default one that all threads use unless instructed otherwise.
+		// this shared_ptr has static storage duration - thus this disjoint module's lifetime is the entire program lifetime.
+		static const std::shared_ptr<disjoint_module> &primary();
+
+		// gets the disjunction that the calling thread belongs to.
+		// this shared_ptr has thread_local storage duration - references/pointers to the shared_ptr itself should not be passed between threads.
+		// IF THIS IS EVER REPOINTED IT MUST HAPPEN PRIOR TO CALLING ANY GC MANAGEMENT FUNCTIONS FROM THE CALLING THREAD!!
+		// the only valid repoint targets are sourced from disjoint_module_container::create_new_disjunction().
+		static std::shared_ptr<disjoint_module> &local();
+	};
+
+	// holds the info concerning 
+	class disjoint_module_container final
+	{
+	private: // -- data -- //
+
+		std::mutex internal_mutex;
+		
+		// flag that marks if we're performing a collection action.
+		bool collecting = false;
+
+		// all the stored disjunctions.
+		// this can be modfied under internal_mutex lock unless in collecting mode.
+		// in collecting mode this is considered a collector-only resource.
+		std::list<std::weak_ptr<disjoint_module>> disjunctions;
+
+		// all the cached disjunction insertion actions.
+		// this can be modified under internal_mutex lock.
+		// unless in collecting mode, this cache must at all times be empty.
+		std::list<std::weak_ptr<disjoint_module>> disjunction_add_cache;
+
+	private: // -- ctor / dtor / asgn -- //
+
+		disjoint_module_container() = default;
+		~disjoint_module_container() = default;
+
+		disjoint_module_container(const disjoint_module_container&) = delete;
+		disjoint_module_container &operator=(const disjoint_module_container&) = delete;
+
+	public: // -- interface -- //
+
+		// gets the (only) disjoint module container instance
+		static disjoint_module_container &get() { static disjoint_module_container c; return c; }
+
+		// creates a new disjunction and returns an owning handle to it.
+		// this is the only valid repoint target for the local disjunction handle.
+		std::shared_ptr<disjoint_module> create_new_disjunction();
+
+		// performs a collection pass for all stored dynamic disjunctions.
+		// additionally performs culling logic for dangling disjunction handles.
+		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
+		void BACKGROUND_COLLECTOR_ONLY___collect();
+
+		// like collect(), but only performs the culling step.
+		// this should be used if a full collection is not needed/requested/etc.
+		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
+		void BACKGROUND_COLLECTOR_ONLY___cull();
 	};
 
 private: // -- data -- //
