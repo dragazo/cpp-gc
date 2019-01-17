@@ -90,6 +90,8 @@
 
 // ----------------------------------------------------
 
+// stuff that doesn't exist in C++14 but is useful enough that i want it
+
 template<typename ...Lockable>
 class __gc_scoped_lock;
 
@@ -266,21 +268,9 @@ public: // -- router intrinsics -- //
 	// if no types are given, the value is true (i.e. nothing is trivial).
 	// equivalent to the C++17 fold expression (has_trivial_router<Types>::value && ...).
 	template<typename ...Types>
-	struct all_have_trivial_routers
-	{
-	private: // -- helpers -- //
-
-		// performs the fold expression by stripping off the first type recursively.
-		// you should pass Types... to this to get the proper value.
-		template<typename T1, typename ...TN>
-		static constexpr bool helper_v = has_trivial_router<T1>::value && all_have_trivial_routers<TN...>::value;
-
-	public: // -- public stuff -- //
-
-		static constexpr bool value = helper_v<Types...>;
-	};
-	template<>
-	struct all_have_trivial_routers<> : std::true_type {};
+	struct all_have_trivial_routers : std::true_type {};
+	template<typename T1, typename ...TN>
+	struct all_have_trivial_routers<T1, TN...> : std::integral_constant<bool, has_trivial_router<T1>::value && all_have_trivial_routers<TN...>::value> {};
 
 public: // -- user-level routing utilities -- //
 
@@ -886,14 +876,14 @@ public: // -- stdlib misc router specializations -- //
 		{
 			// routes to tuple with index I and recurses to I + 1.
 			// as I defaults to 0, route() will route to all tuple elements in order of increasing index.
-			template<std::size_t I = 0>
+			template<std::size_t I = 0, std::enable_if_t<(I < sizeof...(Types)), int> = 0>
 			static void route(const std::tuple<Types...> &tuple, F func)
 			{
 				GC::route(std::get<I>(tuple), func);
 				route<I + 1>(tuple, func);
 			}
-			template<>
-			static void route<sizeof...(Types)>(const std::tuple<Types...> &tuple, F func) {}
+			template<std::size_t I = 0, std::enable_if_t<(I >= sizeof...(Types)), int> = 0>
+			static void route(const std::tuple<Types...> &tuple, F func) {}
 		};
 
 		template<typename F>
@@ -2181,14 +2171,14 @@ private: // -- helpers -- //
 
 	// unlocks the mutex with index I and recurses to I+1.
 	// I defaults to 0, so unlock() will unlock all mutexes in order of increasing index.
-	template<std::size_t I = 0>
+	template<std::size_t I = 0, std::enable_if_t<(I < sizeof...(Lockable)), int> = 0>
 	void unlock()
 	{
 		std::get<I>(locks).unlock();
 		unlock<I + 1>();
 	}
-	template<>
-	void unlock<sizeof...(Lockable)>() {}
+	template<std::size_t I = 0, std::enable_if_t<(I >= sizeof...(Lockable)), int> = 0>
+	void unlock() {}
 
 public: // -- ctor / dtor / asgn -- //
 
@@ -9671,169 +9661,169 @@ template<typename T, typename Deleter>
 struct GC::wrapper_traits<__gc_unique_ptr<T, Deleter>>
 {
 	typedef std::unique_ptr<T, Deleter> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unique_ptr<T, Deleter>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unique_ptr<T, Deleter>> wrapped_type;
 };
 template<typename T, typename Deleter>
 struct GC::wrapper_traits<std::unique_ptr<T, Deleter>>
 {
 	typedef std::unique_ptr<T, Deleter> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unique_ptr<T, Deleter>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unique_ptr<T, Deleter>> wrapped_type;
 };
 
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<__gc_vector<T, Allocator>>
 {
 	typedef std::vector<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_vector<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_vector<T, Allocator>> wrapped_type;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::vector<T, Allocator>>
 {
 	typedef std::vector<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_vector<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_vector<T, Allocator>> wrapped_type;
 };
 
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<__gc_deque<T, Allocator>>
 {
 	typedef std::deque<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_deque<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_deque<T, Allocator>> wrapped_type;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::deque<T, Allocator>>
 {
 	typedef std::deque<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_deque<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_deque<T, Allocator>> wrapped_type;
 };
 
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<__gc_forward_list<T, Allocator>>
 {
 	typedef std::forward_list<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_forward_list<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_forward_list<T, Allocator>> wrapped_type;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::forward_list<T, Allocator>>
 {
 	typedef std::forward_list<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_forward_list<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_forward_list<T, Allocator>> wrapped_type;
 };
 
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<__gc_list<T, Allocator>>
 {
 	typedef std::list<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_list<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_list<T, Allocator>> wrapped_type;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::list<T, Allocator>>
 {
 	typedef std::list<T, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_list<T, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_list<T, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename Compare, typename Allocator>
 struct GC::wrapper_traits<__gc_set<Key, Compare, Allocator>>
 {
 	typedef std::set<Key, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_set<Key, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_set<Key, Compare, Allocator>> wrapped_type;
 };
 template<typename Key, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::set<Key, Compare, Allocator>>
 {
 	typedef std::set<Key, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_set<Key, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_set<Key, Compare, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename Compare, typename Allocator>
 struct GC::wrapper_traits<__gc_multiset<Key, Compare, Allocator>>
 {
 	typedef std::multiset<Key, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multiset<Key, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multiset<Key, Compare, Allocator>> wrapped_type;
 };
 template<typename Key, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::multiset<Key, Compare, Allocator>>
 {
 	typedef std::multiset<Key, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multiset<Key, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multiset<Key, Compare, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename T, typename Compare, typename Allocator>
 struct GC::wrapper_traits<__gc_map<Key, T, Compare, Allocator>>
 {
 	typedef std::map<Key, T, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_map<Key, T, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_map<Key, T, Compare, Allocator>> wrapped_type;
 };
 template<typename Key, typename T, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::map<Key, T, Compare, Allocator>>
 {
 	typedef std::map<Key, T, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_map<Key, T, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_map<Key, T, Compare, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename T, typename Compare, typename Allocator>
 struct GC::wrapper_traits<__gc_multimap<Key, T, Compare, Allocator>>
 {
 	typedef std::multimap<Key, T, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multimap<Key, T, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multimap<Key, T, Compare, Allocator>> wrapped_type;
 };
 template<typename Key, typename T, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::multimap<Key, T, Compare, Allocator>>
 {
 	typedef std::multimap<Key, T, Compare, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multimap<Key, T, Compare, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multimap<Key, T, Compare, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<__gc_unordered_set<Key, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_set<Key, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_set<Key, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_set<Key, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_set<Key, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_set<Key, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_set<Key, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_multiset<Key, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_multiset<Key, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_map<Key, T, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_map<Key, T, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
 {
 	typedef std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> unwrapped_type;
-	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;;
+	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;
 };
 
 #endif

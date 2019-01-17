@@ -537,14 +537,24 @@ int main() try
 
 	GC::strategy(GC::strategies::manual);
 
+	std::cerr << "\nstart vector print test\n";
+
+	{
+		std::vector<int> ints = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+
+		//std::thread(vector_printer, std::move(ints)).detach();
+		GC::thread(GC::inherit_disjunction, vector_printer, std::move(ints)).detach();
+	}
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	std::cerr << "\nstart inherit disjunction arg intrin\n";
 
 	{
 		cpy_mov_intrin a, b;
 		a.src = b.src = true;
 
-		//std::thread(intrin_printer, std::move(a), std::move(b)).detach();
-		GC::thread(GC::inherit_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
+		std::thread(intrin_printer, std::move(a), std::move(b)).detach();
+		//GC::thread(GC::inherit_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
 	}
 
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
