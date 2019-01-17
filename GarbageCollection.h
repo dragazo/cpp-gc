@@ -1637,25 +1637,25 @@ public: // -- gc-specific threading stuff -- //
 		explicit thread(primary_disjunction_t, Function &&f, Args &&...args) : t(std::forward<Function>(f), std::forward<Args>(args)...) {}
 
 		template<typename Function, typename ...Args>
-		explicit thread(inherit_disjunction_t, Function &&f, Args &&...args) : t([](std::shared_ptr<disjoint_module> parent_module, auto &&ff, auto &&...fargs)
+		explicit thread(inherit_disjunction_t, Function &&f, Args &&...args) : t([](std::shared_ptr<disjoint_module> &&parent_module, std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
 		{
 			// now that we're a new thread, repoint our local disjunction handle to our parent
 			disjoint_module::local() = parent_module;
 
 			// then invoke the user function
-			std::forward<decltype(ff)>(ff)(std::forward<decltype(fargs)>(fargs)...);
+			std::move(ff)(std::move(fargs)...);
 
 		}, disjoint_module::local(), std::forward<Function>(f), std::forward<Args>(args)...)
 		{}
 
 		template<typename Function, typename ...Args>
-		explicit thread(new_disjunction_t, Function &&f, Args &&...args) : t([](auto &&ff, auto &&...fargs)
+		explicit thread(new_disjunction_t, Function &&f, Args &&...args) : t([](std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
 		{
 			// now that we're a new thread, repoint our local disjunction handle to a new disjunction
 			disjoint_module::local() = disjoint_module_container::get().create_new_disjunction();
 
 			// then invoke the user function
-			std::forward<decltype(ff)>(ff)(std::forward<decltype(fargs)>(fargs)...);
+			std::move(ff)(std::move(fargs)...);
 
 		}, std::forward<Function>(f), std::forward<Args>(args)...)
 		{}

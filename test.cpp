@@ -497,6 +497,31 @@ void sync_err_print(Args &&...args)
 }
 
 
+struct cpy_mov_intrin
+{
+	bool src = false;
+
+	cpy_mov_intrin() { std::cerr << "ctor\n"; }
+	~cpy_mov_intrin() { std::cerr << (src ? "SRC dtor\n" : "dtor\n"); }
+
+	cpy_mov_intrin(const cpy_mov_intrin &other) { std::cerr << "cpy ctor\n"; }
+	cpy_mov_intrin(cpy_mov_intrin &&other) { std::cerr << "mov ctor\n"; }
+
+	cpy_mov_intrin &operator=(const cpy_mov_intrin &other) { std::cerr << "cpy asgn\n"; }
+	cpy_mov_intrin &operator=(cpy_mov_intrin &&other) { std::cerr << "mov asgn\n"; }
+};
+void intrin_printer(cpy_mov_intrin, cpy_mov_intrin)
+{
+	std::cerr << "in printer\n";
+}
+
+void vector_printer(std::vector<int> vec)
+{
+	for (int i : vec) std::cerr << i << ' ';
+	std::cerr << '\n';
+}
+
+
 
 
 // begins a timer in a new scope - requires a matching timer end point.
@@ -511,6 +536,29 @@ int main() try
 	TIMER_BEGIN();
 
 	GC::strategy(GC::strategies::manual);
+
+	std::cerr << "\nstart inherit disjunction arg intrin\n";
+
+	{
+		cpy_mov_intrin a, b;
+		a.src = b.src = true;
+
+		//std::thread(intrin_printer, std::move(a), std::move(b)).detach();
+		GC::thread(GC::inherit_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
+	}
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	std::cerr << "\nstart new disjunction arg intrin\n";
+
+	{
+		cpy_mov_intrin a, b;
+		a.src = b.src = true;
+
+		//std::thread(intrin_printer, std::move(a), std::move(b)).detach();
+		GC::thread(GC::new_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
+	}
+
+	std::cin.get();
 
 	{
 		std::atomic<bool> flag;
