@@ -1866,7 +1866,8 @@ private: // -- gc disjoint module -- //
 	public: // -- ctor / dtor / asgn -- //
 
 		disjoint_module() = default;
-		~disjoint_module() = default;
+
+		~disjoint_module();
 
 		disjoint_module(const disjoint_module&) = delete;
 		disjoint_module &operator=(const disjoint_module&) = delete;
@@ -2013,6 +2014,9 @@ private: // -- gc disjoint module -- //
 		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
 		void BACKGROUND_COLLECTOR_ONLY___cull();
 	};
+
+	friend struct __gc_primary_usage_guard_t;
+	friend struct __gc_local_usage_guard_t;
 
 private: // -- data -- //
 
@@ -9825,5 +9829,21 @@ struct GC::wrapper_traits<std::unordered_multimap<Key, T, Hash, KeyEqual, Alloca
 	typedef std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator> unwrapped_type;
 	typedef std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator>> wrapped_type;
 };
+
+// ------------------ //
+
+// -- usage guards -- //
+
+// ------------------ //
+
+static struct __gc_primary_usage_guard_t
+{
+	__gc_primary_usage_guard_t() { GC::disjoint_module::primary(); }
+} __gc_primary_usage_guard;
+
+static thread_local struct __gc_local_usage_guard_t
+{
+	__gc_local_usage_guard_t() { GC::disjoint_module::local(); }
+} __gc_local_usage_guard;
 
 #endif

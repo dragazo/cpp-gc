@@ -146,6 +146,46 @@ bool GC::obj_list::contains(info *obj) const noexcept
 
 // --------------- //
 
+GC::disjoint_module::~disjoint_module()
+{
+	// we'll assume that the user didn't violate any disjunction restrictions/requirements.
+
+	// disjoint modules are owned via shared_ptr by any thread that needs access to its contents.
+	// at this point we know this disjoint module is no longer needed (hence it being destroyed).
+	// this implies there are no longer any owning handles to the module.
+	// which also implies that all threads that use this module have been ended and are clearing thread_local and/or static resources.
+
+	// we also know that only types declared in this header can access the gc systems directly.
+	// and in each of these types the local disjunction is accessed in the constructor for querying.
+	// this means the local disjunction (this object) will be destroyed after all things that would need to access it.
+	// therefore there should also not be any roots - as those would all be destroyed before this.
+	// this means we can safely destroy everything that's still in this disjunction, as no other object will be accessing it.
+	// thus if we perform a collection we should capture everything.
+
+	// we know that there's not a collection action in progress from an owning thread because there are no more owners - all the threads that owned it are done.
+	// we also know the background collector isn't running a collection because it makes itself a temporary owner during that action, thus we wouldn't be here if it were.
+	// therefore we know this module isn't in a collection action from any source anywhere in the system.
+	// coupled with the fact that there are no other thread owners, we have unique access to all the module data with no chance of someone else accessing us concurrently.
+
+	// run one last collection - this should dispose of all remaining objects unless the user made some disjunction violations.
+	this->collect();
+
+	// while you can make more gc allocations in the destructors that were called, they can't be stored to non-local GC::ptr because those have all been destroyed.
+	// make sure there's nothing left afterwards
+	if (!objs.empty())
+	{
+		std::cerr << "\n\nYOU MADE A USAGE VIOLATION!!\ndestruction of a disjoint gc module had leftover objects\n\n";
+		std::cerr << objs.front() << ' ' << objs.front()->next << '\n' << roots.size() << '\n';
+		std::abort();
+	}
+	if (!roots.empty())
+	{
+		std::cerr << "\n\nYOU MADE A USAGE VIOLATION!!\ndestruction of a disjoint gc module had leftover roots\n\n";
+		std::cerr << roots.size() << '\n' << *roots.begin() << '\n';
+		std::abort();
+	}
+}
+
 void GC::disjoint_module::mark_sweep(info *obj)
 {
 	// mark this handle

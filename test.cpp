@@ -13,6 +13,25 @@
 
 #include "GarbageCollection.h"
 
+
+std::mutex __io_mutex;
+// prints stuff to cerr in a thread-safe fashion
+template<typename ...Args>
+void sync_err_print(Args &&...args)
+{
+	std::lock_guard<std::mutex> io_lock(__io_mutex);
+	int _[] = { ((std::cerr << std::forward<Args>(args)), 0)... };
+}
+
+
+thread_local struct __test_static_ctor_t
+{
+	__test_static_ctor_t() { sync_err_print("------------------------static test ctor\n"); }
+	~__test_static_ctor_t() { sync_err_print("------------------------static test dtor\n"); }
+} __test_static_ctor;
+
+
+
 struct alignas(16) sse_t { char d[16]; };
 
 struct ptr_set
@@ -24,8 +43,8 @@ struct ptr_set
 
 	std::tuple<int, int, int, long, long, int, GC::ptr<int>, int> tuple_thing;
 
-	GC::ptr<std::unordered_map<std::string, unsigned int>> mapydoo1;
-	GC::ptr<std::unordered_map<std::string, unsigned int>> mapydoo2;
+	GC::ptr<GC::unordered_map<std::string, unsigned int>> mapydoo1;
+	GC::ptr<GC::unordered_map<std::string, unsigned int>> mapydoo2;
 
 	GC::ptr<int[]> doodle_dud_0;
 	GC::ptr<int[]> doodle_dud_1;
@@ -319,10 +338,10 @@ struct alert_t
 
 struct atomic_container
 {
-	std::atomic<GC::ptr<double>> atomic_1;
-	std::atomic<GC::ptr<double>> atomic_2;
-	std::atomic<GC::ptr<double>> atomic_3;
-	std::atomic<GC::ptr<double>> atomic_4;
+	GC::atomic_ptr<double> atomic_1;
+	GC::atomic_ptr<double> atomic_2;
+	GC::atomic_ptr<double> atomic_3;
+	GC::atomic_ptr<double> atomic_4;
 };
 template<>
 struct GC::router<atomic_container>
@@ -336,9 +355,11 @@ struct GC::router<atomic_container>
 	}
 };
 
-std::atomic<GC::ptr<atomic_container>> *atomic_gc_ptr;
 
+GC::vector<GC::ptr<int>> global_vec_ptr;
+GC::atomic_ptr<atomic_container> global_atomic_ptr;
 
+thread_local GC::vector<GC::ptr<int>> thread_local_vec_ptr;
 
 template<typename T>
 std::string tostr(T &&v)
@@ -394,7 +415,22 @@ struct bool_alerter
 	~bool_alerter() { flag = true; }
 };
 
+struct bool_alerter_self_ptr
+{
+	bool_alerter alerter;
+	GC::ptr<bool_alerter_self_ptr> self_p;
 
+	explicit bool_alerter_self_ptr(std::atomic<bool> &d) : alerter(d) {}
+};
+template<>
+struct GC::router< bool_alerter_self_ptr>
+{
+	template<typename F>
+	static void route(const bool_alerter_self_ptr &obj, F func)
+	{
+		GC::route(obj.self_p, func);
+	}
+};
 
 // runs statement and asserts that it throws the right type of exception
 #define assert_throws(statement, exception) \
@@ -485,18 +521,6 @@ struct GC::router<ctor_dtor_collect_t>
 };
 
 
-
-
-std::mutex __io_mutex;
-// prints stuff to cerr in a thread-safe fashion
-template<typename ...Args>
-void sync_err_print(Args &&...args)
-{
-	std::lock_guard<std::mutex> io_lock(__io_mutex);
-	int _[] = { ((std::cerr << std::forward<Args>(args)), 0)... };
-}
-
-
 struct cpy_mov_intrin
 {
 	bool src = false;
@@ -520,8 +544,6 @@ void vector_printer(std::vector<int> vec)
 	for (int i : vec) std::cerr << i << ' ';
 	std::cerr << '\n';
 }
-
-
 
 
 // begins a timer in a new scope - requires a matching timer end point.
@@ -566,6 +588,30 @@ int main() try
 
 		//std::thread(intrin_printer, std::move(a), std::move(b)).detach();
 		GC::thread(GC::new_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
+	}
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	{
+		std::cerr << "\nstarting disjunction deletion test\n";
+		std::atomic<bool> disjunction_deletion_flag;
+
+		for (int i = 0; i < 16; ++i)
+		{
+			GC::thread(GC::new_disjunction, [](std::atomic<bool> &flag)
+			{
+				try
+				{
+					auto p = GC::make<bool_alerter_self_ptr>(flag);
+					p->self_p = p;
+				}
+				catch (...) { std::cerr << "DISJUNCTION DEL TEST EXCEPTION!!\n"; std::abort(); }
+			}, std::ref(disjunction_deletion_flag)).join();
+
+			assert(disjunction_deletion_flag);
+		}
+
+		std::cerr << "    -- passed\n\n";
 	}
 
 	std::cin.get();
@@ -718,7 +764,15 @@ int main() try
 	GC::collect();
 	std::cerr << '\n';
 
-	atomic_gc_ptr = new std::atomic<GC::ptr<atomic_container>>;
+	global_atomic_ptr = nullptr;
+	for (int i = 0; i < 8; ++i) global_vec_ptr.emplace_back();
+
+	for (int i = 0; i < 8; ++i) thread_local_vec_ptr.emplace_back();
+
+	GC::thread(GC::new_disjunction, []
+	{
+		for (int i = 0; i < 8; ++i) thread_local_vec_ptr.emplace_back();
+	}).detach();
 
 	GC::ptr<int[16]> arr_ptr_new = GC::make<int[16]>();
 	assert(arr_ptr_new != nullptr);
