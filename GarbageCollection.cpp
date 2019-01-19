@@ -487,8 +487,21 @@ void GC::disjoint_module::schedule_handle_create_alias(smart_handle &handle, con
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
+	// get the target
+	info *target = __get_current_target(src_handle);
+
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+
+	// if we're going to repoint outside the disjunction of the handle, that's a disjunction violation
+	if (target && handle.disjunction != target->disjunction)
+	{
+		throw GC::disjunction_error("attempt to repoint GC::ptr outside of the current disjunction");
+	}
+
+	#endif
+
 	// point it at the source handle's current target
-	handle.raw = __get_current_target(src_handle);
+	handle.raw = target;
 
 	// increment the target reference count
 	if (handle.raw) ++handle.raw->ref_count;
@@ -574,6 +587,16 @@ void GC::disjoint_module::schedule_handle_repoint_swap(smart_handle &handle_a, s
 	// get their current repoint targets
 	info *target_a = __get_current_target(handle_a);
 	info *target_b = __get_current_target(handle_b);
+
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+
+	// if we're going to repoint outside the disjunction of either handle, that's a disjunction violation
+	if (target_b && handle_a.disjunction != target_b->disjunction || target_a && handle_b.disjunction != target_a->disjunction)
+	{
+		throw GC::disjunction_error("attempt to repoint GC::ptr outside of the current disjunction");
+	}
+
+	#endif
 
 	// only perform the swap if they point to different things
 	if (target_a != target_b)

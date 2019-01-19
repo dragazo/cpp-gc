@@ -590,6 +590,8 @@ int main() try
 
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+
 	try
 	{
 		std::cerr << "\nstarting disjunction exception checks\n";
@@ -598,6 +600,8 @@ int main() try
 		auto ptr_b = GC::make<int>();
 
 		// -------------------------------------------------
+
+		std::cerr << "starting asgn test\n";
 
 		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a, GC::ptr<int> &b)
 		{
@@ -614,6 +618,8 @@ int main() try
 
 		// -------------------------------------------------
 
+		std::cerr << "starting asgn new obj test\n";
+
 		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a)
 		{
 			assert_nothrow(a = GC::make<int>());
@@ -627,6 +633,65 @@ int main() try
 			assert_throws_disjunction(a = GC::make<int>());
 		}, std::ref(ptr_a)).join();
 
+		// --------------------------------------------------
+		
+		std::cerr << "starting swap test a\n";
+
+		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a)
+		{
+			auto b = GC::make<int>();
+			assert_nothrow(a.swap(b));
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::inherit_disjunction, [](GC::ptr<int> &a)
+		{
+			auto b = GC::make<int>();
+			assert_nothrow(a.swap(b));
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::new_disjunction, [](GC::ptr<int> &a)
+		{
+			auto b = GC::make<int>();
+			assert_throws_disjunction(a.swap(b));
+		}, std::ref(ptr_a)).join();
+
+		// --------------------------------------------------
+
+		std::cerr << "starting swap test b\n";
+
+		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a)
+		{
+			auto b = GC::make<int>();
+			assert_nothrow(b.swap(a));
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::inherit_disjunction, [](GC::ptr<int> &a)
+		{
+			auto b = GC::make<int>();
+			assert_nothrow(b.swap(a));
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::new_disjunction, [](GC::ptr<int> &a)
+		{
+			auto b = GC::make<int>();
+			assert_throws_disjunction(b.swap(a));
+		}, std::ref(ptr_a)).join();
+
+		// --------------------------------------------------
+
+		std::cerr << "ctor alias test\n";
+
+		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a)
+		{
+			assert_nothrow(GC::ptr<int> temp(a));
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::inherit_disjunction, [](GC::ptr<int> &a)
+		{
+			assert_nothrow(GC::ptr<int> temp(a));
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::new_disjunction, [](GC::ptr<int> &a)
+		{
+			assert_throws_disjunction(GC::ptr<int> temp(a));
+		}, std::ref(ptr_a)).join();
+
+		// --------------------------------------------------
+
 		std::cerr << "    -- success\n";
 	}
 	catch (...)
@@ -634,6 +699,8 @@ int main() try
 		std::cerr << "\n\nAN EXCEPTION SHOULD NOT HAVE GOTTEN HERE!!\n\n";
 		assert(false);
 	}
+
+	#endif
 
 	{
 		std::cerr << "\nstarting disjunction deletion test\n";
