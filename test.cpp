@@ -702,6 +702,9 @@ int main() try
 
 	#endif
 
+	GC::disjunction_error disj_error("hello world");
+	disj_error.what();
+
 	{
 		std::cerr << "\nstarting disjunction deletion test\n";
 		std::atomic<bool> disjunction_deletion_flag;

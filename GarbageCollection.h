@@ -297,7 +297,7 @@ public: // -- exception types -- //
 
 	// exception type thrown by operations that violate testable disjunction rules.
 	// DISJUNCTION_SAFETY_CHECKS must be enabled for these to be checked.
-	class disjunction_error : std::runtime_error
+	class disjunction_error : public std::runtime_error
 	{
 		using std::runtime_error::runtime_error;
 	};
@@ -384,11 +384,24 @@ private: // -- private types -- //
 
 		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
+		// the disjunction this handle was constructed in.
+		// only used for applying disjunction safety checks.
 		disjoint_module *const disjunction;
 
 		#endif
 
-		friend class GC::disjoint_module;
+		friend class GC;
+
+	private: // -- private interface -- //
+
+		// initializes the info handle with the specified value and marks it as a root.
+		// the init object is added to the objects database in the same atomic step as the handle initialization.
+		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the object is in a different disjunction.
+		smart_handle(info *init, bind_new_obj_t) : disjunction(disjoint_module::local().get())
+		{
+			disjoint_module::local()->schedule_handle_create_bind_new_obj(*this, init);
+		}
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -397,16 +410,9 @@ private: // -- private types -- //
 		{
 			disjoint_module::local()->schedule_handle_create_null(*this);
 		}
-
-		// initializes the info handle with the specified value and marks it as a root.
-		// the init object is added to the objects database in the same atomic step as the handle initialization.
-		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
-		smart_handle(info *init, bind_new_obj_t) : disjunction(disjoint_module::local().get())
-		{
-			disjoint_module::local()->schedule_handle_create_bind_new_obj(*this, init);
-		}
 		
-		// constructs a new smart handle to alias another
+		// constructs a new smart handle to alias another.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if other's object is in a different disjunction.
 		smart_handle(const smart_handle &other) : disjunction(disjoint_module::local().get())
 		{
 			disjoint_module::local()->schedule_handle_create_alias(*this, other);
@@ -418,7 +424,8 @@ private: // -- private types -- //
 			disjoint_module::local()->schedule_handle_destroy(*this);
 		}
 
-		// repoints this smart_handle to other - equivalent to this->reset(other)
+		// safely repoints this smart_handle to other - equivalent to this->reset(other).
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if other's object is in a different disjunction.
 		smart_handle &operator=(const smart_handle &other) { reset(other); return *this; }
 
 	public: // -- interface -- //
@@ -431,6 +438,7 @@ private: // -- private types -- //
 		info *const &raw_handle() const noexcept { return raw; }
 
 		// safely repoints the underlying raw handle at the new handle's object.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the new handle's object is in a different disjunction.
 		void reset(const smart_handle &new_value)
 		{
 			disjoint_module::local()->schedule_handle_repoint(*this, new_value);
@@ -588,6 +596,7 @@ public: // -- ptr -- //
 		// the new handle must come from a pre-existing ptr object.
 		// new_obj must be properly-sourced from new_handle->obj and non-null if new_handle is non-null.
 		// if new_handle (and new_obj) is null, the resulting state is empty.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the new handle's object is in a different disjunction.
 		void reset(element_type *new_obj, const smart_handle &new_handle)
 		{
 			obj = new_obj;
@@ -602,12 +611,14 @@ public: // -- ptr -- //
 
 		// constructs a new ptr instance with the specified obj and pre-existing handle.
 		// this is equivalent to reset() but done at construction time for efficiency.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the new handle's object is in a different disjunction.
 		ptr(element_type *new_obj, const smart_handle &new_handle) : obj(new_obj), handle(new_handle) {}
 
 		// constructs a new ptr instance with the specified obj and handle.
 		// for obj and handle: both must either be null or non-null - mixing null/non-null is undefined behavior.
 		// new_handle is automatically added to the gc database.
 		// new_handle must NOT have been sourced via handle.raw_handle().
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the objects is in a different disjunction.
 		ptr(element_type *new_obj, info *new_handle, bind_new_obj_t) : obj(new_obj), handle(new_handle, GC::bind_new_obj) {}
 
 	public: // -- ctor / dtor / asgn -- //
@@ -627,6 +638,7 @@ public: // -- ptr -- //
 		}
 
 		// constructs a new gc pointer from a pre-existing one. allows any conversion that can be statically-checked.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if other's object is in a different disjunction.
 		ptr(const ptr &other) : obj(other.obj), handle(other.handle)
 		{}
 		template<typename J, std::enable_if_t<std::is_convertible<J*, T*>::value, int> = 0>
@@ -634,6 +646,7 @@ public: // -- ptr -- //
 		{}
 
 		// assigns a pre-existing gc pointer a new object. allows any conversion that can be statically-checked.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if other's object is in a different disjunction.
 		ptr &operator=(const ptr &other)
 		{
 			reset(other.obj, other.handle);
@@ -646,6 +659,7 @@ public: // -- ptr -- //
 			return *this;
 		}
 
+		// points this ptr at nothing (null) and severs ownership of the current object (if any).
 		ptr &operator=(std::nullptr_t) { reset(); return *this; }
 
 	public: // -- obj access -- //
@@ -698,6 +712,8 @@ public: // -- ptr -- //
 
 	public: // -- swap -- //
 
+		// swaps this ptr and the other ptr without performing unnecessary atomic inc/dec operations for managing the reference counts.
+		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if either raw repoint action would be a disjunction violation.
 		void swap(ptr &other)
 		{
 			using std::swap;
