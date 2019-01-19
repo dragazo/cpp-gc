@@ -334,16 +334,14 @@ private: // -- private types -- //
 
 		const info_vtable *const vtable; // virtual function table to use
 
-		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+		// the disjunction this handle was constructed in.
+		// this must be used for disjoint utility functions.
+		// also used for applying disjunction safety checks.
 		disjoint_module *const disjunction;
-		#endif
 
 		// populates info - ref count starts at 1 - prev/next are undefined
 		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
-			: obj(_obj), count(_count), vtable(_vtable)
-			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
-			, disjunction(disjoint_module::local().get())
-			#endif
+			: obj(_obj), count(_count), vtable(_vtable), disjunction(disjoint_module::local().get())
 		{}
 
 	public: // -- vtable helpers -- //
@@ -382,13 +380,10 @@ private: // -- private types -- //
 		// all modification actions should be delegated to one of the collection_synchronizer functions.
 		info *raw;
 
-		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
-
 		// the disjunction this handle was constructed in.
-		// only used for applying disjunction safety checks.
+		// this is the disjunction that must be used by disjoint utility functions (all wrapped inside this class).
+		// also used for applying disjunction safety checks (if enabled).
 		disjoint_module *const disjunction;
-
-		#endif
 
 		friend class GC;
 
@@ -400,7 +395,7 @@ private: // -- private types -- //
 		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the object is in a different disjunction.
 		smart_handle(info *init, bind_new_obj_t) : disjunction(disjoint_module::local().get())
 		{
-			disjoint_module::local()->schedule_handle_create_bind_new_obj(*this, init);
+			disjunction->schedule_handle_create_bind_new_obj(*this, init);
 		}
 
 	public: // -- ctor / dtor / asgn -- //
@@ -408,20 +403,20 @@ private: // -- private types -- //
 		// initializes the info handle to null and marks it as a root.
 		smart_handle(std::nullptr_t = nullptr) : disjunction(disjoint_module::local().get())
 		{
-			disjoint_module::local()->schedule_handle_create_null(*this);
+			disjunction->schedule_handle_create_null(*this);
 		}
 		
 		// constructs a new smart handle to alias another.
 		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if other's object is in a different disjunction.
 		smart_handle(const smart_handle &other) : disjunction(disjoint_module::local().get())
 		{
-			disjoint_module::local()->schedule_handle_create_alias(*this, other);
+			disjunction->schedule_handle_create_alias(*this, other);
 		}
 
 		// unroots the internal handle.
 		~smart_handle()
 		{
-			disjoint_module::local()->schedule_handle_destroy(*this);
+			disjunction->schedule_handle_destroy(*this);
 		}
 
 		// safely repoints this smart_handle to other - equivalent to this->reset(other).
@@ -441,18 +436,18 @@ private: // -- private types -- //
 		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the new handle's object is in a different disjunction.
 		void reset(const smart_handle &new_value)
 		{
-			disjoint_module::local()->schedule_handle_repoint(*this, new_value);
+			disjunction->schedule_handle_repoint(*this, new_value);
 		}
 		// safely repoints the underlying raw handle at no object (null).
 		void reset()
 		{
-			disjoint_module::local()->schedule_handle_repoint_null(*this);
+			disjunction->schedule_handle_repoint_null(*this);
 		}
 
 		// safely swaps the underlying raw handles.
 		void swap(smart_handle &other)
 		{
-			disjoint_module::local()->schedule_handle_repoint_swap(*this, other);
+			disjunction->schedule_handle_repoint_swap(*this, other);
 		}
 		friend void swap(smart_handle &a, smart_handle &b) { a.swap(b); }
 	};
@@ -1719,10 +1714,14 @@ public: // -- collection logic utilities -- //
 
 		std::size_t prev_count;
 
+		// the disjunction this object was constructed in.
+		// must be used for disjoint utility functions involving this object.
+		disjoint_module *const disjunction;
+
 	public: // -- ctor / dtor / asgn -- //
 
-		ignore_collect_sentry() { prev_count = disjoint_module::local()->begin_ignore_collect(); }
-		~ignore_collect_sentry() { disjoint_module::local()->end_ignore_collect(); }
+		ignore_collect_sentry() : disjunction(disjoint_module::local().get()) { prev_count = disjunction->begin_ignore_collect(); }
+		~ignore_collect_sentry() { disjunction->end_ignore_collect(); }
 
 		// returns true iff there were no ignore actions in progress prior to the start of this one.
 		bool no_prev_ignores() const noexcept { return prev_count == 0; }

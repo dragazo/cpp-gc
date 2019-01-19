@@ -544,6 +544,12 @@ void vector_printer(std::vector<int> vec)
 }
 
 
+void print_str(const GC::ptr<std::string> &p)
+{
+	if (p) std::cerr << *p << '\n';
+}
+
+
 // begins a timer in a new scope - requires a matching timer end point.
 #define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
 // ends the timer in the current scope - should not be used if there is no timer in the current scope.
@@ -691,6 +697,21 @@ int main() try
 		}, std::ref(ptr_a)).join();
 
 		// --------------------------------------------------
+
+		std::cerr << "value to reference thread pass\n";
+
+		assert_nothrow(GC::thread(GC::primary_disjunction, [](const GC::ptr<std::string> &a)
+		{
+			assert_nothrow(print_str(a));
+		}, GC::make<std::string>("  -- primary disj")).join());
+		assert_nothrow(GC::thread(GC::inherit_disjunction, [](const GC::ptr<std::string> &a)
+		{
+			assert_nothrow(print_str(a));
+		}, GC::make<std::string>("  -- inherit disj")).join());
+		assert_nothrow(GC::thread(GC::new_disjunction, [](const GC::ptr<std::string> &a)
+		{
+			assert_nothrow(print_str(a));
+		}, GC::make<std::string>("  -- new disj")).join());
 
 		std::cerr << "    -- success\n";
 	}
