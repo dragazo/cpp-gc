@@ -447,22 +447,22 @@ bool GC::disjoint_module::this_is_collector_thread()
 	return collector_thread == std::this_thread::get_id();
 }
 
-void GC::disjoint_module::schedule_handle_create_null(info *&handle)
+void GC::disjoint_module::schedule_handle_create_null(smart_handle &handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// point it at null
-	handle = nullptr;
+	handle.raw = nullptr;
 	
 	// root it
 	__schedule_handle_root(handle);
 }
-void GC::disjoint_module::schedule_handle_create_bind_new_obj(info *&handle, info *new_obj)
+void GC::disjoint_module::schedule_handle_create_bind_new_obj(smart_handle &handle, info *new_obj)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// point it at the object
-	handle = new_obj;
+	handle.raw = new_obj;
 
 	// root it
 	__schedule_handle_root(handle);
@@ -483,21 +483,21 @@ void GC::disjoint_module::schedule_handle_create_bind_new_obj(info *&handle, inf
 	// otherwise we need to cache the request
 	else objs_add_cache.insert(new_obj);
 }
-void GC::disjoint_module::schedule_handle_create_alias(info *&handle, info *const &src_handle)
+void GC::disjoint_module::schedule_handle_create_alias(smart_handle &handle, const smart_handle &src_handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// point it at the source handle's current target
-	handle = __get_current_target(src_handle);
+	handle.raw = __get_current_target(src_handle);
 
 	// increment the target reference count
-	if (handle) ++handle->ref_count;
+	if (handle.raw) ++handle.raw->ref_count;
 
 	// root it
 	__schedule_handle_root(handle);
 }
 
-void GC::disjoint_module::schedule_handle_destroy(info *const &handle)
+void GC::disjoint_module::schedule_handle_destroy(const smart_handle &handle)
 {
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 
@@ -509,13 +509,13 @@ void GC::disjoint_module::schedule_handle_destroy(info *const &handle)
 
 	// purge the handle from the repoint cache so we don't dereference undefined memory.
 	// the const cast is ok because we won't be modifying it - just for lookup.
-	handle_repoint_cache.erase(const_cast<info**>(&handle));
+	handle_repoint_cache.erase(const_cast<info**>(&handle.raw));
 
 	// dec the reference count
 	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
 
-void GC::disjoint_module::schedule_handle_unroot(info *const &handle)
+void GC::disjoint_module::schedule_handle_unroot(const smart_handle &handle)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	
@@ -523,13 +523,36 @@ void GC::disjoint_module::schedule_handle_unroot(info *const &handle)
 	__schedule_handle_unroot(handle);
 }
 
-void GC::disjoint_module::schedule_handle_repoint(info *&handle, info *const &new_value)
+void GC::disjoint_module::schedule_handle_repoint_null(smart_handle &handle)
+{
+	std::unique_lock<std::mutex> internal_lock(internal_mutex);
+
+	// get the old target
+	info *old_target = __get_current_target(handle);
+
+	// repoint handle to null
+	__raw_schedule_handle_repoint(handle, nullptr);
+
+	// decrement old target reference count
+	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
+}
+void GC::disjoint_module::schedule_handle_repoint(smart_handle &handle, const smart_handle &new_value)
 {
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 	
 	// get the old/new targets
 	info *old_target = __get_current_target(handle);
 	info *new_target = __get_current_target(new_value);
+
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+
+	// if we're going to repoint outside the disjunction of the handle, that's a disjunction violation
+	if (new_target && handle.disjunction != new_target->disjunction)
+	{
+		throw GC::disjunction_error("attempt to repoint GC::ptr outside of the current disjunction");
+	}
+
+	#endif
 
 	// only do the remaining logic if it's an actual repoint
 	if (old_target != new_target)
@@ -544,20 +567,7 @@ void GC::disjoint_module::schedule_handle_repoint(info *&handle, info *const &ne
 		__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 	}
 }
-void GC::disjoint_module::schedule_handle_repoint_null(info *&handle)
-{
-	std::unique_lock<std::mutex> internal_lock(internal_mutex);
-
-	// get the old target
-	info *old_target = __get_current_target(handle);
-
-	// repoint handle to null
-	__raw_schedule_handle_repoint(handle, nullptr);
-
-	// decrement old target reference count
-	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
-}
-void GC::disjoint_module::schedule_handle_repoint_swap(info *&handle_a, info *&handle_b)
+void GC::disjoint_module::schedule_handle_repoint_swap(smart_handle &handle_a, smart_handle &handle_b)
 {
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
@@ -588,7 +598,7 @@ void GC::disjoint_module::end_ignore_collect()
 	--ignore_collect_count;
 }
 
-void GC::disjoint_module::__schedule_handle_root(info *const &handle)
+void GC::disjoint_module::__schedule_handle_root(const smart_handle &handle)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -597,16 +607,16 @@ void GC::disjoint_module::__schedule_handle_root(info *const &handle)
 		assert(roots_add_cache.empty());
 		assert(roots_remove_cache.empty());
 
-		roots.insert(&handle);
+		roots.insert(&handle.raw_handle());
 	}
 	// otherwise we need to cache the request
 	else
 	{
-		roots_add_cache.insert(&handle);
-		roots_remove_cache.erase(&handle); // ensure the sets are disjoint
+		roots_add_cache.insert(&handle.raw);
+		roots_remove_cache.erase(&handle.raw); // ensure the sets are disjoint
 	}
 }
-void GC::disjoint_module::__schedule_handle_unroot(info *const &handle)
+void GC::disjoint_module::__schedule_handle_unroot(const smart_handle &handle)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -615,17 +625,17 @@ void GC::disjoint_module::__schedule_handle_unroot(info *const &handle)
 		assert(roots_add_cache.empty());
 		assert(roots_remove_cache.empty());
 
-		roots.erase(&handle);
+		roots.erase(&handle.raw);
 	}
 	// otherwise we need to cache the request
 	else
 	{
-		roots_remove_cache.insert(&handle);
-		roots_add_cache.erase(&handle); // ensure the sets are disjoint
+		roots_remove_cache.insert(&handle.raw);
+		roots_add_cache.erase(&handle.raw); // ensure the sets are disjoint
 	}
 }
 
-void GC::disjoint_module::__raw_schedule_handle_repoint(info *&handle, info *target)
+void GC::disjoint_module::__raw_schedule_handle_repoint(smart_handle &handle, info *target)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -634,21 +644,21 @@ void GC::disjoint_module::__raw_schedule_handle_repoint(info *&handle, info *tar
 		assert(handle_repoint_cache.empty());
 
 		// immediately repoint handle to target
-		handle = target;
+		handle.raw = target;
 	}
 	// otherwise we need to cache the request
-	else handle_repoint_cache[&handle] = target;
+	else handle_repoint_cache[&handle.raw] = target;
 }
 
-GC::info *GC::disjoint_module::__get_current_target(info *const &handle)
+GC::info *GC::disjoint_module::__get_current_target(const smart_handle &handle)
 {
 	// find new_value's repoint target from the cache.
 	// const cast is safe because we won't be modifying it (just for lookup in the repoint cache).
-	auto new_value_iter = handle_repoint_cache.find(const_cast<info**>(&handle));
+	auto new_value_iter = handle_repoint_cache.find(const_cast<info**>(&handle.raw));
 
 	// get the target - if it's in the repoint cache, get the repoint target, otherwise use it raw.
 	// this works regardless of if we're in a collect action or not (if we're in a collect action the cache is empty).
-	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : handle;
+	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : handle.raw;
 }
 
 void GC::disjoint_module::__MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
@@ -841,7 +851,7 @@ void GC::collect()
 
 void GC::router_unroot(const smart_handle &arc)
 {
-	disjoint_module::local()->schedule_handle_unroot(arc.raw_handle());
+	disjoint_module::local()->schedule_handle_unroot(arc);
 }
 
 // --------------------- //

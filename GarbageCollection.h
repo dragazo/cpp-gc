@@ -293,6 +293,15 @@ public: // -- user-level routing utilities -- //
 	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<has_trivial_router<typename std::iterator_traits<IterBegin>::value_type>::value && is_router_function_object<F>::value, int> = 0>
 	static void route_range(IterBegin begin, IterEnd end, F func) {}
 
+public: // -- exception types -- //
+
+	// exception type thrown by operations that violate testable disjunction rules.
+	// DISJUNCTION_SAFETY_CHECKS must be enabled for these to be checked.
+	class disjunction_error : std::runtime_error
+	{
+		using std::runtime_error::runtime_error;
+	};
+
 private: // -- private types -- //
 
 	struct info;
@@ -330,10 +339,10 @@ private: // -- private types -- //
 		#endif
 
 		// populates info - ref count starts at 1 - prev/next are undefined
-		info(void *_obj, std::size_t _count, const info_vtable *_vtable, disjoint_module *_disj)
-			: obj(_obj), count(_count), vtable(_vtable),
+		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
+			: obj(_obj), count(_count), vtable(_vtable)
 			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
-			disjunction(_disj)
+			, disjunction(disjoint_module::local().get())
 			#endif
 		{}
 
@@ -371,34 +380,42 @@ private: // -- private types -- //
 		// the raw handle to manage.
 		// after construction, this must never be modified directly.
 		// all modification actions should be delegated to one of the collection_synchronizer functions.
-		info *handle;
+		info *raw;
+
+		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
+
+		disjoint_module *const disjunction;
+
+		#endif
+
+		friend class GC::disjoint_module;
 
 	public: // -- ctor / dtor / asgn -- //
 
 		// initializes the info handle to null and marks it as a root.
-		smart_handle(std::nullptr_t = nullptr)
+		smart_handle(std::nullptr_t = nullptr) : disjunction(disjoint_module::local().get())
 		{
-			disjoint_module::local()->schedule_handle_create_null(handle);
+			disjoint_module::local()->schedule_handle_create_null(*this);
 		}
 
 		// initializes the info handle with the specified value and marks it as a root.
 		// the init object is added to the objects database in the same atomic step as the handle initialization.
 		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
-		smart_handle(info *init, bind_new_obj_t)
+		smart_handle(info *init, bind_new_obj_t) : disjunction(disjoint_module::local().get())
 		{
-			disjoint_module::local()->schedule_handle_create_bind_new_obj(handle, init);
+			disjoint_module::local()->schedule_handle_create_bind_new_obj(*this, init);
 		}
 		
 		// constructs a new smart handle to alias another
-		smart_handle(const smart_handle &other)
+		smart_handle(const smart_handle &other) : disjunction(disjoint_module::local().get())
 		{
-			disjoint_module::local()->schedule_handle_create_alias(handle, other.handle);
+			disjoint_module::local()->schedule_handle_create_alias(*this, other);
 		}
 
 		// unroots the internal handle.
 		~smart_handle()
 		{
-			disjoint_module::local()->schedule_handle_destroy(handle);
+			disjoint_module::local()->schedule_handle_destroy(*this);
 		}
 
 		// repoints this smart_handle to other - equivalent to this->reset(other)
@@ -411,23 +428,23 @@ private: // -- private types -- //
 		// said value is only meant as a snapshot of the gc graph structure at an instance for the garbage collector.
 		// thus, using the value of the info* (and not just the pointer to the pointer) is undefined behavior.
 		// therefore this should never be used to get an argument for a smart_handle constructor.
-		info *const &raw_handle() const noexcept { return handle; }
+		info *const &raw_handle() const noexcept { return raw; }
 
 		// safely repoints the underlying raw handle at the new handle's object.
 		void reset(const smart_handle &new_value)
 		{
-			disjoint_module::local()->schedule_handle_repoint(handle, new_value.handle);
+			disjoint_module::local()->schedule_handle_repoint(*this, new_value);
 		}
 		// safely repoints the underlying raw handle at no object (null).
 		void reset()
 		{
-			disjoint_module::local()->schedule_handle_repoint_null(handle);
+			disjoint_module::local()->schedule_handle_repoint_null(*this);
 		}
 
 		// safely swaps the underlying raw handles.
 		void swap(smart_handle &other)
 		{
-			disjoint_module::local()->schedule_handle_repoint_swap(handle, other.handle);
+			disjoint_module::local()->schedule_handle_repoint_swap(*this, other);
 		}
 		friend void swap(smart_handle &a, smart_handle &b) { a.swap(b); }
 	};
@@ -1236,7 +1253,7 @@ public: // -- ptr allocation -- //
 		catch (...) { allocator_t::dealloc(buf); throw; }
 
 		// construct the info object
-		new (handle) info(obj, 1, &_vtable, disjoint_module::local().get());
+		new (handle) info(obj, 1, &_vtable);
 
 		// -- do the garbage collection aspects -- //
 
@@ -1318,7 +1335,7 @@ public: // -- ptr allocation -- //
 		}
 
 		// construct the info object
-		new (handle) info(obj, scalar_count, &_vtable, disjoint_module::local().get());
+		new (handle) info(obj, scalar_count, &_vtable);
 		
 		// -- do the garbage collection aspects -- //
 
@@ -1403,7 +1420,7 @@ public: // -- ptr allocation -- //
 		catch (...) { Deleter()(obj); throw; }
 
 		// construct the info object
-		new (handle) info(obj, 1, &_vtable, disjoint_module::local().get());
+		new (handle) info(obj, 1, &_vtable);
 
 		// -- do the garbage collection aspects -- //
 
@@ -1460,7 +1477,7 @@ public: // -- ptr allocation -- //
 		catch (...) { Deleter()(obj); throw; }
 
 		// construct the info object
-		new (handle) info(obj, count, &_vtable, disjoint_module::local().get());
+		new (handle) info(obj, count, &_vtable);
 
 		// -- do the garbage collection aspects -- //
 
@@ -1888,37 +1905,37 @@ private: // -- gc disjoint module -- //
 
 		// schedules a handle creation action that points to null.
 		// raw_handle need not be initialized prior to this call.
-		void schedule_handle_create_null(info *&handle);
+		void schedule_handle_create_null(smart_handle &handle);
 		// schedules a handle creation action that points to a new object - inserts new_obj into the obj database.
 		// new_obj must not already exist in the gc database (see create alias below).
 		// the reference count for new_obj is initialized to 1.
 		// raw_handle need not be initialized prior to this call.
-		void schedule_handle_create_bind_new_obj(info *&handle, info *new_obj);
+		void schedule_handle_create_bind_new_obj(smart_handle &handle, info *new_obj);
 		// schedules a handle creation action that points at a pre-existing handle - marks the new handle as a root.
 		// raw_handle need not be initialized prior to this call.
 		// increments the reference count of the referenced target.
-		void schedule_handle_create_alias(info *&raw_handle, info *const &src_handle);
+		void schedule_handle_create_alias(smart_handle &raw_handle, const smart_handle &src_handle);
 
 		// schedules a handle deletion action - unroots the handle and purges it from the handle repoint cache.
 		// for any call to schedule_handle_create_*(), said handle must be sent here before the end of its lifetime.
 		// calling this function implies that the handle no longer exists as far as the gc systems are concerned.
 		// reference counting and other gc logic will commence due to the gc reference being destroyed.
-		void schedule_handle_destroy(info *const &handle);
+		void schedule_handle_destroy(const smart_handle &handle);
 
 		// schedules a handle unroot operation - unmarks handle as a root.
-		void schedule_handle_unroot(info *const &raw_handle);
+		void schedule_handle_unroot(const smart_handle &raw_handle);
 
 		// schedules a handle repoint action.
 		// handle shall eventually be repointed to null before the next collection action.
 		// automatically performs reference counting logic.
-		void schedule_handle_repoint_null(info *&handle);
+		void schedule_handle_repoint_null(smart_handle &handle);
 		// schedules a handle repoint action.
 		// handle shall eventually be repointed to new_value before the next collection action.
 		// automatically performs reference counting logic.
-		void schedule_handle_repoint(info *&handle, info *const &new_value);
+		void schedule_handle_repoint(smart_handle &handle, const smart_handle &new_value);
 		// schedules a handle repoint action that swaps the pointed-to info objects of two handles atomically.
 		// handle_a shall eventually point to whatever handle_b used to point to and vice versa.
-		void schedule_handle_repoint_swap(info *&handle_a, info *&handle_b);
+		void schedule_handle_repoint_swap(smart_handle &handle_a, smart_handle &handle_b);
 
 		// begins an ignore collect action for this disjoint module.
 		// returns the number of (active) ignore collect actions prior to the start of this one.
@@ -1931,19 +1948,19 @@ private: // -- gc disjoint module -- //
 	private: // -- private interface (unsafe) -- //
 		
 		// marks handle as a root - internal_mutex should be locked
-		void __schedule_handle_root(info *const &handle);
+		void __schedule_handle_root(const smart_handle &handle);
 		// unmarks handle as a root - internal_mutex should be locked
-		void __schedule_handle_unroot(info *const &handle);
+		void __schedule_handle_unroot(const smart_handle &handle);
 
 		// the underlying function for all handle repoint actions.
 		// handles the logic of managing the repoint cache for repointing handle to target.
 		// DOES NOT HANDLE REFERENCE COUNT LOGIC - DO THAT ON YOUR OWN.
-		void __raw_schedule_handle_repoint(info *&handle, info *target);
+		void __raw_schedule_handle_repoint(smart_handle &handle, info *target);
 
 		// gets the current target info object of new_value.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of value.
-		info *__get_current_target(info *const &handle);
+		info *__get_current_target(const smart_handle &handle);
 
 		// performs the reference count decrement logic on target (allowed to be null).
 		// internal_lock is the (already-owned) lock on internal_mutex that was taken previously.

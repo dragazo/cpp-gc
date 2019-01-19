@@ -435,6 +435,12 @@ catch (...) { std::cerr << "threw wrong type\n"; assert(false); }
 try { statement; std::cerr << "did no throw\n"; assert(false); } \
 catch (...) {}
 
+// runs statement and asserts that it throws (anything)
+#define assert_throws_disjunction(statement) \
+try { statement; std::cerr << "did no throw\n"; assert(false); } \
+catch (const GC::disjunction_error&) {} \
+catch (...) { std::cerr << "threw wrong type\n"; assert(false); }
+
 // runs statement and asserts that it doesn't throw (anything)
 #define assert_nothrow(statement) \
 try { statement; } \
@@ -584,6 +590,51 @@ int main() try
 
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
+	try
+	{
+		std::cerr << "\nstarting disjunction exception checks\n";
+
+		auto ptr_a = GC::make<int>();
+		auto ptr_b = GC::make<int>();
+
+		// -------------------------------------------------
+
+		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a, GC::ptr<int> &b)
+		{
+			assert_nothrow(a = b);
+		}, std::ref(ptr_a), std::ref(ptr_b)).join();
+		GC::thread(GC::inherit_disjunction, [](GC::ptr<int> &a, GC::ptr<int> &b)
+		{
+			assert_nothrow(a = b);
+		}, std::ref(ptr_a), std::ref(ptr_b)).join();
+		GC::thread(GC::new_disjunction, [](GC::ptr<int> &a, GC::ptr<int> &b)
+		{
+			assert_nothrow(a = b);
+		}, std::ref(ptr_a), std::ref(ptr_b)).join();
+
+		// -------------------------------------------------
+
+		GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a)
+		{
+			assert_nothrow(a = GC::make<int>());
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::inherit_disjunction, [](GC::ptr<int> &a)
+		{
+			assert_nothrow(a = GC::make<int>());
+		}, std::ref(ptr_a)).join();
+		GC::thread(GC::new_disjunction, [](GC::ptr<int> &a)
+		{
+			assert_throws_disjunction(a = GC::make<int>());
+		}, std::ref(ptr_a)).join();
+
+		std::cerr << "    -- success\n";
+	}
+	catch (...)
+	{
+		std::cerr << "\n\nAN EXCEPTION SHOULD NOT HAVE GOTTEN HERE!!\n\n";
+		assert(false);
+	}
+
 	{
 		std::cerr << "\nstarting disjunction deletion test\n";
 		std::atomic<bool> disjunction_deletion_flag;
@@ -597,7 +648,7 @@ int main() try
 					auto p = GC::make<bool_alerter_self_ptr>(flag);
 					p->self_p = p;
 				}
-				catch (...) { std::cerr << "DISJUNCTION DEL TEST EXCEPTION!!\n"; std::abort(); }
+				catch (...) { std::cerr << "DISJUNCTION DEL TEST EXCEPTION!!\n"; assert(false); }
 			}, std::ref(disjunction_deletion_flag)).join();
 
 			assert(disjunction_deletion_flag);
@@ -615,7 +666,7 @@ int main() try
 			std::thread test_thread([]()
 			{
 				try { GC::collect(); }
-				catch (...) { std::cerr << "\n\nFLAG TESTER EXCEPTION!!\n\n"; std::abort(); }
+				catch (...) { std::cerr << "\n\nFLAG TESTER EXCEPTION!!\n\n"; assert(false); }
 			});
 
 			{
@@ -1320,7 +1371,7 @@ int main() try
 					std::cerr << "printy\n";
 				}
 			}
-			catch (...) { std::cerr << "\n\nSYMTAB TEST EXCEPTION!!\n\n"; std::abort(); }
+			catch (...) { std::cerr << "\n\nSYMTAB TEST EXCEPTION!!\n\n"; assert(false); }
 		});
 		//std::thread t2([]()
 		//{
@@ -1377,7 +1428,7 @@ int main() try
 	catch (const std::exception &ex)
 	{
 		std::cerr << "CTOR/DTOR VEC TEST EXCEPTION!!\n" << ex.what() << "\n\n";
-		std::cin.get();
+		assert(false);
 	}
 
 	GC::collect();
@@ -1408,7 +1459,7 @@ int main() try
 					w = x; x = y; y = z; z = w;
 				}
 			}
-			catch (...) { std::cerr << "\n\nINTERFERENCE EXCEPTION!!\n\n"; std::abort(); }
+			catch (...) { std::cerr << "\n\nINTERFERENCE EXCEPTION!!\n\n"; assert(false); }
 
 			sync_err_print("finished interference thread with no errors\n");
 		});
@@ -1418,7 +1469,6 @@ int main() try
 		TIMER_END(milliseconds, "interference test");
 	}
 
-
 	TIMER_END(milliseconds, "all tests");
 
 	std::cin.get();
@@ -1427,5 +1477,5 @@ int main() try
 catch (const std::exception &ex)
 {
 	std::cerr << "\nEXCEPTION!!\n\n" << ex.what() << "\n\n\n";
-	std::cin.get();
+	assert(false);
 }
