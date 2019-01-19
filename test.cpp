@@ -24,14 +24,6 @@ void sync_err_print(Args &&...args)
 }
 
 
-thread_local struct __test_static_ctor_t
-{
-	__test_static_ctor_t() { sync_err_print("------------------------static test ctor\n"); }
-	~__test_static_ctor_t() { sync_err_print("------------------------static test dtor\n"); }
-} __test_static_ctor;
-
-
-
 struct alignas(16) sse_t { char d[16]; };
 
 struct ptr_set
