@@ -702,18 +702,43 @@ int main() try
 
 			std::cerr << "value to reference thread pass\n";
 
-			assert_nothrow(GC::thread(GC::primary_disjunction, [](const GC::ptr<std::string> &a)
+			GC::thread(GC::primary_disjunction, [](const GC::ptr<std::string> &a)
 			{
 				assert_nothrow(print_str(a));
-			}, GC::make<std::string>("  -- primary disj")).join());
-			assert_nothrow(GC::thread(GC::inherit_disjunction, [](const GC::ptr<std::string> &a)
+			}, GC::make<std::string>("  -- primary disj")).join();
+			GC::thread(GC::inherit_disjunction, [](const GC::ptr<std::string> &a)
 			{
 				assert_nothrow(print_str(a));
-			}, GC::make<std::string>("  -- inherit disj")).join());
-			assert_nothrow(GC::thread(GC::new_disjunction, [](const GC::ptr<std::string> &a)
+			}, GC::make<std::string>("  -- inherit disj")).join();
+			GC::thread(GC::new_disjunction, [](const GC::ptr<std::string> &a)
 			{
 				assert_nothrow(print_str(a));
-			}, GC::make<std::string>("  -- new disj")).join());
+			}, GC::make<std::string>("  -- new disj")).join();
+
+			// --------------------------------------------------
+
+			std::cerr << "value to value thread pass\n";
+
+			/**
+			GC::thread(GC::primary_disjunction, [](GC::ptr<std::string> a)
+			{
+				assert_nothrow(print_str(a));
+			}, GC::make<std::string>("  -- primary disj")).join();
+			std::cerr << " -\n";
+			/**/
+			GC::thread(GC::inherit_disjunction, [](GC::ptr<std::string> a)
+			{
+				assert_nothrow(print_str(a));
+			}, GC::make<std::string>("  -- inherit disj")).join();
+			/**
+			std::cerr << " -\n";
+			GC::thread(GC::new_disjunction, [](GC::ptr<std::string> a)
+			{
+				assert_nothrow(print_str(a));
+			}, GC::make<std::string>("  -- new disj")).join();
+			/**/
+
+			// --------------------------------------------------
 
 			std::cerr << "    -- success\n";
 		}
