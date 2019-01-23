@@ -550,6 +550,25 @@ void print_str(const GC::ptr<std::string> &p)
 }
 
 
+struct access_gc_at_ctor_t
+{
+	GC::ptr<access_gc_at_ctor_t> p;
+
+	access_gc_at_ctor_t() { std::cerr << "ctor gc accessor\n"; }
+	~access_gc_at_ctor_t() { assert(false); std::cerr << "dtor gc accessor\n"; GC::collect(); std::cerr << "  -- safe\n"; }
+};
+template<>
+struct GC::router<access_gc_at_ctor_t>
+{
+	template<typename F>
+	static void route(const access_gc_at_ctor_t &obj, F func)
+	{
+		GC::route(obj.p, func);
+	}
+};
+GC::ptr<access_gc_at_ctor_t> access_gc_at_ctor;
+
+
 // begins a timer in a new scope - requires a matching timer end point.
 #define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
 // ends the timer in the current scope - should not be used if there is no timer in the current scope.
@@ -557,11 +576,17 @@ void print_str(const GC::ptr<std::string> &p)
 #define TIMER_END(units, name) const auto __timer_end = std::chrono::high_resolution_clock::now(); \
 	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(__timer_end - __timer_begin).count() << " " #units "\n\n"; }
 
+
 int main() try
 {
 	TIMER_BEGIN();
 
 	GC::strategy(GC::strategies::manual);
+
+	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
+	access_gc_at_ctor->p = access_gc_at_ctor;
+	std::cerr << "\n\nend main\n";
+	return 0;
 
 	std::cerr << "\nstart vector print test\n";
 
