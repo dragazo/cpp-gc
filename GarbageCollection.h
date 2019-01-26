@@ -363,6 +363,12 @@ private: // -- private types -- //
 		// dlist pointers - should only be modified by obj_list methods.
 		// dlists have no other internal synchronization, so external code must make this thread safe if needed.
 		info *prev, *next;
+
+	public: // -- traversal utilities -- //
+
+		// marks this object and traverses to all routable targets for recursive marking.
+		// objects that have already been marked are skipped, so this is worst case O(n) in the number of existing objects.
+		void mark_sweep();
 	};
 
 	// used to select constructor paths that bind a new object
@@ -1903,12 +1909,6 @@ private: // -- gc disjoint module -- //
 
 		disjoint_module(const disjoint_module&) = delete;
 		disjoint_module &operator=(const disjoint_module&) = delete;
-
-	private: // -- helpers -- //
-
-		// performs the mark sweep logic for collect().
-		// internal_mutex must NOT be locked prior to invocation.
-		void mark_sweep(info *obj);
 
 	public: // -- interface -- //
 

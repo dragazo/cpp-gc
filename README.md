@@ -15,6 +15,7 @@ Contents:
 * [Router Functions](#router-functions)
 * [Built-in Router Functions](#built-in-router-functions)
 * [Example Structs and Router Functions](#example-structs-and-router-functions)
+* [Disjunctions](#disjunctions)
 * [Undefined Behavior](#undefined-behavior)
 * [Usage Examples](#usage-examples)
 * [Best Practices](#best-practices)
@@ -373,6 +374,18 @@ template<> struct GC::router<MaybeTreeNode>
 };
 ```
 
+## Disjunctions
+
+One problem with having garbage collection in a multithreaded environment - at least in a non-blocking manner like `cpp-gc` uses - is that a centralized in-memory database of gc objects, roots, etc. needs to be accessed frequently and potentially by several threads. If for one reason or another your program makes calls to such utilities in rapid succession from several threads simultaneously it can seriously hurt performance due to all te mutex locking. However, `cpp-gc` has a feature specifically-designed to remedy this.
+
+The centralized gc database mentioned mentioned above can actually be split into several disjoint systems. The primary thread of program execution (the one that first calls `main()`) is assigned to the primary disjunction. Upon creation of a new thread, by it a `pthread`, `std::thread`, or anything else, said thread is assigned to a single disjunction, which can never be changed again during the thread's lifetime.
+
+The name `disjunction` or `disjoint` is meaningful and important: two threads can share gc objects if and only if they are in the same disjunction. Violating this restraint is undefined behavior, and can easily lead to undefined memory accesses, segmentation faults, or access violations. Thankfully, many cases of violating these constraints are safely checked at runtime, in which case they result in an exception of type `GC::disjunction_error` instead of invoking undefined behavior. However it is still possible to violate these restrictions through raw pointers, references, or global variables.
+
+By default all threads created are assigned to the primary disjunction. The wrapper class `GC::thread` has an identical interface to `std::thread` except the constructor. The constructor to `GC::thread` takes an extra first parameter whose type determines what disjunction to put the new thread in. These options are: `GC::primary_disjunction_t` which puts the new thread in the primary disjunction, `GC::inherit_disjunction_t` which puts the new thread in the same disjunction as the calling thread, or `GC::new_disjunction_t` which puts the new thread in a new disjunction.
+
+If you don't want to bother with the complexity of the disjunction system, just pretend it doesn't exist. The default behavior of putting all threads in the primary disjunction will never cause errors - at worse it will just be a little slower, depending on how you use `cpp-gc`. Even if you do use disjunctions, I would only recommend using them for separating specific threads that you know have a high degree of contention for accessing the gc system.
+
 ## Undefined Behavior
 
 In this section, we'll cover all the cases that result in undefined behavior and summarize the logic behind these decisions.
@@ -383,6 +396,7 @@ In this section, we'll cover all the cases that result in undefined behavior and
 * Not making your router function mutually explusive with re-pointing or adding/removing/etc things you would route to - explained in immense detail above.
 * Accessing the pointed-to object of a `ptr<T>` in the destructor of its (potentially-indirect) owner - you and the pointed-to object might have been scheduled for garbage collection together and the order of destruction by the garbage collector is undefined, so it might already have been destroyed.
 * Using `GC::adopt(T *obj)` where obj is not an instance of `T` - e.g. obj must not be pointer to base. This is because `GC::adopt()` needs the true type of the object to get its router functions. Thus if `T` is not the true type it would be using the wrong router functions and result in undefined behavior.
+* Accessing an object in disjunction A from a thread in disjunction B - this is explained in detail in the above section on disjunctions - due to the way in which disjunctions are managed, they must not share objects.
 
 ## Usage Examples
 

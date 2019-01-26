@@ -186,19 +186,19 @@ GC::disjoint_module::~disjoint_module()
 	}
 }
 
-void GC::disjoint_module::mark_sweep(info *obj)
+void GC::info::mark_sweep()
 {
 	// mark this handle
-	obj->marked = true;
+	this->marked = true;
 
 	// for each outgoing arc
-	obj->route(+[](const smart_handle &arc)
+	this->route(+[](const smart_handle &arc)
 	{
 		// get the current arc value - this is only safe because we're in a collect action
 		info *raw = arc.raw_handle();
 
 		// if it hasn't been marked, recurse to it (only if non-null)
-		if (raw && !raw->marked) local()->mark_sweep(raw);
+		if (raw && !raw->marked) raw->mark_sweep();
 	});
 }
 
@@ -322,7 +322,7 @@ void GC::disjoint_module::collect()
 	// -- mark and sweep -- //
 
 	// perform a mark sweep from each root object
-	for (info *i : root_objs) mark_sweep(i);
+	for (info *i : root_objs) i->mark_sweep();
 
 	// -- clean anything not marked -- //
 
@@ -874,7 +874,7 @@ void GC::collect()
 
 void GC::router_unroot(const smart_handle &arc)
 {
-	disjoint_module::local()->schedule_handle_unroot(arc);
+	arc.disjunction->schedule_handle_unroot(arc);
 }
 
 // --------------------- //
