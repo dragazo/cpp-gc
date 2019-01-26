@@ -554,8 +554,8 @@ struct access_gc_at_ctor_t
 {
 	GC::ptr<access_gc_at_ctor_t> p;
 
-	access_gc_at_ctor_t() { std::cerr << "ctor gc accessor\n"; }
-	~access_gc_at_ctor_t() { assert(false); std::cerr << "dtor gc accessor\n"; GC::collect(); std::cerr << "  -- safe\n"; }
+	access_gc_at_ctor_t() { std::cerr << "@@@@ ctor gc accessor\n"; }
+	~access_gc_at_ctor_t() { std::cerr << "@@@@ dtor gc accessor\n"; GC::collect(); std::cerr << "  -- safe\n"; }
 };
 template<>
 struct GC::router<access_gc_at_ctor_t>

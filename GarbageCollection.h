@@ -341,7 +341,7 @@ private: // -- private types -- //
 
 		// populates info - ref count starts at 1 - prev/next are undefined
 		info(void *_obj, std::size_t _count, const info_vtable *_vtable)
-			: obj(_obj), count(_count), vtable(_vtable), disjunction(disjoint_module::local().get())
+			: obj(_obj), count(_count), vtable(_vtable), disjunction(disjoint_module::local())
 		{}
 
 	public: // -- vtable helpers -- //
@@ -399,7 +399,7 @@ private: // -- private types -- //
 		// the init object is added to the objects database in the same atomic step as the handle initialization.
 		// init must be the correct value of a current object - thus the return value of raw_handle() cannot be used.
 		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if the object is in a different disjunction.
-		smart_handle(info *init, bind_new_obj_t) : disjunction(disjoint_module::local().get())
+		smart_handle(info *init, bind_new_obj_t) : disjunction(disjoint_module::local())
 		{
 			disjunction->schedule_handle_create_bind_new_obj(*this, init);
 		}
@@ -407,14 +407,14 @@ private: // -- private types -- //
 	public: // -- ctor / dtor / asgn -- //
 
 		// initializes the info handle to null and marks it as a root.
-		smart_handle(std::nullptr_t = nullptr) : disjunction(disjoint_module::local().get())
+		smart_handle(std::nullptr_t = nullptr) : disjunction(disjoint_module::local())
 		{
 			disjunction->schedule_handle_create_null(*this);
 		}
 		
 		// constructs a new smart handle to alias another.
 		// if DISJUNCTION_SAFETY_CHECKS are enabled, throws GC::disjunction_error if other's object is in a different disjunction.
-		smart_handle(const smart_handle &other) : disjunction(disjoint_module::local().get())
+		smart_handle(const smart_handle &other) : disjunction(disjoint_module::local())
 		{
 			disjunction->schedule_handle_create_alias(*this, other);
 		}
@@ -1664,19 +1664,19 @@ public: // -- gc-specific threading stuff -- //
 		explicit thread(inherit_disjunction_t, Function &&f, Args &&...args) : t([](std::shared_ptr<disjoint_module> &&parent_module, std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
 		{
 			// now that we're a new thread, repoint our local disjunction handle to our parent
-			disjoint_module::local() = parent_module;
+			disjoint_module::local_handle() = parent_module;
 
 			// then invoke the user function
 			std::move(ff)(std::move(fargs)...);
 
-		}, disjoint_module::local(), std::forward<Function>(f), std::forward<Args>(args)...)
+		}, disjoint_module::local_handle(), std::forward<Function>(f), std::forward<Args>(args)...)
 		{}
 
 		template<typename Function, typename ...Args>
 		explicit thread(new_disjunction_t, Function &&f, Args &&...args) : t([](std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
 		{
 			// now that we're a new thread, repoint our local disjunction handle to a new disjunction
-			disjoint_module::local() = disjoint_module_container::get().create_new_disjunction();
+			disjoint_module::local_handle() = disjoint_module_container::get().create_new_disjunction();
 
 			// then invoke the user function
 			std::move(ff)(std::move(fargs)...);
@@ -1726,7 +1726,7 @@ public: // -- collection logic utilities -- //
 
 	public: // -- ctor / dtor / asgn -- //
 
-		ignore_collect_sentry() : disjunction(disjoint_module::local().get()) { prev_count = disjunction->begin_ignore_collect(); }
+		ignore_collect_sentry() : disjunction(disjoint_module::local()) { prev_count = disjunction->begin_ignore_collect(); }
 		~ignore_collect_sentry() { disjunction->end_ignore_collect(); }
 
 		// returns true iff there were no ignore actions in progress prior to the start of this one.
@@ -1986,17 +1986,32 @@ private: // -- gc disjoint module -- //
 		// THIS MUST BE THE LAST THING YOU DO UNDER INTERNAL_MUTEX LOCK.
 		void __MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
 
+	private: // -- factory accessor shared data -- //
+
+		// the repoint target for the local disjunction.
+		// this is only meant to be used by logic internally imbedded within the below factory accessor functions.
+		// this is not atomic because it's only modified during the dtor of the primary disjunction at static dtor time, and thus threads are not expected to exist.
+		// if this is null, use local_handle().get(), otherwise use this (a detour around the destroyed therad_local local handle object which would otherwise point to the same object).
+		static disjoint_module *local_detour;
+
 	public: // -- factory accessors -- //
 
 		// gets the primary disjunction - the default one that all threads use unless instructed otherwise.
 		// this shared_ptr has static storage duration - thus this disjoint module's lifetime is the entire program lifetime.
-		static const std::shared_ptr<disjoint_module> &primary();
-
+		static const std::shared_ptr<disjoint_module> &primary_handle();
 		// gets the disjunction that the calling thread belongs to.
 		// this shared_ptr has thread_local storage duration - references/pointers to the shared_ptr itself should not be passed between threads.
 		// IF THIS IS EVER REPOINTED IT MUST HAPPEN PRIOR TO CALLING ANY GC MANAGEMENT FUNCTIONS FROM THE CALLING THREAD!!
 		// the only valid repoint targets are sourced from disjoint_module_container::create_new_disjunction().
-		static std::shared_ptr<disjoint_module> &local();
+		// CALLS TO THIS FUNCTION AFTER THE LIFETIME OF THREAD_LOCAL OBJECTS IN A GIVEN THREAD HAVE EXPIRED (E.G. WITHIN STATIC DTORS) IS UNDEFINED BEHAVIOR - SEE local_raw()).
+		// THIS SHOULD ONLY BE USED IF THE LOCAL THREAD IS GUARANTEED TO BE ALIVE (still running non-dtor code) - WHENEVER POSSIBLE, USE local() INSTEAD.
+		static std::shared_ptr<disjoint_module> &local_handle();
+
+		// gets a pointer to the primary disjunction.
+		static disjoint_module *primary();
+		// gets a pointer to the local disjunction.
+		// works properly even if the local handle has already been destroyed (e.g. for use in static dtors).
+		static disjoint_module *local();
 	};
 
 	// holds the info concerning 
@@ -9870,12 +9885,12 @@ struct GC::wrapper_traits<std::unordered_multimap<Key, T, Hash, KeyEqual, Alloca
 
 static struct __gc_primary_usage_guard_t
 {
-	__gc_primary_usage_guard_t() { GC::disjoint_module::primary(); }
+	__gc_primary_usage_guard_t() { GC::disjoint_module::primary_handle(); }
 } __gc_primary_usage_guard;
 
 static thread_local struct __gc_local_usage_guard_t
 {
-	__gc_local_usage_guard_t() { GC::disjoint_module::local(); }
+	__gc_local_usage_guard_t() { GC::disjoint_module::local_handle(); }
 } __gc_local_usage_guard;
 
 #endif

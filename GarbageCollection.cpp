@@ -167,9 +167,6 @@ GC::disjoint_module::~disjoint_module()
 	// therefore we know this module isn't in a collection action from any source anywhere in the system.
 	// coupled with the fact that there are no other thread owners, we have unique access to all the module data with no chance of someone else accessing us concurrently.
 
-	// run one last collection - this should dispose of all remaining objects unless the user made some disjunction violations.
-	this->collect();
-
 	// while you can make more gc allocations in the destructors that were called, they can't be stored to non-local GC::ptr because those have all been destroyed.
 	// make sure there's nothing left afterwards
 	if (!objs.empty())
@@ -737,22 +734,72 @@ GC::primary_disjunction_t GC::primary_disjunction;
 GC::inherit_disjunction_t GC::inherit_disjunction;
 GC::new_disjunction_t GC::new_disjunction;
 
-const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary()
+GC::disjoint_module *GC::disjoint_module::local_detour = nullptr;
+
+const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle()
 {
 	// not thread_local because the primary disjunction must exist for the entire program runtime.
 	// the default value creates that actual collection module.
-	static std::shared_ptr<disjoint_module> m = std::make_shared<disjoint_module>();
+	static struct primary_handle_t
+	{
+		std::shared_ptr<disjoint_module> m = disjoint_module_container::get().create_new_disjunction();
+		struct _ { _() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ctor primary handle\n"; } ~_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! dtor primary handle\n"; } } __;
 
-	return m;
+		~primary_handle_t()
+		{
+			// because this happens at static dtor time, all thread_local objects have been destroyed already - including the local handle.
+			// thus accesses to the local handle will result in und memory accesses.
+			// set up the local detour to bypass the local handle and instead go to the primary module - which is still alive.
+			local_detour = m.get();
+
+			// perform a collection to catch all remaining objects (before module dtor).
+			m->collect();
+
+			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor: " << m->roots.size() << '\n';
+		}
+	} primary_handle;
+
+	std::cerr << "                                !!!! primary handle access\n";
+
+	return primary_handle.m;
 }
-
-std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local()
+std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
 {
 	// thread_local because this is a thread-specific owning handle.
 	// the default value points the current thread to use the primary disjunction.
-	thread_local std::shared_ptr<disjoint_module> m = primary();
+	thread_local struct local_handle_t
+	{
+		std::shared_ptr<disjoint_module> m = primary_handle();
+		struct _ { _() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ctor local handle\n"; } ~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle\n"; } } __;
 
-	return m;
+		~local_handle_t()
+		{
+			// at this point we're guaranteed all thread_local objects that have gc access have been destroyed.
+			// additionally, static objects must necessarily fall under the primary disjunction and would be handled by the primary() dtor handler.
+
+			// perform a collection to catch all remaining objects (before module dtor).
+			m->collect();
+
+			std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ local mid dtor: " << m->roots.size() << '\n';
+		}
+	} local_handle;
+
+	std::cerr << "                                ~~~~ local handle access\n";
+
+	return local_handle.m;
+}
+
+GC::disjoint_module *GC::disjoint_module::primary()
+{
+	return primary_handle().get();
+}
+GC::disjoint_module *GC::disjoint_module::local()
+{
+	// get the local detour
+	disjoint_module *detour = local_detour;
+
+	// if we're taking a detour, use that, otherwise the handle is alive and we should read that instead
+	return detour ? detour : local_handle().get();
 }
 
 std::shared_ptr<GC::disjoint_module> GC::disjoint_module_container::create_new_disjunction()
@@ -910,9 +957,6 @@ void GC::__timed_collect_func()
 			// if we're using timed strategy
 			if ((int)strategy() & (int)strategies::timed)
 			{
-				// run a collect pass for the primary disjunction
-				disjoint_module::primary()->collect();
-
 				// run a collect pass for all the dynamic disjunctions
 				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect();
 			}
