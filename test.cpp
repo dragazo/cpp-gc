@@ -579,13 +579,16 @@ GC::ptr<access_gc_at_ctor_t> access_gc_at_ctor;
 
 int main() try
 {
+	std::cerr << "\nstart main: " << std::this_thread::get_id() << "\n\n";
+	
 	TIMER_BEGIN();
 
 	GC::strategy(GC::strategies::manual);
 
 	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
 	access_gc_at_ctor->p = access_gc_at_ctor;
-	std::cerr << "\n\nend main\n";
+	
+	std::cerr << "\nend main: " << std::this_thread::get_id() << "\n\n";
 	return 0;
 
 	std::cerr << "\nstart vector print test\n";

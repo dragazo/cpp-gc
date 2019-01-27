@@ -743,7 +743,11 @@ const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle(
 	static struct primary_handle_t
 	{
 		std::shared_ptr<disjoint_module> m = disjoint_module_container::get().create_new_disjunction();
-		struct _ { _() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ctor primary handle\n"; } ~_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! dtor primary handle\n"; } } __;
+		struct _
+		{
+			_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ctor primary handle\n"; }
+			~_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! dtor primary handle\n"; }
+		} __;
 
 		~primary_handle_t()
 		{
@@ -755,7 +759,7 @@ const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle(
 			// perform a collection to catch all remaining objects (before module dtor).
 			m->collect();
 
-			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor: " << m->roots.size() << '\n';
+			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
 		}
 	} primary_handle;
 
@@ -770,7 +774,12 @@ std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
 	thread_local struct local_handle_t
 	{
 		std::shared_ptr<disjoint_module> m = primary_handle();
-		struct _ { _() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ctor local handle\n"; } ~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle\n"; } } __;
+
+		struct _
+		{
+			_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ctor local handle " << std::this_thread::get_id() << '\n'; }
+			~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle " << std::this_thread::get_id() << '\n'; }
+		} __;
 
 		~local_handle_t()
 		{
@@ -780,11 +789,15 @@ std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
 			// perform a collection to catch all remaining objects (before module dtor).
 			m->collect();
 
-			std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ local mid dtor: " << m->roots.size() << '\n';
+			std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ local mid dtor " << std::this_thread::get_id() << " - roots: " << m->roots.size() << '\n';
 		}
 	} local_handle;
 
-	std::cerr << "                                ~~~~ local handle access\n";
+	std::cerr << "                                ~~~~ local handle access " << std::this_thread::get_id() << '\n';
+
+	// if local detour is non-null it means we're in the static dtors (from primary() dtor handler), which means the thread_local handle has already been destroyed.
+	// this would be und access of a destroyed object, but would theoretically only happen if a static dtor tried to make a thread for some reason.
+	assert(local_detour == nullptr);
 
 	return local_handle.m;
 }
@@ -821,7 +834,7 @@ std::shared_ptr<GC::disjoint_module> GC::disjoint_module_container::create_new_d
 	return m;
 }
 
-void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect()
+void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool collect)
 {
 	{
 		std::lock_guard<std::mutex> internal_lock(internal_mutex);
@@ -836,58 +849,39 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect()
 		assert(disjunction_add_cache.empty());
 	}
 
-	// for each stored disjunction:
-	// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
-	// (otherwise we need to constantly update the end iterator after each erasure).
-	for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+	// if performing a real collection
+	if (collect)
 	{
-		// lock down a handle to the disjunction
-		auto handle = i->lock();
-
-		// if it's valid, perform a collection
-		if (handle)
+		// for each stored disjunction:
+		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
+		// (otherwise we need to constantly update the end iterator after each erasure).
+		for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
 		{
-			handle->collect();
-			++i;
+			// lock down a handle to the disjunction
+			auto handle = i->lock();
+
+			// if it's valid, perform a collection
+			if (handle)
+			{
+				handle->collect();
+				++i;
+			}
+			// otherwise it's invalid (dangling) - erase it
+			else i = disjunctions.erase(i);
 		}
-		// otherwise it's invalid (dangling) - erase it
-		else i = disjunctions.erase(i);
 	}
-
+	// otherwise just performing a cull
+	else
 	{
-		std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
-		// exit collecting mode
-		collecting = false;
-
-		// apply all the cached disjunction insertions
-		disjunctions.splice(disjunctions.begin(), disjunction_add_cache);
-		disjunction_add_cache.clear(); // just to be sure
-	}
-}
-void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___cull()
-{
-	{
-		std::lock_guard<std::mutex> internal_lock(internal_mutex);
-
-		// we should not already be collecting (this is background collector only)
-		assert(!collecting);
-
-		// enter collecting mode (just for lock-free resource access - we won't actually be collecting)
-		collecting = true;
-
-		// the add cache should be empty (just came out of a non-collecting phase)
-		assert(disjunction_add_cache.empty());
-	}
-
-	// for each stored disjunction:
-	// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
-	// (otherwise we need to constantly update the end iterator after each erasure).
-	for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
-	{
-		// if this is a dangling pointer, erase it
-		if (i->expired()) i = disjunctions.erase(i);
-		else ++i;
+		// for each stored disjunction:
+		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
+		// (otherwise we need to constantly update the end iterator after each erasure).
+		for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+		{
+			// if this is a dangling pointer, erase it
+			if (i->expired()) i = disjunctions.erase(i);
+			else ++i;
+		}
 	}
 
 	{
@@ -938,41 +932,45 @@ void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time = new_sleep_time;
 
 void GC::start_timed_collect()
 {
-	static std::thread *thread = new std::thread(__timed_collect_func);
-}
-
-// ---------------------------------------------------
-
-void GC::__timed_collect_func()
-{
-	// try the operation
-	try
+	static struct _
 	{
-		// we'll run forever
-		while (true)
+		_()
 		{
-			// sleep the sleep time
-			std::this_thread::sleep_for(sleep_time());
+			std::thread([]
+			{
+				std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
 
-			// if we're using timed strategy
-			if ((int)strategy() & (int)strategies::timed)
-			{
-				// run a collect pass for all the dynamic disjunctions
-				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect();
-			}
-			// otherwise perform any other relevant logic
-			else
-			{
-				// even if we don't perform a dynamic disjunction collection, we need to cull dangling references
-				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___cull();
-			}
+				// try the operation
+				try
+				{
+					// we'll run forever
+					while (true)
+					{
+						// sleep the sleep time
+						std::this_thread::sleep_for(sleep_time());
+
+						// if we're using timed strategy
+						if ((int)strategy() & (int)strategies::timed)
+						{
+							// run a collect pass for all the dynamic disjunctions
+							disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect(true);
+						}
+						// otherwise perform any other relevant logic
+						else
+						{
+							// even if we don't perform a dynamic disjunction collection, we need to cull dangling references
+							disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect(false);
+						}
+					}
+				}
+				// if we ever hit an error, something terrible happened
+				catch (...)
+				{
+					// print error message and terminate with a nonzero code
+					std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
+					std::abort();
+				}
+			}).detach();
 		}
-	}
-	// if we ever hit an error, something terrible happened
-	catch (...)
-	{
-		// print error message and terminate with a nonzero code
-		std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
-		std::exit(1);
-	}
+	} __;
 }

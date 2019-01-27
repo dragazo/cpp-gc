@@ -2054,12 +2054,8 @@ private: // -- gc disjoint module -- //
 		// performs a collection pass for all stored dynamic disjunctions.
 		// additionally performs culling logic for dangling disjunction handles.
 		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
-		void BACKGROUND_COLLECTOR_ONLY___collect();
-
-		// like collect(), but only performs the culling step.
-		// this should be used if a full collection is not needed/requested/etc.
-		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
-		void BACKGROUND_COLLECTOR_ONLY___cull();
+		// if collect is true, performs a collection on each stored disjunction, otherwise only culls dangling handles.
+		void BACKGROUND_COLLECTOR_ONLY___collect(bool collect);
 	};
 
 	friend struct __gc_primary_usage_guard_t;
@@ -2100,11 +2096,6 @@ private: // -- private interface -- //
 private: // -- utility router functions -- //
 	
 	static void router_unroot(const smart_handle &arc);
-
-private: // -- functions you should never ever call ever. did i mention YOU SHOULD NOT CALL THESE?? -- //
-
-	// the function to be executed by the timed collector thread. DO NOT CALL THIS.
-	static void __timed_collect_func();
 };
 
 // ------------------------- //
