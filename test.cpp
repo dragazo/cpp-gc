@@ -569,6 +569,26 @@ struct GC::router<access_gc_at_ctor_t>
 GC::ptr<access_gc_at_ctor_t> access_gc_at_ctor;
 
 
+struct router_allocator
+{
+	mutable GC::ptr<int> p;
+	GC::ptr<router_allocator> self;
+};
+template<>
+struct GC::router<router_allocator>
+{
+	template<typename F>
+	static void route(const router_allocator &r, F func)
+	{
+		// simulate router locking a mutex and a mutator in the class locking and allocating
+		r.p = GC::make<int>(45);
+
+		GC::route(r.p, func);
+		GC::route(r.self, func);
+	}
+};
+
+
 // begins a timer in a new scope - requires a matching timer end point.
 #define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
 // ends the timer in the current scope - should not be used if there is no timer in the current scope.
@@ -580,16 +600,29 @@ GC::ptr<access_gc_at_ctor_t> access_gc_at_ctor;
 int main() try
 {
 	std::cerr << "\nstart main: " << std::this_thread::get_id() << "\n\n";
-	
+	struct _end_logger_t
+	{
+		~_end_logger_t() { std::cerr << "\nend main: " << std::this_thread::get_id() << "\n\n"; }
+	} _end_logger;
+
 	TIMER_BEGIN();
 
-	GC::strategy(GC::strategies::manual);
+	//GC::strategy(GC::strategies::manual);
+	GC::strategy(GC::strategies::timed);
+	GC::sleep_time(std::chrono::milliseconds(500));
+
+
+	GC::thread(GC::new_disjunction, [] {
+		GC::ptr<router_allocator> p_router_allocator = GC::make<router_allocator>();
+		p_router_allocator->self = p_router_allocator;
+
+		std::this_thread::sleep_for(std::chrono::seconds(2));
+	}).detach();
 
 	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
 	access_gc_at_ctor->p = access_gc_at_ctor;
 	
-	std::cerr << "\nend main: " << std::this_thread::get_id() << "\n\n";
-	return 0;
+	//return 0;
 
 	std::cerr << "\nstart vector print test\n";
 
@@ -1061,10 +1094,24 @@ int main() try
 	assert(GC::constCast<const int[]>(non_const_arr) == const_arr);
 	assert(GC::constCast<int[]>(const_arr) == non_const_arr);
 
-	if (gc_uint != nullptr)
-	{
-		std::cerr << "non null gc unique ptr\n";
-	}
+	assert(gc_uint != nullptr);
+
+	GC::ptr<void> void_p_test_1 = non_const_arr;
+	GC::ptr<const void> void_p_test_2 = non_const_arr;
+	GC::ptr<volatile void> void_p_test_3 = non_const_arr;
+	GC::ptr<const volatile void> void_p_test_4 = non_const_arr;
+
+	static_assert(std::is_same<GC::ptr<void>::element_type, void>::value, "ptr<void> elem type wrong");
+	static_assert(std::is_same<decltype(void_p_test_1.get()), void*>::value, "ptr<void> get type wrong");
+	assert(void_p_test_1.get() == non_const_arr.get());
+
+	//*void_p_test_1;
+	//void_p_test_1[5];
+
+	assert(GC::reinterpretCast<int[]>(void_p_test_1) == non_const_arr);
+
+	GC::ptr<const void> void_p_test_5 = const_arr;
+	GC::ptr<const volatile void> void_p_test_6 = const_arr;
 
 	GC::vector<int> gc_vec;
 	gc_vec.emplace_back(17);

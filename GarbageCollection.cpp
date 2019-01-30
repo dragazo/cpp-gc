@@ -10,20 +10,23 @@
 
 #include "GarbageCollection.h"
 
-// -------------- //
+// ------------------------------------------------------------- //
 
-// -- settings -- //
+// -- dev build settings - you probably want all of these off -- //
 
-// -------------- //
+// ------------------------------------------------------------- //
+
+// iff nonzero, prints log messages for disjunction handle activity
+#define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING 0
 
 // if nonzero, displays a message on cerr that an object was added to gc database (+ its address)
-#define GC_SHOW_CREATMSG 0
+#define DRAGAZO_GARBAGE_COLLECT_SHOW_CREATMSG 0
 
 // if nonzero, displays a message on cerr that an object was deleted (+ its address)
-#define GC_SHOW_DELMSG 0
+#define DRAGAZO_GARBAGE_COLLECT_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define GC_COLLECT_MSG 1
+#define DRAGAZO_GARBAGE_COLLECT_MSG 1
 
 // ---------- //
 
@@ -312,7 +315,7 @@ void GC::disjoint_module::collect()
 
 	// -----------------------------------------------------------
 
-	#if GC_COLLECT_MSG
+	#if DRAGAZO_GARBAGE_COLLECT_MSG
 	std::size_t collect_count = 0; // number of objects that we scheduled for deletion
 	#endif
 
@@ -335,13 +338,13 @@ void GC::disjoint_module::collect()
 			objs.remove(i);
 			del_list.add(i);
 
-			#if GC_COLLECT_MSG
+			#if DRAGAZO_GARBAGE_COLLECT_MSG
 			++collect_count;
 			#endif
 		}
 	}
 
-	#if GC_COLLECT_MSG
+	#if DRAGAZO_GARBAGE_COLLECT_MSG
 	std::cerr << "collecting - deleting: " << collect_count << '\n';
 	#endif
 
@@ -743,11 +746,14 @@ const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle(
 	static struct primary_handle_t
 	{
 		std::shared_ptr<disjoint_module> m = disjoint_module_container::get().create_new_disjunction();
+
+		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 		struct _
 		{
 			_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ctor primary handle\n"; }
 			~_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! dtor primary handle\n"; }
 		} __;
+		#endif
 
 		~primary_handle_t()
 		{
@@ -759,11 +765,15 @@ const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle(
 			// perform a collection to catch all remaining objects (before module dtor).
 			m->collect();
 
+			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
+			#endif
 		}
 	} primary_handle;
 
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 	std::cerr << "                                !!!! primary handle access\n";
+	#endif
 
 	return primary_handle.m;
 }
@@ -775,11 +785,13 @@ std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
 	{
 		std::shared_ptr<disjoint_module> m = primary_handle();
 
+		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 		struct _
 		{
 			_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ctor local handle " << std::this_thread::get_id() << '\n'; }
 			~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle " << std::this_thread::get_id() << '\n'; }
 		} __;
+		#endif
 
 		~local_handle_t()
 		{
@@ -789,11 +801,15 @@ std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
 			// perform a collection to catch all remaining objects (before module dtor).
 			m->collect();
 
+			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 			std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ local mid dtor " << std::this_thread::get_id() << " - roots: " << m->roots.size() << '\n';
+			#endif
 		}
 	} local_handle;
 
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 	std::cerr << "                                ~~~~ local handle access " << std::this_thread::get_id() << '\n';
+	#endif
 
 	// if local detour is non-null it means we're in the static dtors (from primary() dtor handler), which means the thread_local handle has already been destroyed.
 	// this would be und access of a destroyed object, but would theoretically only happen if a static dtor tried to make a thread for some reason.
@@ -863,8 +879,16 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 			// if it's valid, perform a collection
 			if (handle)
 			{
+				// before collecting, we need to pretend we're coming from the same disjunction.
+				// this is in case any routers called during collection try to access the gc system e.g. by routers / destructors.
+				disjoint_module::local_handle() = handle;
+
+				// then perform the collection
 				handle->collect();
 				++i;
+
+				// afterwards unlink the handle - we don't want to keep them alive longer than they need to be
+				disjoint_module::local_handle() = nullptr;
 			}
 			// otherwise it's invalid (dangling) - erase it
 			else i = disjunctions.erase(i);
@@ -938,7 +962,9 @@ void GC::start_timed_collect()
 		{
 			std::thread([]
 			{
+				#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 				std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
+				#endif
 
 				// try the operation
 				try

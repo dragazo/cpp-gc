@@ -668,7 +668,9 @@ public: // -- ptr -- //
 		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
 		element_type *get() const noexcept { return obj; }
 
-		element_type &operator*() const { return *get(); }
+		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && !std::is_same<J, void>::value, int> = 0>
+		auto &operator*() const { return *get(); }
+
 		element_type *operator->() const noexcept { return get(); }
 
 		// returns true iff this ptr points to a managed object (non-null)
@@ -678,8 +680,8 @@ public: // -- ptr -- //
 
 		// accesses an item in an array. only defined if T is an array type.
 		// undefined behavior if index is out of bounds.
-		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
-		element_type &operator[](std::ptrdiff_t index) const { return get()[index]; }
+		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value && !std::is_same<J, void>::value, int> = 0>
+		auto &operator[](std::ptrdiff_t index) const { return get()[index]; }
 
 		// returns a ptr to the element with the specified index (no bounds checking).
 		// said ptr aliases the entire array - the array will not be deleted while the alias is still reachable.
@@ -1460,7 +1462,7 @@ public: // -- ptr allocation -- //
 	// if obj is null, does nothing and returns a null ptr object (which does not refer to an object).
 	// otherwise obj must point to a valid array of exactly size count (no more, no less).
 	template<typename T, typename Deleter = std::default_delete<T[]>>
-	static ptr<T[]> adopt(T *obj, std::size_t count)
+	static ptr<T[]> adopt(T obj[], std::size_t count)
 	{
 		// -- verification -- //
 
