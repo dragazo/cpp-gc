@@ -607,10 +607,41 @@ int main() try
 
 	TIMER_BEGIN();
 
-	//GC::strategy(GC::strategies::manual);
-	GC::strategy(GC::strategies::timed);
-	GC::sleep_time(std::chrono::milliseconds(500));
+	// -- tests that require no background collector to work -- //
 
+	// these tests make the assumption that no other thread is currently performing a collection action.
+	// these aren't considered binding tests - i.e. these test conditions aren't actually defined to work properly.
+	// they're merely to make sure that, given no interference, the desired behavior is taking effect.
+
+	GC::strategy(GC::strategies::manual);
+
+	// make sure that ref count decrements to zero result in the object being deleted.
+	// additionally, make sure that if a collection is happening in another thread the ref count guarantee is satisfied.
+	// i.e. if the ref count decs to zero during a collection the object will be destroyed at least by the end of collection.
+	// this is in the no-background collect section so we can join the parallel collector thread before the assertion.
+	{
+		std::atomic<bool> flag;
+		for (int i = 0; i < 4096; ++i)
+		{
+			std::thread test_thread([]()
+			{
+				try { GC::collect(); }
+				catch (...) { std::cerr << "\n\nFLAG TESTER EXCEPTION!!\n\n"; assert(false); }
+			});
+
+			{
+				GC::ptr<bool_alerter> a = GC::make<bool_alerter>(flag);
+			}
+
+			test_thread.join();
+			assert(flag);
+		}
+	}
+
+	// -- all other tests -- //
+
+	GC::strategy(GC::strategies::timed);
+	GC::sleep_time(std::chrono::milliseconds(0));
 
 	GC::thread(GC::new_disjunction, [] {
 		GC::ptr<router_allocator> p_router_allocator = GC::make<router_allocator>();
@@ -838,25 +869,6 @@ int main() try
 	}
 
 	std::cin.get();
-
-	{
-		std::atomic<bool> flag;
-		for (int i = 0; i < 4096; ++i)
-		{
-			std::thread test_thread([]()
-			{
-				try { GC::collect(); }
-				catch (...) { std::cerr << "\n\nFLAG TESTER EXCEPTION!!\n\n"; assert(false); }
-			});
-
-			{
-				GC::ptr<bool_alerter> a = GC::make<bool_alerter>(flag);
-			}
-
-			test_thread.join();
-			assert(flag);
-		}
-	}
 
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<char>::value, "trivial assumption failure");

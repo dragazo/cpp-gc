@@ -1663,10 +1663,12 @@ public: // -- gc-specific threading stuff -- //
 		explicit thread(primary_disjunction_t, Function &&f, Args &&...args) : t(std::forward<Function>(f), std::forward<Args>(args)...) {}
 
 		template<typename Function, typename ...Args>
-		explicit thread(inherit_disjunction_t, Function &&f, Args &&...args) : t([](std::shared_ptr<disjoint_module> &&parent_module, std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
+		explicit thread(inherit_disjunction_t, Function &&f, Args &&...args) : t([](shared_disjoint_handle &&parent_module, std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
 		{
-			// now that we're a new thread, repoint our local disjunction handle to our parent
-			disjoint_module::local_handle() = parent_module;
+			// now that we're a new thread, repoint our local disjunction handle to our parent.
+			// the danger with non-primary/local shared handles is if the non-primary/local shared handle is the last to be destroyed.
+			// this isn't a problem in this case because we can move the non-primary/local handle (func arg) into the local handle slot.
+			disjoint_module::local_handle() = std::move(parent_module);
 
 			// then invoke the user function
 			std::move(ff)(std::move(fargs)...);
@@ -1678,7 +1680,7 @@ public: // -- gc-specific threading stuff -- //
 		explicit thread(new_disjunction_t, Function &&f, Args &&...args) : t([](std::decay_t<Function> &&ff, std::decay_t<Args> &&...fargs)
 		{
 			// now that we're a new thread, repoint our local disjunction handle to a new disjunction
-			disjoint_module::local_handle() = disjoint_module_container::get().create_new_disjunction();
+			disjoint_module_container::get().create_new_disjunction(disjoint_module::local_handle());
 
 			// then invoke the user function
 			std::move(ff)(std::move(fargs)...);
@@ -1814,10 +1816,13 @@ private: // -- sentries -- //
 
 private: // -- gc disjoint module -- //
 
+	class shared_disjoint_handle;
+	class weak_disjoint_handle;
+
 	// provides the gc logic for all objects from a single disjunction.
 	// i.e. all objects and GC::ptr info from the set of all threads that can share gc objects with one another.
 	// it is undefined behavior to point to or access a gc object from a different disjunction.
-	class disjoint_module final
+	class disjoint_module
 	{
 	private: // -- synchronization -- //
 
@@ -1914,8 +1919,13 @@ private: // -- gc disjoint module -- //
 
 	public: // -- interface -- //
 
-		// performs a collection action on (only) this disjoint gc module
-		void collect();
+		// performs a collection action on (only) this disjoint gc module.
+		// returns false iff another thread is performing a collection on this module.
+		bool collect();
+		// performs a blocking collection - USE WITH IMMENSE CAUTION.
+		// if another thread is performing a collection on the current module, waits for it to finish before collecting.
+		// equivalent to "while (!collect()) ;"
+		void blocking_collect();
 
 		// returns true iff the calling thread is the current collector thread for (only) this disjoint module
 		bool this_is_collector_thread();
@@ -1999,15 +2009,15 @@ private: // -- gc disjoint module -- //
 	public: // -- factory accessors -- //
 
 		// gets the primary disjunction - the default one that all threads use unless instructed otherwise.
-		// this shared_ptr has static storage duration - thus this disjoint module's lifetime is the entire program lifetime.
-		static const std::shared_ptr<disjoint_module> &primary_handle();
+		// this has static storage duration - thus this disjoint module's lifetime is the entire program lifetime.
+		static const shared_disjoint_handle &primary_handle();
 		// gets the disjunction that the calling thread belongs to.
-		// this shared_ptr has thread_local storage duration - references/pointers to the shared_ptr itself should not be passed between threads.
+		// this has thread_local storage duration - references/pointers to the handle itself should not be passed between threads.
 		// IF THIS IS EVER REPOINTED IT MUST HAPPEN PRIOR TO CALLING ANY GC MANAGEMENT FUNCTIONS FROM THE CALLING THREAD!!
 		// the only valid repoint targets are sourced from disjoint_module_container::create_new_disjunction().
 		// CALLS TO THIS FUNCTION AFTER THE LIFETIME OF THREAD_LOCAL OBJECTS IN A GIVEN THREAD HAVE EXPIRED (E.G. WITHIN STATIC DTORS) IS UNDEFINED BEHAVIOR - SEE local_raw()).
 		// THIS SHOULD ONLY BE USED IF THE LOCAL THREAD IS GUARANTEED TO BE ALIVE (still running non-dtor code) - WHENEVER POSSIBLE, USE local() INSTEAD.
-		static std::shared_ptr<disjoint_module> &local_handle();
+		static shared_disjoint_handle &local_handle();
 
 		// gets a pointer to the primary disjunction.
 		static disjoint_module *primary();
@@ -2017,7 +2027,7 @@ private: // -- gc disjoint module -- //
 	};
 
 	// holds the info concerning 
-	class disjoint_module_container final
+	class disjoint_module_container
 	{
 	private: // -- data -- //
 
@@ -2029,12 +2039,12 @@ private: // -- gc disjoint module -- //
 		// all the stored disjunctions.
 		// this can be modfied under internal_mutex lock unless in collecting mode.
 		// in collecting mode this is considered a collector-only resource.
-		std::list<std::weak_ptr<disjoint_module>> disjunctions;
+		std::list<weak_disjoint_handle> disjunctions;
 
 		// all the cached disjunction insertion actions.
 		// this can be modified under internal_mutex lock.
 		// unless in collecting mode, this cache must at all times be empty.
-		std::list<std::weak_ptr<disjoint_module>> disjunction_add_cache;
+		std::list<weak_disjoint_handle> disjunction_add_cache;
 
 	private: // -- ctor / dtor / asgn -- //
 
@@ -2049,15 +2059,126 @@ private: // -- gc disjoint module -- //
 		// gets the (only) disjoint module container instance
 		static disjoint_module_container &get() { static disjoint_module_container c; return c; }
 
-		// creates a new disjunction and returns an owning handle to it.
+		// creates a new disjunction and stores it to dest.
 		// this is the only valid repoint target for the local disjunction handle.
-		std::shared_ptr<disjoint_module> create_new_disjunction();
+		void create_new_disjunction(shared_disjoint_handle &dest);
 
 		// performs a collection pass for all stored dynamic disjunctions.
 		// additionally performs culling logic for dangling disjunction handles.
 		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
 		// if collect is true, performs a collection on each stored disjunction, otherwise only culls dangling handles.
 		void BACKGROUND_COLLECTOR_ONLY___collect(bool collect);
+	};
+
+	// acts as an owning handle for a gc disjunction module.
+	// repointing and destructor actions on this object trigger end-of-thread cleanup for gc resources.
+	// thus, you should NEVER EVER use this type as a local object - undefined behavior.
+	// this should only be used for the primary/local handles - all others should be weak_disjoint_handle.
+	class shared_disjoint_handle
+	{
+	private: // -- data -- //
+
+		std::shared_ptr<disjoint_module> raw_handle; // the raw (owning) disjunction handle
+
+		friend class weak_disjoint_handle;
+		friend class disjoint_module_container;
+
+	private: // -- repointing -- //
+
+		template<typename T>
+		void reset(T &&other)
+		{
+			// handle self-assignment as no-op
+			if (raw_handle == other) return;
+
+			// if we pointed at something, perform a blocking collection while we still own it
+			if (raw_handle) raw_handle->blocking_collect();
+
+			// repoint to using the new handle value
+			raw_handle = std::forward<T>(other);
+		}
+		void reset()
+		{
+			// just refer to the other form
+			// shared_ptr ctor is noexcept, so it should be trivial to construct an empty one
+			reset(std::shared_ptr<disjoint_module>());
+		}
+
+	private: // -- private ctor -- //
+
+		// creates a new shared disjoint handle to 
+		explicit shared_disjoint_handle(std::shared_ptr<disjoint_module> &&raw) : raw_handle(std::move(raw)) {}
+
+	public: // -- ctor / dtor / asgn -- //
+
+		explicit shared_disjoint_handle(std::nullptr_t = nullptr) {};
+		~shared_disjoint_handle() { reset(); }
+
+		shared_disjoint_handle(const shared_disjoint_handle &other) : raw_handle(other.raw_handle) {}
+		shared_disjoint_handle(shared_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle)) {}
+
+		shared_disjoint_handle &operator=(const shared_disjoint_handle &other) { reset(other.raw_handle); return *this; }
+
+		// moves other into this object - after this operation other is guaranteed to be empty.
+		// this is the only way to use non-primary/local handles and not invoke undefined behavior (so long as you move into a primary/local handle).
+		shared_disjoint_handle &operator=(shared_disjoint_handle &&other) { reset(std::move(other.raw_handle)); return *this; }
+
+		shared_disjoint_handle &operator=(std::nullptr_t) { reset(); return *this; }
+
+	public: // -- weak handle locking -- //
+
+		// similar to locking the the weak handle - use operator bool after to see if it locked on an existing object
+		shared_disjoint_handle(const weak_disjoint_handle &other) : raw_handle(other.raw_handle.lock()) {}
+		shared_disjoint_handle(weak_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle).lock()) {} // in case lock ever gets a &&
+
+		// similar to locking the the weak handle - use operator bool after to see if it locked on an existing object
+		shared_disjoint_handle &operator=(const weak_disjoint_handle &other) { reset(other.raw_handle.lock()); return *this; }
+		shared_disjoint_handle &operator=(weak_disjoint_handle &&other) { reset(std::move(other.raw_handle).lock()); return *this; } // in case lock ever gets a &&
+
+	public: // -- module access -- //
+
+		explicit operator bool() const noexcept { return (bool)raw_handle; }
+		bool operator!() const noexcept { return !raw_handle; }
+
+		disjoint_module *get() const noexcept { return raw_handle.get(); }
+
+		disjoint_module *operator->() const noexcept { return get(); }
+		disjoint_module &operator*() const { return *get(); }
+	};
+	// the non-owning form of shared_disjoint_handle.
+	// this type is how you store local references to the shared version (which should only be used for primary/local handles).
+	class weak_disjoint_handle
+	{
+	private: // -- data -- //
+
+		std::weak_ptr<disjoint_module> raw_handle; // the raw (non-owning) disjunction handle
+
+		friend class shared_disjoint_handle;
+
+	public: // -- ctor / dtor / asgn -- //
+
+		explicit weak_disjoint_handle(std::nullptr_t = nullptr) {};
+		~weak_disjoint_handle() = default;
+
+		weak_disjoint_handle(const weak_disjoint_handle &other) : raw_handle(other.raw_handle) {}
+		weak_disjoint_handle(weak_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle)) {}
+
+		weak_disjoint_handle &operator=(const weak_disjoint_handle &other) { raw_handle = other.raw_handle; return *this; }
+		weak_disjoint_handle &operator=(weak_disjoint_handle &&other) { raw_handle = std::move(other.raw_handle); return *this; }
+
+		weak_disjoint_handle &operator=(std::nullptr_t) { raw_handle.reset(); return *this; }
+
+	public: // -- shared handle aliasing -- //
+
+		weak_disjoint_handle(const shared_disjoint_handle &other) : raw_handle(other.raw_handle) {}
+		weak_disjoint_handle(shared_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle)) {}
+
+		weak_disjoint_handle &operator=(const shared_disjoint_handle &other) { raw_handle = other.raw_handle; return *this; }
+		weak_disjoint_handle &operator=(shared_disjoint_handle &&other) { raw_handle = std::move(other.raw_handle); return *this; }
+
+	public: // -- module queries -- //
+
+		bool expired() const noexcept { return raw_handle.expired(); }
 	};
 
 	friend struct __gc_primary_usage_guard_t;

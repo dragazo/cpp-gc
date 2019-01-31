@@ -26,7 +26,7 @@
 #define DRAGAZO_GARBAGE_COLLECT_SHOW_DELMSG 0
 
 // if nonzero, displays info messages on cerr during GC::collect()
-#define DRAGAZO_GARBAGE_COLLECT_MSG 1
+#define DRAGAZO_GARBAGE_COLLECT_MSG 0
 
 // ---------- //
 
@@ -151,33 +151,19 @@ bool GC::obj_list::contains(info *obj) const noexcept
 
 GC::disjoint_module::~disjoint_module()
 {
-	// we'll assume that the user didn't violate any disjunction restrictions/requirements.
+	// getting here means there's no longer any owning handles for this disjoint module.
+	// that means we're about to release control of all our stuff - the only thing that can leak is objects.
+	// however we can't perform a collection because this thread no longer as living handle to this module.
+	// so all we can do is enforce the fact that there should not be any memory leaks.
 
-	// disjoint modules are owned via shared_ptr by any thread that needs access to its contents.
-	// at this point we know this disjoint module is no longer needed (hence it being destroyed).
-	// this implies there are no longer any owning handles to the module.
-	// which also implies that all threads that use this module have been ended and are clearing thread_local and/or static resources.
-
-	// we also know that only types declared in this header can access the gc systems directly.
-	// and in each of these types the local disjunction is accessed in the constructor for querying.
-	// this means the local disjunction (this object) will be destroyed after all things that would need to access it.
-	// therefore there should also not be any roots - as those would all be destroyed before this.
-	// this means we can safely destroy everything that's still in this disjunction, as no other object will be accessing it.
-	// thus if we perform a collection we should capture everything.
-
-	// we know that there's not a collection action in progress from an owning thread because there are no more owners - all the threads that owned it are done.
-	// we also know the background collector isn't running a collection because it makes itself a temporary owner during that action, thus we wouldn't be here if it were.
-	// therefore we know this module isn't in a collection action from any source anywhere in the system.
-	// coupled with the fact that there are no other thread owners, we have unique access to all the module data with no chance of someone else accessing us concurrently.
-
-	// while you can make more gc allocations in the destructors that were called, they can't be stored to non-local GC::ptr because those have all been destroyed.
-	// make sure there's nothing left afterwards
+	// if we still have objects, bad news - the user probably violated a disjunction barrier
 	if (!objs.empty())
 	{
 		std::cerr << "\n\nYOU MADE A USAGE VIOLATION!!\ndestruction of a disjoint gc module had leftover objects\n\n";
 		std::cerr << objs.front() << ' ' << objs.front()->next << '\n' << roots.size() << '\n';
 		std::abort();
 	}
+	// same thing for roots - less important cause this can't leak, but we don't want dangling pointers floating around out there.
 	if (!roots.empty())
 	{
 		std::cerr << "\n\nYOU MADE A USAGE VIOLATION!!\ndestruction of a disjoint gc module had leftover roots\n\n";
@@ -202,19 +188,21 @@ void GC::info::mark_sweep()
 	});
 }
 
-void GC::disjoint_module::collect()
+bool GC::disjoint_module::collect()
 {
 	// -- begin the collection action -- //
 
 	{
 		std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
-		// we'll ignore this action if there are any active collect ignore flags for this disjoint module
-		if (ignore_collect_count > 0) return;
+		// if there are 1 or more ignore sentries acting on this module, do nothing and return true.
+		// true is to prevent a deadlock case where we do a blocking collection is made to an ignoring module.
+		if (ignore_collect_count > 0) return true;
 
-		// this only succeeds if there's not currently a collection action in progress.
-		// this ensures that we don't have back-to-back collections and that collections don't block one another.
-		if (collector_thread != std::thread::id()) return;
+		// if there's already a collection in progress for this module, we do nothing.
+		// if the collector is us, return true - this is to prevent a deadlock case where we do a blocking collection from a router/destructor.
+		// otherwise return false - someone else is doing something.
+		if (collector_thread != std::thread::id()) return collector_thread == std::this_thread::get_id();
 
 		// otherwise mark the calling thread as the collector thread
 		collector_thread = std::this_thread::get_id();
@@ -439,6 +427,13 @@ void GC::disjoint_module::collect()
 		for (auto i : handle_repoint_cache) *i.first = i.second;
 		handle_repoint_cache.clear();
 	}
+
+	// return that we did the collection
+	return true;
+}
+void GC::disjoint_module::blocking_collect()
+{
+	while (!collect());
 }
 
 bool GC::disjoint_module::this_is_collector_thread()
@@ -739,13 +734,13 @@ GC::new_disjunction_t GC::new_disjunction;
 
 GC::disjoint_module *GC::disjoint_module::local_detour = nullptr;
 
-const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle()
+const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 {
 	// not thread_local because the primary disjunction must exist for the entire program runtime.
 	// the default value creates that actual collection module.
 	static struct primary_handle_t
 	{
-		std::shared_ptr<disjoint_module> m = disjoint_module_container::get().create_new_disjunction();
+		shared_disjoint_handle m;
 
 		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 		struct _
@@ -755,15 +750,17 @@ const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle(
 		} __;
 		#endif
 
+		primary_handle_t()
+		{
+			disjoint_module_container::get().create_new_disjunction(m);
+		}
+
 		~primary_handle_t()
 		{
 			// because this happens at static dtor time, all thread_local objects have been destroyed already - including the local handle.
 			// thus accesses to the local handle will result in und memory accesses.
 			// set up the local detour to bypass the local handle and instead go to the primary module - which is still alive.
 			local_detour = m.get();
-
-			// perform a collection to catch all remaining objects (before module dtor).
-			m->collect();
 
 			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
@@ -777,13 +774,13 @@ const std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::primary_handle(
 
 	return primary_handle.m;
 }
-std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
+GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 {
 	// thread_local because this is a thread-specific owning handle.
 	// the default value points the current thread to use the primary disjunction.
 	thread_local struct local_handle_t
 	{
-		std::shared_ptr<disjoint_module> m = primary_handle();
+		shared_disjoint_handle m = primary_handle();
 
 		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 		struct _
@@ -792,19 +789,6 @@ std::shared_ptr<GC::disjoint_module> &GC::disjoint_module::local_handle()
 			~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle " << std::this_thread::get_id() << '\n'; }
 		} __;
 		#endif
-
-		~local_handle_t()
-		{
-			// at this point we're guaranteed all thread_local objects that have gc access have been destroyed.
-			// additionally, static objects must necessarily fall under the primary disjunction and would be handled by the primary() dtor handler.
-
-			// perform a collection to catch all remaining objects (before module dtor).
-			m->collect();
-
-			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-			std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ local mid dtor " << std::this_thread::get_id() << " - roots: " << m->roots.size() << '\n';
-			#endif
-		}
 	} local_handle;
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
@@ -831,23 +815,20 @@ GC::disjoint_module *GC::disjoint_module::local()
 	return detour ? detour : local_handle().get();
 }
 
-std::shared_ptr<GC::disjoint_module> GC::disjoint_module_container::create_new_disjunction()
+void GC::disjoint_module_container::create_new_disjunction(shared_disjoint_handle &dest)
 {
-	// create a new disjoint module
-	auto m = std::make_shared<disjoint_module>();
+	// create a new disjoint module and store it into dest
+	dest.reset(std::make_shared<disjoint_module>());
 
 	// add it to the disjunction database
 	{
 		std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 		// if we're not collecting, we need to put it immediately in the disjunction list
-		if (!collecting) disjunctions.emplace_back(m);
+		if (!collecting) disjunctions.emplace_back(dest);
 		// otherwise we need to cache the add action
-		else disjunction_add_cache.emplace_back(m);
+		else disjunction_add_cache.emplace_back(dest);
 	}
-
-	// return 
-	return m;
 }
 
 void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool collect)
@@ -871,20 +852,16 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 		// for each stored disjunction:
 		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
 		// (otherwise we need to constantly update the end iterator after each erasure).
-		for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+		for (auto i = disjunctions.begin(), end = disjunctions.end(); i != end; )
 		{
-			// lock down a handle to the disjunction
-			auto handle = i->lock();
+			// lock and use this disjunction as the local disjunction - then get the raw handle
+			disjoint_module *const raw_handle = (disjoint_module::local_handle() = *i).get();
 
-			// if it's valid, perform a collection
-			if (handle)
+			// if it's still allive, perform a collection on it
+			if (raw_handle)
 			{
-				// before collecting, we need to pretend we're coming from the same disjunction.
-				// this is in case any routers called during collection try to access the gc system e.g. by routers / destructors.
-				disjoint_module::local_handle() = handle;
-
-				// then perform the collection
-				handle->collect();
+				// perform the collection
+				raw_handle->collect();
 				++i;
 
 				// afterwards unlink the handle - we don't want to keep them alive longer than they need to be
@@ -900,7 +877,7 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 		// for each stored disjunction:
 		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
 		// (otherwise we need to constantly update the end iterator after each erasure).
-		for (std::list<std::weak_ptr<disjoint_module>>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+		for (auto i = disjunctions.begin(), end = disjunctions.end(); i != end; )
 		{
 			// if this is a dangling pointer, erase it
 			if (i->expired()) i = disjunctions.erase(i);
