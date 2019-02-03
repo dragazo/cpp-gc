@@ -817,8 +817,13 @@ GC::disjoint_module *GC::disjoint_module::local()
 
 void GC::disjoint_module_container::create_new_disjunction(shared_disjoint_handle &dest)
 {
-	// create a new disjoint module and store it into dest
-	dest.reset(std::make_shared<disjoint_module>());
+	// create a new disjoint module handle data block
+	auto m = std::make_unique<disjoint_module_handle_data>();
+	// and construct its module in-place
+	new (m->get()) disjoint_module;
+
+	// repoint dest to the new disjunction
+	dest.reset(m.release());
 
 	// add it to the disjunction database
 	{
@@ -895,6 +900,173 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 		disjunctions.splice(disjunctions.begin(), disjunction_add_cache);
 		disjunction_add_cache.clear(); // just to be sure
 	}
+}
+
+// ------------------------------- //
+
+// -- shared disjunction handle -- //
+
+// ------------------------------- //
+
+void GC::shared_disjoint_handle::reset(disjoint_module_handle_data *other)
+{
+	// handle redundant assignment as no-op
+	if (data == other) return;
+
+	// if we pointed at something
+	if (data)
+	{
+		// drop the owning ref count - if it hits zero, mark for destruction and destroy the object if it hasn't been already
+		if (--data->own_ref_count == 0 && !data->destroyed_flag.exchange(true))
+		{
+			__module->blocking_collect(); // perform one final collection to make sure everything's collected
+			__module->~disjoint_module(); // then destroy the module itself - its dtor asserts that all objects were collected
+		}
+		// drop the unified ref count - if it hits zero, delete the object (no one sees it anymore)
+		if (--data->uni_ref_count == 0) delete data;
+	}
+
+	// repoint and test for null - must come after destruction logic to ensure the collection can potentially alias this handle
+	data = other;
+	if (data)
+	{
+		__module = data->get(); // cache the module pointer
+		++data->own_ref_count;  // bump up its owning ref count
+		++data->uni_ref_count;  // bump up its unified ref count
+	}
+	else __module = nullptr; // cache the module pointer (in this case null)
+}
+
+void GC::shared_disjoint_handle::lock(disjoint_module_handle_data *other)
+{
+	// perform the raw reset action
+	reset(other);
+
+	// perform the after-reset check as mandated by reset() in the case of locking a weak reference
+	if (data && data->destroyed_flag)
+	{
+		// after the first time the owning ref count hits zero we consider its contents undefined.
+		// thus we only need to perform the unified ref count logic for the deletion since destruction is already done.
+		if (--data->uni_ref_count == 0) delete data;
+
+		// then we just need to re-null ourselves trivially
+		data = nullptr;
+		__module = nullptr;
+	}
+}
+
+GC::shared_disjoint_handle::shared_disjoint_handle(std::nullptr_t) noexcept : __module(nullptr), data(nullptr) {}
+GC::shared_disjoint_handle::~shared_disjoint_handle() { reset(); }
+
+GC::shared_disjoint_handle::shared_disjoint_handle(const shared_disjoint_handle &other)
+{
+	// alias the same disjunction
+	data = other.data;
+	__module = other.__module;
+
+	// bump up the ref counts to account for our aliasing
+	if (data)
+	{
+		++data->own_ref_count;
+		++data->uni_ref_count;
+	}
+}
+GC::shared_disjoint_handle::shared_disjoint_handle(shared_disjoint_handle &&other) noexcept
+{
+	// steal disjunction ownership - ref count change is net zero
+	data = std::exchange(other.data, nullptr);
+	__module = std::exchange(other.__module, nullptr);
+}
+
+GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(const shared_disjoint_handle &other)
+{
+	reset(other.data);
+	return *this;
+}
+GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(shared_disjoint_handle &&other)
+{
+	// repoint to null with the ref count logic
+	reset();
+
+	// then steal disjunction ownership - ref count change is net zero
+	data = std::exchange(other.data, nullptr);
+	__module = std::exchange(other.__module, nullptr);
+
+	return *this;
+}
+
+GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(std::nullptr_t)
+{
+	reset();
+	return *this;
+}
+
+GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(const weak_disjoint_handle &other)
+{
+	lock(other.data);
+	return *this;
+}
+
+// ----------------------------- //
+
+// -- weak disjunction handle -- //
+
+// ----------------------------- //
+
+void GC::weak_disjoint_handle::reset(disjoint_module_handle_data *other)
+{
+	// handle redundant assignment as no-op
+	if (data == other) return;
+
+	// if we pointed at something drop the non-owning ref count - if that hits zero, delete it
+	// uni ref count can't hit zero until ref count hits zero and finishes destruction, so the object is already guaranteed to be destroyed.
+	if (data && --data->uni_ref_count == 0) delete data;
+
+	// repoint - if non-null bump up non-owning ref count
+	data = other;
+	if (data) ++data->uni_ref_count;
+}
+
+GC::weak_disjoint_handle::weak_disjoint_handle(std::nullptr_t) noexcept : data(nullptr) {}
+GC::weak_disjoint_handle::~weak_disjoint_handle() { reset(); }
+
+GC::weak_disjoint_handle::weak_disjoint_handle(const weak_disjoint_handle &other)
+{
+	data = other.data; // alias the same disjunction
+	if (data) ++data->uni_ref_count; // bump up the unified ref count to account for our aliasing
+}
+GC::weak_disjoint_handle::weak_disjoint_handle(weak_disjoint_handle &&other) noexcept
+{
+	data = std::exchange(other.data, nullptr); // steal disjunction ownership - ref count chang is net zero
+}
+
+GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(const weak_disjoint_handle &other)
+{
+	reset(other.data);
+	return *this;
+}
+GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(weak_disjoint_handle &&other)
+{
+	reset(); // repoint to null with the ref count logic
+	data = std::exchange(other.data, nullptr); // then unsafe repoint to other and disconnect other - the ref count change is net zero
+	return *this;
+}
+
+GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(std::nullptr_t)
+{
+	reset(); 
+	return *this;
+}
+
+GC::weak_disjoint_handle::weak_disjoint_handle(const shared_disjoint_handle &other)
+{
+	data = other.data; // alias the same disjunction
+	if (data) ++data->uni_ref_count; // bump up the unified ref count to account for our aliasing
+}
+GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(const shared_disjoint_handle &other)
+{
+	reset(other.data); // perform the repoint action, accounting for ref counts
+	return *this;
 }
 
 // ---------------- //

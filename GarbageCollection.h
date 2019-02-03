@@ -2026,7 +2026,9 @@ private: // -- gc disjoint module -- //
 		static disjoint_module *local();
 	};
 
-	// holds the info concerning 
+	// holds the info concerning all allocated disjunctions across all threads - including the primary disjunction.
+	// this is the only source for creating new disjunctions.
+	// this is used by the background collector to perform batch collections accross all threads.
 	class disjoint_module_container
 	{
 	private: // -- data -- //
@@ -2070,6 +2072,19 @@ private: // -- gc disjoint module -- //
 		void BACKGROUND_COLLECTOR_ONLY___collect(bool collect);
 	};
 
+	// data object used by shared/weak disjoint handles - entirely externally-managed
+	struct disjoint_module_handle_data
+	{
+		alignas(disjoint_module) char buffer[sizeof(disjoint_module)]; // buffer for holding the disjoint module
+
+		disjoint_module *get() noexcept { return reinterpret_cast<disjoint_module*>(buffer); }
+
+		std::atomic<std::size_t> own_ref_count = 0; // owning ref count for only owning references
+		std::atomic<std::size_t> uni_ref_count = 0; // unified ref count for either owning or non-owning references (both present here)
+
+		std::atomic<bool> destroyed_flag = false; // flag that marks that the module has been destroyed (invalid weakly-shared resource)
+	};
+
 	// acts as an owning handle for a gc disjunction module.
 	// repointing and destructor actions on this object trigger end-of-thread cleanup for gc resources.
 	// thus, you should NEVER EVER use this type as a local object - undefined behavior.
@@ -2078,69 +2093,61 @@ private: // -- gc disjoint module -- //
 	{
 	private: // -- data -- //
 
-		std::shared_ptr<disjoint_module> raw_handle; // the raw (owning) disjunction handle
+		disjoint_module *__module; // the pre-cached module pointer - at all times __module and data are both null or __module == data->get()
+		disjoint_module_handle_data *data; // the module allocation block - stores all the ref count info and the actual module itself
 
 		friend class weak_disjoint_handle;
 		friend class disjoint_module_container;
 
 	private: // -- repointing -- //
 
-		template<typename T>
-		void reset(T &&other)
-		{
-			// handle self-assignment as no-op
-			if (raw_handle == other) return;
+		// repoints this handle at other - performs all relevant reference counting logic for automatic cleanup.
+		// repointing to the same disjunction data block we already point at is no-op.
+		// this can be used for locking a non-owning handle, but you must make sure after the call to check if it's destroyed:
+		//     this logic is performed internally by lock() - you should use that instead of testing destruction states manually.
+		void reset(disjoint_module_handle_data *other = nullptr);
 
-			// if we pointed at something, perform a blocking collection while we still own it
-			if (raw_handle) raw_handle->blocking_collect();
-
-			// repoint to using the new handle value
-			raw_handle = std::forward<T>(other);
-		}
-		void reset()
-		{
-			// just refer to the other form
-			// shared_ptr ctor is noexcept, so it should be trivial to construct an empty one
-			reset(std::shared_ptr<disjoint_module>());
-		}
-
-	private: // -- private ctor -- //
-
-		// creates a new shared disjoint handle to 
-		explicit shared_disjoint_handle(std::shared_ptr<disjoint_module> &&raw) : raw_handle(std::move(raw)) {}
+		// performs all logic necessary for locking onto a weak reference.
+		// if the lock fails the resulting state is null.
+		// this is effectively reset(other) plus the additional required expiry check.
+		void lock(disjoint_module_handle_data *other);
 
 	public: // -- ctor / dtor / asgn -- //
 
-		explicit shared_disjoint_handle(std::nullptr_t = nullptr) {};
-		~shared_disjoint_handle() { reset(); }
+		// creates an owning handle that does not alias a disjunction
+		explicit shared_disjoint_handle(std::nullptr_t = nullptr) noexcept;
 
-		shared_disjoint_handle(const shared_disjoint_handle &other) : raw_handle(other.raw_handle) {}
-		shared_disjoint_handle(shared_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle)) {}
+		~shared_disjoint_handle();
 
-		shared_disjoint_handle &operator=(const shared_disjoint_handle &other) { reset(other.raw_handle); return *this; }
+		// creates a new owning handle that aliases the same disjunction
+		shared_disjoint_handle(const shared_disjoint_handle &other);
+		// creates a new owning handle that aliases the same disjunction - other is empty after this operation
+		shared_disjoint_handle(shared_disjoint_handle &&other) noexcept;
 
-		// moves other into this object - after this operation other is guaranteed to be empty.
+		// repoints this owning handle to other's disjunction
+		shared_disjoint_handle &operator=(const shared_disjoint_handle &other);
+		// repoints this owning handle to other's disjunction - other is empty after this operation.
 		// this is the only way to use non-primary/local handles and not invoke undefined behavior (so long as you move into a primary/local handle).
-		shared_disjoint_handle &operator=(shared_disjoint_handle &&other) { reset(std::move(other.raw_handle)); return *this; }
+		shared_disjoint_handle &operator=(shared_disjoint_handle &&other);
 
-		shared_disjoint_handle &operator=(std::nullptr_t) { reset(); return *this; }
+		// repoints this owning handle to null (no owned disjunction)
+		shared_disjoint_handle &operator=(std::nullptr_t);
 
 	public: // -- weak handle locking -- //
 
-		// similar to locking the the weak handle - use operator bool after to see if it locked on an existing object
-		shared_disjoint_handle(const weak_disjoint_handle &other) : raw_handle(other.raw_handle.lock()) {}
-		shared_disjoint_handle(weak_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle).lock()) {} // in case lock ever gets a &&
-
-		// similar to locking the the weak handle - use operator bool after to see if it locked on an existing object
-		shared_disjoint_handle &operator=(const weak_disjoint_handle &other) { reset(other.raw_handle.lock()); return *this; }
-		shared_disjoint_handle &operator=(weak_disjoint_handle &&other) { reset(std::move(other.raw_handle).lock()); return *this; } // in case lock ever gets a &&
+		// repoints this owning handle to the object aliased by non-owning handle other.
+		// if the object aliased by other is at this point invalid, this results in null (for this object).
+		shared_disjoint_handle &operator=(const weak_disjoint_handle &other);
 
 	public: // -- module access -- //
 
-		explicit operator bool() const noexcept { return (bool)raw_handle; }
-		bool operator!() const noexcept { return !raw_handle; }
+		// returns true iff this owning handle aliases a disjunction
+		explicit operator bool() const noexcept { return __module != nullptr; }
+		// returns true iff this owning handle does not alias a disjunction
+		bool operator!() const noexcept { return __module == nullptr; }
 
-		disjoint_module *get() const noexcept { return raw_handle.get(); }
+		// gets the aliased disjunction - if this handle does not alias a disjunction returns null
+		disjoint_module *get() const noexcept { return __module; }
 
 		disjoint_module *operator->() const noexcept { return get(); }
 		disjoint_module &operator*() const { return *get(); }
@@ -2151,34 +2158,48 @@ private: // -- gc disjoint module -- //
 	{
 	private: // -- data -- //
 
-		std::weak_ptr<disjoint_module> raw_handle; // the raw (non-owning) disjunction handle
+		disjoint_module_handle_data *data; // the managed disjunction - EXTERNAL CODE SHOULD NOT MODIFY DIRECTLY - use reset()
 
 		friend class shared_disjoint_handle;
 
+	private: // -- repointing -- //
+
+		// repoints this handle at other - performs all relevant reference counting logic for automatic cleanup.
+		// repointing to the same disjunction data block we already point at is no-op.
+		void reset(disjoint_module_handle_data *other = nullptr);
+
 	public: // -- ctor / dtor / asgn -- //
 
-		explicit weak_disjoint_handle(std::nullptr_t = nullptr) {};
-		~weak_disjoint_handle() = default;
+		// creates a non-owning handle that does not alias a disjunction
+		explicit weak_disjoint_handle(std::nullptr_t = nullptr) noexcept;
 
-		weak_disjoint_handle(const weak_disjoint_handle &other) : raw_handle(other.raw_handle) {}
-		weak_disjoint_handle(weak_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle)) {}
+		~weak_disjoint_handle();
 
-		weak_disjoint_handle &operator=(const weak_disjoint_handle &other) { raw_handle = other.raw_handle; return *this; }
-		weak_disjoint_handle &operator=(weak_disjoint_handle &&other) { raw_handle = std::move(other.raw_handle); return *this; }
+		// creates a new non-owning handle that aliases the same disjunction
+		weak_disjoint_handle(const weak_disjoint_handle &other);
+		// creates a new owning handle that aliases the same disjunction - other is empty after this operation
+		weak_disjoint_handle(weak_disjoint_handle &&other) noexcept;
+		
+		// repoints this non-owning handle to other's disjunction
+		weak_disjoint_handle &operator=(const weak_disjoint_handle &other);
+		// repoints this non-owning handle to other's disjunction - other is empty after this operation.
+		weak_disjoint_handle &operator=(weak_disjoint_handle &&other);
 
-		weak_disjoint_handle &operator=(std::nullptr_t) { raw_handle.reset(); return *this; }
+		// repoints this non-owning handle to null (no owned disjunction)
+		weak_disjoint_handle &operator=(std::nullptr_t);
 
 	public: // -- shared handle aliasing -- //
 
-		weak_disjoint_handle(const shared_disjoint_handle &other) : raw_handle(other.raw_handle) {}
-		weak_disjoint_handle(shared_disjoint_handle &&other) : raw_handle(std::move(other.raw_handle)) {}
-
-		weak_disjoint_handle &operator=(const shared_disjoint_handle &other) { raw_handle = other.raw_handle; return *this; }
-		weak_disjoint_handle &operator=(shared_disjoint_handle &&other) { raw_handle = std::move(other.raw_handle); return *this; }
+		// creates a new non-owning handle that aliases the disjunction aliased by an owning handle
+		weak_disjoint_handle(const shared_disjoint_handle &other);
+		// reploints this non-owning handle to the disjunction aliased by an owning handle
+		weak_disjoint_handle &operator=(const shared_disjoint_handle &other);
 
 	public: // -- module queries -- //
 
-		bool expired() const noexcept { return raw_handle.expired(); }
+		// returns true iff the last owning handle to the aliased disjunction has been severed.
+		// if this handle does not alias a disjunction, returns true.
+		bool expired() const noexcept { return !data || data->destroyed_flag; }
 	};
 
 	friend struct __gc_primary_usage_guard_t;
