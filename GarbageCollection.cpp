@@ -19,6 +19,9 @@
 // iff nonzero, prints log messages for disjunction handle activity
 #define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING 0
 
+// iff nonzero, does extra und safety checks for atomic disjuction handle internals
+#define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_DATA_UND_SAFETY 1
+
 // if nonzero, displays a message on cerr that an object was added to gc database (+ its address)
 #define DRAGAZO_GARBAGE_COLLECT_SHOW_CREATMSG 0
 
@@ -818,7 +821,7 @@ GC::disjoint_module *GC::disjoint_module::local()
 void GC::disjoint_module_container::create_new_disjunction(shared_disjoint_handle &dest)
 {
 	// create a new disjoint module handle data block
-	auto m = std::make_unique<disjoint_module_handle_data>();
+	auto m = std::make_unique<handle_data>();
 	// and construct its module in-place
 	new (m->get()) disjoint_module;
 
@@ -902,13 +905,54 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 	}
 }
 
+// ----------------------------------- //
+
+// -- disjunction handle data stuff -- //
+
+// ----------------------------------- //
+
+GC::handle_data::tag_t GC::handle_data::tag_add(tag_t v, std::memory_order order)
+{
+	const auto prev = tag.fetch_add(v, order);
+
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_DATA_UND_SAFETY
+
+	const auto cur = prev + v; // compute current value from previous
+
+	// make sure we didn't overflow any of the fields
+	assert((cur & strong_mask) >= (prev & strong_mask));
+	assert((cur & weak_mask) >= (prev & weak_mask));
+	assert((cur & lock_mask) >= (prev & lock_mask));
+
+	#endif
+
+	return prev;
+}
+GC::handle_data::tag_t GC::handle_data::tag_sub(tag_t v, std::memory_order order)
+{
+	const auto prev = tag.fetch_sub(v, order);
+
+	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_DATA_UND_SAFETY
+
+	const auto cur = prev - v; // compute current value from previous
+
+	// make sure we didn't overflow any of the fields
+	assert((cur & strong_mask) <= (prev & strong_mask));
+	assert((cur & weak_mask) <= (prev & weak_mask));
+	assert((cur & lock_mask) <= (prev & lock_mask));
+
+	#endif
+
+	return prev;
+}
+
 // ------------------------------- //
 
 // -- shared disjunction handle -- //
 
 // ------------------------------- //
 
-void GC::shared_disjoint_handle::reset(disjoint_module_handle_data *other)
+void GC::shared_disjoint_handle::reset(handle_data *other)
 {
 	// handle redundant assignment as no-op
 	if (data == other) return;
@@ -916,14 +960,19 @@ void GC::shared_disjoint_handle::reset(disjoint_module_handle_data *other)
 	// if we pointed at something
 	if (data)
 	{
-		// drop the owning ref count - if it hits zero, mark for destruction and destroy the object if it hasn't been already
-		if (--data->own_ref_count == 0 && !data->destroyed_flag.exchange(true))
+		// drop a strong reference and get the previous tag
+		auto prev = data->tag_sub(handle_data::strong_1);
+
+		// if we were the last strong reference, there are no longer any strong references - destroy the object
+		// we include the lock strong refs because those locks succeeded - i.e. our very existence as a non-lock strong owner proves those locks succeeded.
+		if ((prev & handle_data::strong_mask) == handle_data::strong_1)
 		{
 			__module->blocking_collect(); // perform one final collection to make sure everything's collected
 			__module->~disjoint_module(); // then destroy the module itself - its dtor asserts that all objects were collected
+
+			// if there are also no more weak references, delete the handle
+			if ((prev & handle_data::weak_mask) == 0) delete data;
 		}
-		// drop the unified ref count - if it hits zero, delete the object (no one sees it anymore)
-		if (--data->uni_ref_count == 0) delete data;
 	}
 
 	// repoint and test for null - must come after destruction logic to ensure the collection can potentially alias this handle
@@ -931,27 +980,39 @@ void GC::shared_disjoint_handle::reset(disjoint_module_handle_data *other)
 	if (data)
 	{
 		__module = data->get(); // cache the module pointer
-		++data->own_ref_count;  // bump up its owning ref count
-		++data->uni_ref_count;  // bump up its unified ref count
+		data->tag_add(handle_data::strong_1); // bump up the strong ref count
 	}
 	else __module = nullptr; // cache the module pointer (in this case null)
 }
 
-void GC::shared_disjoint_handle::lock(disjoint_module_handle_data *other)
+void GC::shared_disjoint_handle::lock(handle_data *other)
 {
-	// perform the raw reset action
-	reset(other);
+	// we need to start out null
+	reset();
 
-	// perform the after-reset check as mandated by reset() in the case of locking a weak reference
-	if (data && data->destroyed_flag)
+	// if the relock target is non-null
+	if (other)
 	{
-		// after the first time the owning ref count hits zero we consider its contents undefined.
-		// thus we only need to perform the unified ref count logic for the deletion since destruction is already done.
-		if (--data->uni_ref_count == 0) delete data;
+		// bump up the strong and lock counts
+		auto prev = other->tag_add(handle_data::lock_1 | handle_data::strong_1);
 
-		// then we just need to re-null ourselves trivially
-		data = nullptr;
-		__module = nullptr;
+		// if there was at least 1 non-lock strong reference, the lock is successful and the object is still alive.
+		// we exclude lock strong refs because otherwise 2 locks back-to-back from 2 threads could trick the latter into thinking it succeeded.
+		if (handle_data::non_lock_strongs(prev) != 0)
+		{
+			// unmark the lock ref (success keeps only the strong ref because we're a non-lock strong owner type)
+			other->tag_sub(handle_data::lock_1);
+
+			// we now own a reference - do the raw repoint
+			data = other;
+			__module = other->get();
+		}
+		// otherwise the object is expired
+		else
+		{
+			// unmark the lock ref and strong ref (failure to lock a strong ref)
+			other->tag_sub(handle_data::lock_1 | handle_data::strong_1);
+		}
 	}
 }
 
@@ -964,12 +1025,8 @@ GC::shared_disjoint_handle::shared_disjoint_handle(const shared_disjoint_handle 
 	data = other.data;
 	__module = other.__module;
 
-	// bump up the ref counts to account for our aliasing
-	if (data)
-	{
-		++data->own_ref_count;
-		++data->uni_ref_count;
-	}
+	// bump up the strong ref count to account for our aliasing
+	if (data) data->tag_add(handle_data::strong_1);
 }
 GC::shared_disjoint_handle::shared_disjoint_handle(shared_disjoint_handle &&other) noexcept
 {
@@ -980,17 +1037,20 @@ GC::shared_disjoint_handle::shared_disjoint_handle(shared_disjoint_handle &&othe
 
 GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(const shared_disjoint_handle &other)
 {
-	reset(other.data);
+	reset(other.data); // internally performs self-assignment safety stuff
 	return *this;
 }
 GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(shared_disjoint_handle &&other)
 {
-	// repoint to null with the ref count logic
-	reset();
+	if (&other != this)
+	{
+		// repoint to null with the ref count logic
+		reset();
 
-	// then steal disjunction ownership - ref count change is net zero
-	data = std::exchange(other.data, nullptr);
-	__module = std::exchange(other.__module, nullptr);
+		// then steal disjunction ownership - ref count change is net zero
+		data = std::exchange(other.data, nullptr);
+		__module = std::exchange(other.__module, nullptr);
+	}
 
 	return *this;
 }
@@ -1013,18 +1073,26 @@ GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(const weak_dis
 
 // ----------------------------- //
 
-void GC::weak_disjoint_handle::reset(disjoint_module_handle_data *other)
+void GC::weak_disjoint_handle::reset(handle_data *other)
 {
 	// handle redundant assignment as no-op
 	if (data == other) return;
 
-	// if we pointed at something drop the non-owning ref count - if that hits zero, delete it
-	// uni ref count can't hit zero until ref count hits zero and finishes destruction, so the object is already guaranteed to be destroyed.
-	if (data && --data->uni_ref_count == 0) delete data;
+	// if we pointed at something
+	if (data)
+	{
+		// drop a weak ref and get the previous tag
+		auto prev = data->tag_sub(handle_data::weak_1);
 
-	// repoint - if non-null bump up non-owning ref count
+		// if we were the last weak ref and there were no strong refs, the object is already destroyed and needs to be deleted.
+		// being the last weak ref implies there are no locks at the moment because without unsynchronized read/write to the same variable from several threads that's impossible.
+		// therefore we don't need to bother about strong vs. non-lock strong references in this context because strong == non-lock strong
+		if ((prev & handle_data::weak_mask) == handle_data::weak_1 && (prev & handle_data::strong_mask) == 0) delete data;
+	}
+
+	// repoint - if non-null bump up weak ref count
 	data = other;
-	if (data) ++data->uni_ref_count;
+	if (data) data->tag_add(handle_data::weak_1);
 }
 
 GC::weak_disjoint_handle::weak_disjoint_handle(std::nullptr_t) noexcept : data(nullptr) {}
@@ -1033,22 +1101,25 @@ GC::weak_disjoint_handle::~weak_disjoint_handle() { reset(); }
 GC::weak_disjoint_handle::weak_disjoint_handle(const weak_disjoint_handle &other)
 {
 	data = other.data; // alias the same disjunction
-	if (data) ++data->uni_ref_count; // bump up the unified ref count to account for our aliasing
+	if (data) data->tag_add(handle_data::weak_1); // bump up the weak ref count to account for our aliasing
 }
 GC::weak_disjoint_handle::weak_disjoint_handle(weak_disjoint_handle &&other) noexcept
 {
-	data = std::exchange(other.data, nullptr); // steal disjunction ownership - ref count chang is net zero
+	data = std::exchange(other.data, nullptr); // steal disjunction ownership - ref count change is net zero
 }
 
 GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(const weak_disjoint_handle &other)
 {
-	reset(other.data);
+	reset(other.data); // internally performs self-assignment safety
 	return *this;
 }
 GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(weak_disjoint_handle &&other)
 {
-	reset(); // repoint to null with the ref count logic
-	data = std::exchange(other.data, nullptr); // then unsafe repoint to other and disconnect other - the ref count change is net zero
+	if (&other != this)
+	{
+		reset(); // repoint to null with the ref count logic
+		data = std::exchange(other.data, nullptr); // then unsafe repoint to other and disconnect other - the ref count change is net zero
+	}
 	return *this;
 }
 
@@ -1061,12 +1132,22 @@ GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(std::nullptr_t)
 GC::weak_disjoint_handle::weak_disjoint_handle(const shared_disjoint_handle &other)
 {
 	data = other.data; // alias the same disjunction
-	if (data) ++data->uni_ref_count; // bump up the unified ref count to account for our aliasing
+	if (data) data->tag_add(handle_data::weak_1); // bump up the weak ref count to account for our aliasing
 }
 GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(const shared_disjoint_handle &other)
 {
 	reset(other.data); // perform the repoint action, accounting for ref counts
 	return *this;
+}
+
+bool GC::weak_disjoint_handle::expired() const noexcept
+{
+	// get the current tag
+	auto tag = data ? data->tag.load() : 0;
+
+	// this weak ptr is expired if there are no strong refs remaining.
+	// we include lock strong refs because otherwise it's possible for a series of atomic steps to result in a successful lock but intermediately no non-lock strong refs.
+	return (tag & handle_data::strong_mask) == 0;
 }
 
 // ---------------- //

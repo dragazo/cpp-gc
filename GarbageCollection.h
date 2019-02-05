@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <typeinfo>
 #include <iterator>
 
@@ -2073,16 +2074,56 @@ private: // -- gc disjoint module -- //
 	};
 
 	// data object used by shared/weak disjoint handles - entirely externally-managed
-	struct disjoint_module_handle_data
+	struct handle_data
 	{
-		alignas(disjoint_module) char buffer[sizeof(disjoint_module)]; // buffer for holding the disjoint module
+	public: // -- data / types -- //
 
-		disjoint_module *get() noexcept { return reinterpret_cast<disjoint_module*>(buffer); }
+		// buffer for holding the module - empty on construction - must be empty before destruction of this object
+		alignas(disjoint_module) char buffer[sizeof(disjoint_module)];
 
-		std::atomic<std::size_t> own_ref_count = 0; // owning ref count for only owning references
-		std::atomic<std::size_t> uni_ref_count = 0; // unified ref count for either owning or non-owning references (both present here)
+		// type used to represent the tag block
+		typedef std::uint64_t tag_t;
 
-		std::atomic<bool> destroyed_flag = false; // flag that marks that the module has been destroyed (invalid weakly-shared resource)
+		// the bitfield tag used to represent the 3 types of reference counts on this object.
+		// this takes the form [high bits: lock][weak][low bits: strong]
+		// the utility functions tag_add() and tag_sub() optionally perform additional und testing - i suggest using those instead.
+		std::atomic<tag_t> tag = 0;
+
+	public: // -- constants -- //
+
+		static constexpr tag_t strong_bits = 56; // number of bits in the strong field
+		static constexpr tag_t weak_bits = 4;   // number of bits in the weak field
+		static constexpr tag_t lock_bits = 4;   // number of bits in the lock field
+
+		static_assert(strong_bits + weak_bits + lock_bits <= CHAR_BIT * sizeof(tag_t), "handle data bit field problem");
+
+		static constexpr tag_t strong_1 = (tag_t)1 << (0);                     // corresponds to a 1 in the strong field - can be or'd with other 1 values
+		static constexpr tag_t weak_1 = (tag_t)1 << (strong_bits);             // corresponds to a 1 in the weak field - can be or'd with other 1 values
+		static constexpr tag_t lock_1 = (tag_t)1 << (strong_bits + weak_bits); // corresponds to a 1 in the lock field - can be or'd with other 1 values
+
+		static constexpr tag_t strong_mask = (((tag_t)1 << strong_bits) - 1) << (0);                   // the mask for the strong field
+		static constexpr tag_t weak_mask = (((tag_t)1 << weak_bits) - 1) << (strong_bits);             // the mask for the weak field
+		static constexpr tag_t lock_mask = (((tag_t)1 << lock_bits) - 1) << (strong_bits + weak_bits); // the mask for the lock field
+
+	public: // -- utility functions -- //
+
+		// gets the address of the buffer for holding the actual module - see buffer
+		constexpr disjoint_module *get() noexcept { return reinterpret_cast<disjoint_module*>(buffer); }
+
+		// adds v to the tag atomically and returns the previous value
+		tag_t tag_add(tag_t v, std::memory_order order = std::memory_order_seq_cst);
+		// subtracts v from the tag atomically and returns the previous value
+		tag_t tag_sub(tag_t v, std::memory_order order = std::memory_order_seq_cst);
+
+		// extracts the strong field from an encoded tag
+		static constexpr tag_t extr_strong(tag_t v) { return v & strong_mask; }
+		// extracts the weak field from an encoded tag
+		static constexpr tag_t extr_weak(tag_t v) { return (v & weak_mask) >> (strong_bits); }
+		// extracts the lock field from an encoded tag
+		static constexpr tag_t extr_lock(tag_t v) { return v >> (strong_bits + weak_bits); }
+
+		// gets the number of non-lock strong referneces - effectively (strong field - lock field)
+		static constexpr tag_t non_lock_strongs(tag_t v) { return extr_strong(v) - extr_lock(v); }
 	};
 
 	// acts as an owning handle for a gc disjunction module.
@@ -2094,7 +2135,7 @@ private: // -- gc disjoint module -- //
 	private: // -- data -- //
 
 		disjoint_module *__module; // the pre-cached module pointer - at all times __module and data are both null or __module == data->get()
-		disjoint_module_handle_data *data; // the module allocation block - stores all the ref count info and the actual module itself
+		handle_data *data; // the module allocation block - stores all the ref count info and the actual module itself
 
 		friend class weak_disjoint_handle;
 		friend class disjoint_module_container;
@@ -2103,14 +2144,15 @@ private: // -- gc disjoint module -- //
 
 		// repoints this handle at other - performs all relevant reference counting logic for automatic cleanup.
 		// repointing to the same disjunction data block we already point at is no-op.
-		// this can be used for locking a non-owning handle, but you must make sure after the call to check if it's destroyed:
-		//     this logic is performed internally by lock() - you should use that instead of testing destruction states manually.
-		void reset(disjoint_module_handle_data *other = nullptr);
+		// other must be sourced from a valid SHARED (strong) disjoint handle object.
+		// MUST NOT BE USED FOR LOCKING!!
+		void reset(handle_data *other = nullptr);
 
 		// performs all logic necessary for locking onto a weak reference.
 		// if the lock fails the resulting state is null.
-		// this is effectively reset(other) plus the additional required expiry check.
-		void lock(disjoint_module_handle_data *other);
+		// other must be sourced from a valid WEAK disjoint handle object.
+		// MUST BE USED FOR LOCKING!!
+		void lock(handle_data *other);
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -2126,7 +2168,7 @@ private: // -- gc disjoint module -- //
 
 		// repoints this owning handle to other's disjunction
 		shared_disjoint_handle &operator=(const shared_disjoint_handle &other);
-		// repoints this owning handle to other's disjunction - other is empty after this operation.
+		// repoints this owning handle to other's disjunction - other is empty after this operation (unless other == this, in which case no-op).
 		// this is the only way to use non-primary/local handles and not invoke undefined behavior (so long as you move into a primary/local handle).
 		shared_disjoint_handle &operator=(shared_disjoint_handle &&other);
 
@@ -2158,7 +2200,7 @@ private: // -- gc disjoint module -- //
 	{
 	private: // -- data -- //
 
-		disjoint_module_handle_data *data; // the managed disjunction - EXTERNAL CODE SHOULD NOT MODIFY DIRECTLY - use reset()
+		handle_data *data; // the managed disjunction - EXTERNAL CODE SHOULD NOT MODIFY DIRECTLY - use reset()
 
 		friend class shared_disjoint_handle;
 
@@ -2166,7 +2208,8 @@ private: // -- gc disjoint module -- //
 
 		// repoints this handle at other - performs all relevant reference counting logic for automatic cleanup.
 		// repointing to the same disjunction data block we already point at is no-op.
-		void reset(disjoint_module_handle_data *other = nullptr);
+		// other must be sourced from a valid weak or shared (strong) handle.
+		void reset(handle_data *other = nullptr);
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -2182,7 +2225,7 @@ private: // -- gc disjoint module -- //
 		
 		// repoints this non-owning handle to other's disjunction
 		weak_disjoint_handle &operator=(const weak_disjoint_handle &other);
-		// repoints this non-owning handle to other's disjunction - other is empty after this operation.
+		// repoints this non-owning handle to other's disjunction - other is empty after this operation (unless other == this, in which case no-op).
 		weak_disjoint_handle &operator=(weak_disjoint_handle &&other);
 
 		// repoints this non-owning handle to null (no owned disjunction)
@@ -2198,8 +2241,9 @@ private: // -- gc disjoint module -- //
 	public: // -- module queries -- //
 
 		// returns true iff the last owning handle to the aliased disjunction has been severed.
+		// by its very nature this function is racy - depending on your need locking might be a better option.
 		// if this handle does not alias a disjunction, returns true.
-		bool expired() const noexcept { return !data || data->destroyed_flag; }
+		bool expired() const noexcept;
 	};
 
 	friend struct __gc_primary_usage_guard_t;
