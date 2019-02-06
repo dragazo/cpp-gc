@@ -2089,6 +2089,10 @@ private: // -- gc disjoint module -- //
 		// the utility functions tag_add() and tag_sub() optionally perform additional und testing - i suggest using those instead.
 		std::atomic<tag_t> tag = 0;
 
+		// flag marking that the object has been destroyed.
+		// used for synchronization between the weak/shared (strong) counter dec logic.
+		std::atomic<bool> destroyed_flag = false;
+
 	public: // -- constants -- //
 
 		static constexpr tag_t strong_bits = 56; // number of bits in the strong field

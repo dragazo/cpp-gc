@@ -961,7 +961,7 @@ void GC::shared_disjoint_handle::reset(handle_data *other)
 	if (data)
 	{
 		// drop a strong reference and get the previous tag
-		auto prev = data->tag_sub(handle_data::strong_1);
+		auto prev = data->tag_sub(handle_data::strong_1, std::memory_order_acq_rel);
 
 		// if we were the last strong reference, there are no longer any strong references - destroy the object
 		// we include the lock strong refs because those locks succeeded - i.e. our very existence as a non-lock strong owner proves those locks succeeded.
@@ -970,8 +970,10 @@ void GC::shared_disjoint_handle::reset(handle_data *other)
 			__module->blocking_collect(); // perform one final collection to make sure everything's collected
 			__module->~disjoint_module(); // then destroy the module itself - its dtor asserts that all objects were collected
 
-			// if there are also no more weak references, delete the handle
+			// if there were also no more weak references, delete the handle
 			if ((prev & handle_data::weak_mask) == 0) delete data;
+			// otherwise we're not deleting it but the weak ref count might have fallen to zero in the meantime and could be waiting - alert that we're done destroying
+			else data->destroyed_flag.store(true, std::memory_order_release);
 		}
 	}
 
@@ -980,7 +982,7 @@ void GC::shared_disjoint_handle::reset(handle_data *other)
 	if (data)
 	{
 		__module = data->get(); // cache the module pointer
-		data->tag_add(handle_data::strong_1); // bump up the strong ref count
+		data->tag_add(handle_data::strong_1, std::memory_order_acq_rel); // bump up the strong ref count
 	}
 	else __module = nullptr; // cache the module pointer (in this case null)
 }
@@ -994,14 +996,14 @@ void GC::shared_disjoint_handle::lock(handle_data *other)
 	if (other)
 	{
 		// bump up the strong and lock counts
-		auto prev = other->tag_add(handle_data::lock_1 | handle_data::strong_1);
+		auto prev = other->tag_add(handle_data::lock_1 | handle_data::strong_1, std::memory_order_acq_rel);
 
 		// if there was at least 1 non-lock strong reference, the lock is successful and the object is still alive.
 		// we exclude lock strong refs because otherwise 2 locks back-to-back from 2 threads could trick the latter into thinking it succeeded.
 		if (handle_data::non_lock_strongs(prev) != 0)
 		{
 			// unmark the lock ref (success keeps only the strong ref because we're a non-lock strong owner type)
-			other->tag_sub(handle_data::lock_1);
+			other->tag_sub(handle_data::lock_1, std::memory_order_acq_rel);
 
 			// we now own a reference - do the raw repoint
 			data = other;
@@ -1011,7 +1013,7 @@ void GC::shared_disjoint_handle::lock(handle_data *other)
 		else
 		{
 			// unmark the lock ref and strong ref (failure to lock a strong ref)
-			other->tag_sub(handle_data::lock_1 | handle_data::strong_1);
+			other->tag_sub(handle_data::lock_1 | handle_data::strong_1, std::memory_order_acq_rel);
 		}
 	}
 }
@@ -1026,7 +1028,7 @@ GC::shared_disjoint_handle::shared_disjoint_handle(const shared_disjoint_handle 
 	__module = other.__module;
 
 	// bump up the strong ref count to account for our aliasing
-	if (data) data->tag_add(handle_data::strong_1);
+	if (data) data->tag_add(handle_data::strong_1, std::memory_order_acq_rel);
 }
 GC::shared_disjoint_handle::shared_disjoint_handle(shared_disjoint_handle &&other) noexcept
 {
@@ -1082,17 +1084,24 @@ void GC::weak_disjoint_handle::reset(handle_data *other)
 	if (data)
 	{
 		// drop a weak ref and get the previous tag
-		auto prev = data->tag_sub(handle_data::weak_1);
+		auto prev = data->tag_sub(handle_data::weak_1, std::memory_order_acq_rel);
 
 		// if we were the last weak ref and there were no strong refs, the object is already destroyed and needs to be deleted.
 		// being the last weak ref implies there are no locks at the moment because without unsynchronized read/write to the same variable from several threads that's impossible.
 		// therefore we don't need to bother about strong vs. non-lock strong references in this context because strong == non-lock strong
-		if ((prev & handle_data::weak_mask) == handle_data::weak_1 && (prev & handle_data::strong_mask) == 0) delete data;
+		if ((prev & handle_data::weak_mask) == handle_data::weak_1 && (prev & handle_data::strong_mask) == 0)
+		{
+			// in this case the strong count fell to zero, so the object is potentially being destroyed by the strong ref count logic.
+			// however, that strong ref count logic won't delete the data block because our existence proves there was a weak reference prior to the strong ref dec logic.
+			// therefore we just need to wait until the object is destroyed so we can delete the data block
+			while (!data->destroyed_flag.load(std::memory_order_acquire));
+			delete data;
+		}
 	}
 
 	// repoint - if non-null bump up weak ref count
 	data = other;
-	if (data) data->tag_add(handle_data::weak_1);
+	if (data) data->tag_add(handle_data::weak_1, std::memory_order_acq_rel);
 }
 
 GC::weak_disjoint_handle::weak_disjoint_handle(std::nullptr_t) noexcept : data(nullptr) {}
@@ -1101,7 +1110,7 @@ GC::weak_disjoint_handle::~weak_disjoint_handle() { reset(); }
 GC::weak_disjoint_handle::weak_disjoint_handle(const weak_disjoint_handle &other)
 {
 	data = other.data; // alias the same disjunction
-	if (data) data->tag_add(handle_data::weak_1); // bump up the weak ref count to account for our aliasing
+	if (data) data->tag_add(handle_data::weak_1, std::memory_order_acq_rel); // bump up the weak ref count to account for our aliasing
 }
 GC::weak_disjoint_handle::weak_disjoint_handle(weak_disjoint_handle &&other) noexcept
 {
@@ -1132,7 +1141,7 @@ GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(std::nullptr_t)
 GC::weak_disjoint_handle::weak_disjoint_handle(const shared_disjoint_handle &other)
 {
 	data = other.data; // alias the same disjunction
-	if (data) data->tag_add(handle_data::weak_1); // bump up the weak ref count to account for our aliasing
+	if (data) data->tag_add(handle_data::weak_1, std::memory_order_acq_rel); // bump up the weak ref count to account for our aliasing
 }
 GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(const shared_disjoint_handle &other)
 {
@@ -1143,10 +1152,11 @@ GC::weak_disjoint_handle &GC::weak_disjoint_handle::operator=(const shared_disjo
 bool GC::weak_disjoint_handle::expired() const noexcept
 {
 	// get the current tag
-	auto tag = data ? data->tag.load() : 0;
+	auto tag = data ? data->tag.load(std::memory_order_acq_rel) : 0;
 
 	// this weak ptr is expired if there are no strong refs remaining.
 	// we include lock strong refs because otherwise it's possible for a series of atomic steps to result in a successful lock but intermediately no non-lock strong refs.
+	// due to locking, however, this approach could report false negatives (but never false positives).
 	return (tag & handle_data::strong_mask) == 0;
 }
 
