@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <climits>
 #include <typeinfo>
 #include <iterator>
 
@@ -2094,11 +2095,11 @@ private: // -- gc disjoint module -- //
 		// the bitfield tag used to represent the 3 types of reference counts on this object.
 		// this takes the form [high bits: lock][weak][low bits: strong]
 		// the utility functions tag_add() and tag_sub() optionally perform additional und testing - i suggest using those instead.
-		std::atomic<tag_t> tag = 0;
+		std::atomic<tag_t> tag = {0};
 
 		// flag marking that the object has been destroyed.
 		// used for synchronization between the weak/shared (strong) counter dec logic.
-		std::atomic<bool> destroyed_flag = false;
+		std::atomic<bool> destroyed_flag = {false};
 
 	public: // -- constants -- //
 
