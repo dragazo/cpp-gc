@@ -96,6 +96,9 @@
 template<typename ...Lockable>
 class __gc_scoped_lock;
 
+template<typename F, typename ...Args>
+decltype(auto) __gc_invoke(F &&f, Args &&...args);
+
 // ----------------------------------------------------
 
 // the type of mutex to use inside stdlib wrappers
@@ -554,11 +557,15 @@ public: // -- cv type helping -- //
 	template<typename From, typename To>
 	using copy_cv_t = typename copy_cv<From, To>::type;
 
-public: // -- mutex helpers -- //
+public: // -- helpers -- //
 
 	// equivalent to std::scoped_lock - included here because it's handy and is otherwise only available in C++17 and up
 	template<typename ...T>
 	using scoped_lock = __gc_scoped_lock<T...>;
+
+	// equivalent to std::invoke() - included here because we need it for thread wrappers and is convenient C++17 stuff
+	template<typename F, typename ...Args>
+	static decltype(auto) invoke(F &&f, Args &&...args) { __gc_invoke(std::forward<F>(f), std::forward<Args>(args)...); }
 
 public: // -- ptr -- //
 
@@ -1672,7 +1679,7 @@ public: // -- gc-specific threading stuff -- //
 			disjoint_module::local_handle() = std::move(parent_module);
 
 			// then invoke the user function
-			std::move(ff)(std::move(fargs)...);
+			GC::invoke(std::move(ff), std::move(fargs)...);
 
 		}, disjoint_module::local_handle(), std::forward<Function>(f), std::forward<Args>(args)...)
 		{}
@@ -1684,7 +1691,7 @@ public: // -- gc-specific threading stuff -- //
 			disjoint_module_container::get().create_new_disjunction(disjoint_module::local_handle());
 
 			// then invoke the user function
-			std::move(ff)(std::move(fargs)...);
+			GC::invoke(std::move(ff), std::move(fargs)...);
 
 		}, std::forward<Function>(f), std::forward<Args>(args)...)
 		{}
@@ -2470,6 +2477,96 @@ public: // -- ctor / dtor / asgn -- //
 };
 
 // -----------------------------------------------------------
+
+template<typename T> struct __gc_is_reference_wrapper : std::false_type {};
+template<typename T> struct __gc_is_reference_wrapper<std::reference_wrapper<T>> : std::true_type {};
+
+// takes the types for a member pointer invocation and returns a compile-time protocol code for how to invoke it
+template<typename T, typename Type, typename T1, typename ...Args>
+constexpr std::size_t __gc_INVOKE_member_pointer_protocol() noexcept
+{
+	if (std::is_member_function_pointer<Type T::*>::value)
+	{
+		if (std::is_base_of<T, std::decay_t<T1>>::value) return 0;
+		else if (__gc_is_reference_wrapper<std::decay_t<T1>>::value) return 1;
+		else return 2;
+	}
+	else
+	{
+		if (std::is_member_object_pointer<Type T::*>::value || sizeof...(Args) == 0) return 0xbad;
+
+		if (std::is_base_of<T, std::decay_t<T1>>::value) return 3;
+		else if (__gc_is_reference_wrapper<std::decay_t<T1>>::value) return 4;
+		else return 5;
+	}
+}
+
+// member pointer invocation protocol 0
+template<typename T, typename Type, typename T1, typename ...Args,
+	std::enable_if_t<__gc_INVOKE_member_pointer_protocol<T, Type, T1, Args...>() == 0, int> = 0>
+	decltype(auto) __gc_INVOKE(Type T::*f, T1 &&t1, Args &&...args)
+{
+	return (std::forward<T1>(t1).*f)(std::forward<Args>(args)...);
+}
+
+// member pointer invocation protocol 1
+template<typename T, typename Type, typename T1, typename ...Args,
+	std::enable_if_t<__gc_INVOKE_member_pointer_protocol<T, Type, T1, Args...>() == 1, int> = 0>
+	decltype(auto) __gc_INVOKE(Type T::*f, T1 &&t1, Args &&...args)
+{
+	return (t1.get().*f)(std::forward<Args>(args)...);
+}
+
+// member pointer invocation protocol 2
+template<typename T, typename Type, typename T1, typename ...Args,
+	std::enable_if_t<__gc_INVOKE_member_pointer_protocol<T, Type, T1, Args...>() == 2, int> = 0>
+	decltype(auto) __gc_INVOKE(Type T::*f, T1 &&t1, Args &&...args)
+{
+	return ((*std::forward<T1>(t1)).*f)(std::forward<Args>(args)...);
+}
+
+// member pointer invocation protocol 3
+template<typename T, typename Type, typename T1, typename ...Args,
+	std::enable_if_t<__gc_INVOKE_member_pointer_protocol<T, Type, T1, Args...>() == 3, int> = 0>
+	decltype(auto) __gc_INVOKE(Type T::*f, T1 &&t1, Args &&...args)
+{
+	return std::forward<T1>(t1).*f;
+}
+
+// member pointer invocation protocol 4
+template<typename T, typename Type, typename T1, typename ...Args,
+	std::enable_if_t<__gc_INVOKE_member_pointer_protocol<T, Type, T1, Args...>() == 4, int> = 0>
+	decltype(auto) __gc_INVOKE(Type T::*f, T1 &&t1, Args &&...args)
+{
+	return t1.get().*f;
+}
+
+// member pointer invocation protocol 5
+template<typename T, typename Type, typename T1, typename ...Args,
+	std::enable_if_t<__gc_INVOKE_member_pointer_protocol<T, Type, T1, Args...>() == 5, int> = 0>
+	decltype(auto) __gc_INVOKE(Type T::*f, T1 &&t1, Args &&...args)
+{
+	return (*std::forward<T1>(t1)).*f;
+}
+
+// non member pointer invocation
+template<typename F, typename ...Args>
+decltype(auto) __gc_INVOKE(F &&f, Args &&...args)
+{
+	return std::forward<F>(f)(std::forward<Args>(args)...);
+}
+
+template<typename F, typename ...Args>
+decltype(auto) __gc_invoke(F &&f, Args &&...args)
+{
+	return __gc_INVOKE(std::forward<F>(f), std::forward<Args>(args)...);
+}
+
+// ------------------------- //
+
+// -- stdlib wrapper impl -- //
+
+// ------------------------- //
 
 template<typename T, typename Deleter>
 class __gc_unique_ptr

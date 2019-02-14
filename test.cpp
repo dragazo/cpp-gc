@@ -588,6 +588,12 @@ struct GC::router<router_allocator>
 	}
 };
 
+struct thread_func_t
+{
+	int v;
+	void foo() {}
+};
+
 
 // begins a timer in a new scope - requires a matching timer end point.
 #define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
@@ -687,6 +693,17 @@ int main() try
 	}
 
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	{
+		thread_func_t tt;
+		auto g = &thread_func_t::foo;
+
+		//constexpr std::size_t code = __gc_INVOKE_member_pointer_protocol<thread_func_t, void(), thread_func_t&>();
+		GC::invoke(&thread_func_t::foo, tt);
+
+		std::thread(&thread_func_t::foo, tt).join();
+		GC::thread(GC::inherit_disjunction, &thread_func_t::foo, tt).join();
+	}
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
