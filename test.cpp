@@ -602,6 +602,14 @@ struct thread_func_t
 #define TIMER_END(units, name) const auto __timer_end = std::chrono::high_resolution_clock::now(); \
 	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(__timer_end - __timer_begin).count() << " " #units "\n\n"; }
 
+template<typename T, typename L = int>
+struct wrapper_template_test_t {};
+
+template<template<typename> typename C>
+void wrapper_template_test() {}
+
+void _wrapper_template_test() { wrapper_template_test<wrapper_template_test_t>(); }
+
 
 int main() try
 {
@@ -699,7 +707,7 @@ int main() try
 		auto g = &thread_func_t::foo;
 
 		//constexpr std::size_t code = __gc_INVOKE_member_pointer_protocol<thread_func_t, void(), thread_func_t&>();
-		GC::invoke(&thread_func_t::foo, tt);
+		std::invoke(&thread_func_t::foo, tt);
 
 		std::thread(&thread_func_t::foo, tt).join();
 		GC::thread(GC::inherit_disjunction, &thread_func_t::foo, tt).join();
@@ -965,6 +973,38 @@ int main() try
 	static_assert(std::is_same<const GC::make_wrapped_t<volatile std::vector<TreeNode>>, const volatile GC::make_wrapped_t<volatile GC::vector<TreeNode>>>::value, "wrapped const test");
 	static_assert(std::is_same<const GC::make_wrapped_t<const volatile std::vector<TreeNode>>, const volatile GC::make_wrapped_t<const volatile std::vector<TreeNode>>>::value, "wrapped const test");
 	static_assert(std::is_same<GC::make_wrapped_t<const volatile GC::vector<TreeNode>>, GC::make_wrapped_t<const volatile std::vector<TreeNode>>>::value, "wrapped const test");
+
+	// ---------------------------------
+
+	static_assert(std::is_same<int, GC::make_unwrapped_t<int>>::value, "unwrapped primitive test");
+	static_assert(std::is_same<const int, GC::make_unwrapped_t<const int>>::value, "unwrapped primitive test");
+	static_assert(std::is_same<volatile int, GC::make_unwrapped_t<volatile int>>::value, "unwrapped primitive test");
+	static_assert(std::is_same<const volatile int, GC::make_unwrapped_t<const volatile int>>::value, "unwrapped primitive test");
+	
+	static_assert(std::is_same<int, GC::make_wrapped_t<int>>::value, "wrapped primitive test");
+	static_assert(std::is_same<const int, GC::make_wrapped_t<const int>>::value, "wrapped primitive test");
+	static_assert(std::is_same<volatile int, GC::make_wrapped_t<volatile int>>::value, "wrapped primitive test");
+	static_assert(std::is_same<const volatile int, GC::make_wrapped_t<const volatile int>>::value, "wrapped primitive test");
+
+	static_assert(std::is_same<float, GC::make_unwrapped_t<float>>::value, "unwrapped primitive test");
+	static_assert(std::is_same<const float, GC::make_unwrapped_t<const float>>::value, "unwrapped primitive test");
+	static_assert(std::is_same<volatile float, GC::make_unwrapped_t<volatile float>>::value, "unwrapped primitive test");
+	static_assert(std::is_same<const volatile float, GC::make_unwrapped_t<const volatile float>>::value, "unwrapped primitive test");
+
+	static_assert(std::is_same<bool, GC::make_wrapped_t<bool>>::value, "wrapped primitive test");
+	static_assert(std::is_same<const bool, GC::make_wrapped_t<const bool>>::value, "wrapped primitive test");
+	static_assert(std::is_same<volatile bool, GC::make_wrapped_t<volatile bool>>::value, "wrapped primitive test");
+	static_assert(std::is_same<const volatile bool, GC::make_wrapped_t<const volatile bool>>::value, "wrapped primitive test");
+
+	static_assert(std::is_same<std::pair<float, std::string>, GC::make_unwrapped_t<std::pair<float, std::string>>>::value, "unwrapped trivial test");
+	static_assert(std::is_same<const std::pair<float, std::string>, GC::make_unwrapped_t<const std::pair<float, std::string>>>::value, "unwrapped trivial test");
+	static_assert(std::is_same<volatile std::pair<float, std::string>, GC::make_unwrapped_t<volatile std::pair<float, std::string>>>::value, "unwrapped trivial test");
+	static_assert(std::is_same<const volatile std::pair<float, std::string>, GC::make_unwrapped_t<const volatile std::pair<float, std::string>>>::value, "unwrapped trivial test");
+
+	static_assert(std::is_same<std::tuple<void*, const char*, float, float, double>, GC::make_wrapped_t<std::tuple<void*, const char*, float, float, double>>>::value, "wrapped trivial test");
+	static_assert(std::is_same<const std::tuple<void*, const char*, float, float, double>, GC::make_wrapped_t<const std::tuple<void*, const char*, float, float, double>>>::value, "wrapped trivial test");
+	static_assert(std::is_same<volatile std::tuple<void*, const char*, float, float, double>, GC::make_wrapped_t<volatile std::tuple<void*, const char*, float, float, double>>>::value, "wrapped trivial test");
+	static_assert(std::is_same<const volatile std::tuple<void*, const char*, float, float, double>, GC::make_wrapped_t<const volatile std::tuple<void*, const char*, float, float, double>>>::value, "wrapped trivial test");
 
 	// ---------------------------------
 
@@ -1276,19 +1316,19 @@ int main() try
 		std::mutex mutex1, mutex2, mutex3, mutex4;
 
 		{
-			GC::scoped_lock<std::mutex, std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3, mutex4);
+			std::scoped_lock<std::mutex, std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3, mutex4);
 		}
 		{
-			GC::scoped_lock<std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3);
+			std::scoped_lock<std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3);
 		}
 		{
-			GC::scoped_lock<std::mutex, std::mutex> scoped_loq(mutex1, mutex2);
+			std::scoped_lock<std::mutex, std::mutex> scoped_loq(mutex1, mutex2);
 		}
 		{
-			GC::scoped_lock<std::mutex> scoped_loq(mutex1);
+			std::scoped_lock<std::mutex> scoped_loq(mutex1);
 		}
 		{
-			GC::scoped_lock<> scoped_loq;
+			std::scoped_lock<> scoped_loq;
 		}
 	}
 
