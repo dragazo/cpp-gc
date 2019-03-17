@@ -229,6 +229,37 @@ public:
 	GC::unordered_map<std::string, GC::ptr<TreeNode>> better_symbols;
 
 public:
+
+	SymbolTable() = default;
+
+	SymbolTable(const SymbolTable &other) : symbols(other.symbols), better_symbols(other.better_symbols) {}
+
+	SymbolTable &operator=(const SymbolTable &other)
+	{
+		if (this != &other)
+		{
+			{
+				std::lock_guard lock(symbols_mutex);
+				symbols = other.symbols;
+			}
+			better_symbols = other.better_symbols;
+		}
+		return *this;
+	}
+	SymbolTable &operator=(SymbolTable &&other)
+	{
+		if (this != &other)
+		{
+			{
+				std::scoped_lock locks(symbols_mutex, other.symbols_mutex);
+				symbols = std::move(other.symbols);
+			}
+			better_symbols = std::move(other.better_symbols);
+		}
+		return *this;
+	}
+
+public:
     void update(std::string name, GC::ptr<TreeNode> new_value)
     {
 		{
@@ -610,6 +641,15 @@ void wrapper_template_test() {}
 
 void _wrapper_template_test() { wrapper_template_test<wrapper_template_test_t>(); }
 
+// represents a trivial gc type - used for forcing wrapped type conversions
+struct gc_t {};
+template<> struct GC::router<gc_t> { static void route(const gc_t&) {} };
+constexpr bool operator==(const gc_t&, const gc_t&) { return true; }
+constexpr bool operator!=(const gc_t&, const gc_t&) { return true; }
+constexpr bool operator<(const gc_t&, const gc_t&) { return true; }
+constexpr bool operator<=(const gc_t&, const gc_t&) { return true; }
+constexpr bool operator>(const gc_t&, const gc_t&) { return true; }
+constexpr bool operator>=(const gc_t&, const gc_t&) { return true; }
 
 int main() try
 {
@@ -1008,6 +1048,30 @@ int main() try
 
 	// ---------------------------------
 
+	static_assert(GC::has_trivial_router<GC::variant<int>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::variant<int, float>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::variant<int, float, double>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::variant<int, float, double, void*>>::value, "trivial test");
+
+	static_assert(!GC::has_trivial_router<SymbolTable>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::variant<SymbolTable>>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::variant<int, SymbolTable>>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::variant<SymbolTable, int>>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::variant<int, SymbolTable, float>>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::variant<int, double, SymbolTable, void*>>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::variant<int, char, volatile int*, SymbolTable, long>>::value, "trivial test");
+
+	static_assert(std::is_same<std::variant<int, double>, GC::make_wrapped_t<std::variant<int, double>>>::value, "wrapped variant equivalence");
+	static_assert(std::is_same<std::variant<int, double>, GC::make_unwrapped_t<std::variant<int, double>>>::value, "wrapped variant equivalence");
+	static_assert(!std::is_same<std::variant<int, SymbolTable>, GC::make_wrapped_t<std::variant<int, SymbolTable>>>::value, "wrapped variant equivalence");
+	static_assert(std::is_same<std::variant<SymbolTable, std::string>, GC::make_unwrapped_t<GC::variant<SymbolTable, std::string>>>::value, "wrapped variant equivalence");
+
+	static_assert(std::is_same<std::variant<int, double>, GC::variant<int, double>>::value, "wrapped variant equivalence");
+	static_assert(!std::is_same<std::variant<SymbolTable>, GC::variant<SymbolTable>>::value, "wrapped variant equivalence");
+	static_assert(!std::is_same<std::variant<std::string, SymbolTable>, GC::variant<std::string, SymbolTable>>::value, "wrapped variant equivalence");
+
+	// ---------------------------------
+
 	std::cerr << "-------- ctors --------\n";
 	{
 		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
@@ -1243,6 +1307,124 @@ int main() try
 	std::cerr << '\n';
 
 	std::cerr << '\n';
+
+	{ // -- variant tests -- //
+
+		std::variant<int, float, SymbolTable> std_variant = 5.6f;
+		GC::variant<int, float, SymbolTable> gc_variant(12);
+		std_variant = 6;
+
+		auto std_variant_2 = std_variant;
+		auto std_variant_3 = std::move(std_variant);
+		std_variant = std_variant;
+		std_variant = std::move(std_variant);
+
+		gc_variant = std::move(std_variant);
+		gc_variant = std::move(gc_variant);
+
+		gc_variant = std_variant;
+		gc_variant = gc_variant;
+
+		std_variant = 5;
+		gc_variant = std_variant;
+
+		assert(std::get<0>(std_variant) == 5);
+		assert(std::get<0>(gc_variant) == 5);
+
+		assert(std::get<int>(std_variant) == 5);
+		assert(std::get<int>(gc_variant) == 5);
+
+		assert(gc_variant.get<0>() == 5);
+		assert(gc_variant.get<int>() == 5);
+
+		assert(std::get_if<0>(&gc_variant) != nullptr);
+		assert(*std::get_if<0>(&gc_variant) == 5);
+		assert(std::get_if<1>(&gc_variant) == nullptr);
+		assert(std::get_if<2>(&gc_variant) == nullptr);
+
+		assert(std::get_if<int>(&gc_variant) != nullptr);
+		assert(*std::get_if<int>(&gc_variant) == 5);
+		assert(std::get_if<float>(&gc_variant) == nullptr);
+		assert(std::get_if<SymbolTable>(&gc_variant) == nullptr);
+
+		std::get<int>(gc_variant) = std::get<0>(gc_variant);
+		std::get<0>(std_variant) = std::get<int>(std::move(gc_variant));
+		std::get<0>(gc_variant) = std::get<int>(std::move(std_variant));
+
+		assert(std::get_if<0>((decltype(std_variant)*)nullptr) == nullptr);
+		assert(std::get_if<int>((decltype(std_variant)*)nullptr) == nullptr);
+
+		assert(std::get_if<0>((decltype(gc_variant)*)nullptr) == nullptr);
+		assert(std::get_if<int>((decltype(gc_variant)*)nullptr) == nullptr);
+
+		assert(std::holds_alternative<int>(std_variant));
+		assert(std::holds_alternative<int>(gc_variant));
+
+		assert(!std::holds_alternative<float>(std_variant));
+		assert(!std::holds_alternative<float>(gc_variant));
+
+		assert(!std::holds_alternative<SymbolTable>(std_variant));
+		assert(!std::holds_alternative<SymbolTable>(gc_variant));
+
+		static_assert(!GC::has_trivial_router<gc_t>::value, "trivial router error");
+		static_assert(std::is_same<std::variant<int, int>, GC::variant<int, int>>::value, "wrapped variant error");
+		static_assert(!std::is_same<std::variant<int, int, gc_t>, GC::variant<int, int, gc_t>>::value, "wrapped variant error");
+
+		GC::variant<int, int, gc_t> var_cmp_1(std::in_place_index<0>, 42);
+		GC::variant<int, int, gc_t> var_cmp_2(std::in_place_index<1>, 42);
+
+		assert(var_cmp_1.index() == 0);
+		assert(var_cmp_2.index() == 1);
+
+		assert(std::get<0>(var_cmp_1) == 42);
+		assert(std::get<1>(var_cmp_2) == 42);
+
+		assert(var_cmp_1 != var_cmp_2);
+		assert(var_cmp_1 < var_cmp_2);
+		assert(var_cmp_1 <= var_cmp_2);
+
+		assert(var_cmp_2 != var_cmp_1);
+		assert(var_cmp_2 > var_cmp_1);
+		assert(var_cmp_2 >= var_cmp_1);
+
+		static_assert(std::variant_size_v<std::variant<int, float, SymbolTable>> == 3, "variant size error");
+		static_assert(std::variant_size_v<const std::variant<int, float, SymbolTable>> == 3, "variant size error");
+		static_assert(std::variant_size_v<volatile std::variant<int, float, SymbolTable>> == 3, "variant size error");
+		static_assert(std::variant_size_v<const volatile std::variant<int, float, SymbolTable>> == 3, "variant size error");
+
+		static_assert(std::variant_size_v<GC::variant<int, float, SymbolTable>> == 3, "variant size error");
+		static_assert(std::variant_size_v<const GC::variant<int, float, SymbolTable>> == 3, "variant size error");
+		static_assert(std::variant_size_v<volatile GC::variant<int, float, SymbolTable>> == 3, "variant size error");
+		static_assert(std::variant_size_v<const volatile GC::variant<int, float, SymbolTable>> == 3, "variant size error");
+
+		static_assert(std::is_same<int, std::variant_alternative_t<0, GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<float, std::variant_alternative_t<1, GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<SymbolTable, std::variant_alternative_t<2, GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+
+		static_assert(std::is_same<const int, std::variant_alternative_t<0, const GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<const float, std::variant_alternative_t<1, const GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<const SymbolTable, std::variant_alternative_t<2, const GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+
+		static_assert(std::is_same<volatile int, std::variant_alternative_t<0, volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<volatile float, std::variant_alternative_t<1, volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<volatile SymbolTable, std::variant_alternative_t<2, volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+
+		static_assert(std::is_same<const volatile int, std::variant_alternative_t<0, const volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<const volatile float, std::variant_alternative_t<1, const volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+		static_assert(std::is_same<const volatile SymbolTable, std::variant_alternative_t<2, const volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
+
+		__gc_variant<std::mutex, int, float, void*> mgf;
+		std::hash<decltype(mgf)> variant_hasher;
+		variant_hasher(mgf);
+
+		const decltype(std_variant) &gc_variant_ref = gc_variant;
+		assert(std::holds_alternative<int>(gc_variant_ref));
+
+		auto dyn_gc_variant = GC::make<GC::variant<SymbolTable>>();
+		assert(dyn_gc_variant->index() == 0);
+		*dyn_gc_variant = *dyn_gc_variant;
+		*dyn_gc_variant = std::move(*dyn_gc_variant);
+	}
 
 	GC::ptr<GC::map<int, std::string>> pmap = GC::make<GC::map<int, std::string>>();
 	pmap->emplace(0, "zero");

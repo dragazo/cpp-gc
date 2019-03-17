@@ -37,6 +37,8 @@
 #include <stack>
 #include <queue>
 
+#include <variant>
+
 // --------------------- //
 
 // -- cpp-gc settings -- //
@@ -111,6 +113,8 @@ class __gc_unordered_map;
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_multimap;
 
+template<typename Lockable, typename ...Types>
+class __gc_variant;
 
 // ------------------------ //
 
@@ -1063,6 +1067,19 @@ public: // -- stdlib container router specializations -- //
 		}
 	};
 
+	template<typename ...Types>
+	struct router<std::variant<Types...>>
+	{
+		static constexpr bool is_trivial = all_have_trivial_routers<Types...>::value;
+
+		template<typename F>
+		static void route(const std::variant<Types...> &var, F func)
+		{
+			// visit the variant and route to whatever we get
+			std::visit([func](const auto &option) { GC::route(option, func); }, var);
+		}
+	};
+
 private: // -- std adapter internal container access functions -- //
 
 	// given a std adapter type (stack, queue, priority_queue), gets the underlying container (by reference)
@@ -1121,52 +1138,38 @@ public: // -- std adapter routers -- //
 
 private: // -- aligned raw memory allocators -- //
 
-	// passively aligns blocks of memory to whatever default alignment the stdlib implementation uses (i.e. std::max_align_t).
-	// this is more space-efficient than active alignment, but can only be used for certain (most) types.
-	// returns null on allocation failure (no exceptions).
-	struct passive_aligned_allocator
-	{
-		static void *alloc(std::size_t size) { return std::malloc(size); }
-		static void dealloc(void *p) { std::free(p); }
-	};
-
-	// actively aligns blocks of memory to the given alignment.
-	// this is less space-efficient than passive alignment, but must be used for over-aligned types.
-	// returns null on allocation failure (no exceptions).
+	// given an alignment, defines functions that allocate blocks of uninitialized memory with at least that alignment.
 	template<std::size_t align>
-	struct active_aligned_allocator
+	struct raw_aligned_allocator
 	{
 		static_assert(align != 0 && (align & (align - 1)) == 0, "align must be a power of 2");
 
-		static void *alloc(std::size_t size) { return GC::aligned_malloc(size, align); }
-		static void dealloc(void *p) { GC::aligned_free(p); }
+		// allocates size bytes - on failure returns nullptr (no exceptions).
+		static void *alloc(std::size_t size)
+		{
+			if constexpr (align <= alignof(std::max_align_t)) return std::malloc(size);
+			else return GC::aligned_malloc(size, align);
+		}
+		// deallocates a block allocated by alloc().
+		static void dealloc(void *p)
+		{
+			if constexpr (align <= alignof(std::max_align_t)) std::free(p);
+			else GC::aligned_free(p);
+		}
 	};
 
-	// given zero or more types, provides an allocator type whose alignment is suitable for all specified types.
-	// returns null on allocation failure (no exceptions).
+	// given zero or more types, gets the smallest alignment value that satisfies all types.
 	template<typename ...Types>
-	struct aligned_allocator
-	{
-	private: // -- helpers -- //
+	static constexpr std::size_t alignment_requirement = std::max({ (std::size_t)1, alignof(Types)... });
 
-		template<std::size_t align, std::enable_if_t<(align <= alignof(std::max_align_t)), int> = 0>
-		static passive_aligned_allocator __returns_aligned_allocator_type();
-
-		template<std::size_t align, std::enable_if_t<(align > alignof(std::max_align_t)), int> = 0>
-		static active_aligned_allocator<align> __returns_aligned_allocator_type();
-
-	public: // -- interface -- //
-
-		typedef decltype(__returns_aligned_allocator_type < std::max({ (std::size_t)1, alignof(Types)... }) > ()) type;
-	};
-
+	// given zero or more types, gets a raw aligned allocator that satisfies all types.
 	template<typename ...Types>
-	using aligned_allocator_t = typename aligned_allocator<Types...>::type;
+	using raw_aligned_allocator_for = raw_aligned_allocator<alignment_requirement<Types...>> ;
 
 private: // -- checked allocators -- //
 
 	// wrapper for an allocator that additionally performs gc-specific logic.
-	// the allocator you provide must return null on allocation failure - must not throw.
+	// the allocator you provide must return null on allocation failure - MUST NOT THROW.
 	// the resulting wrapped allocator (this type) throws std::bad_alloc on allocation failure.
 	template<typename allocator_t>
 	struct checked_allocator
@@ -1195,7 +1198,7 @@ private: // -- checked allocators -- //
 	// given zero or more types, provides a checked allocator type whose alignment is suitable for all specified types.
 	// throws std::bad_alloc on allocation failure.
 	template<typename ...Types>
-	using checked_aligned_allocator_t = checked_allocator<aligned_allocator_t<Types...>>;
+	using checked_aligned_allocator_for = checked_allocator<raw_aligned_allocator_for<Types...>>;
 
 public: // -- ptr allocation -- //
 
@@ -1210,7 +1213,7 @@ public: // -- ptr allocation -- //
 		typedef std::remove_cv_t<T> element_type;
 		
 		// get the allocator
-		typedef checked_aligned_allocator_t<element_type, info> allocator_t;
+		typedef checked_aligned_allocator_for<element_type, info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1275,7 +1278,7 @@ public: // -- ptr allocation -- //
 		const std::size_t scalar_count = count * GC::full_extent<T>::value;
 
 		// get the allocator
-		typedef checked_aligned_allocator_t<scalar_type, info> allocator_t;
+		typedef checked_aligned_allocator_for<scalar_type, info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1382,7 +1385,7 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// get the allocator
-		typedef checked_aligned_allocator_t<info> allocator_t;
+		typedef checked_aligned_allocator_for<info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1439,7 +1442,7 @@ public: // -- ptr allocation -- //
 		// -- normalize T -- //
 
 		// get the allocator
-		typedef checked_aligned_allocator_t<info> allocator_t;
+		typedef checked_aligned_allocator_for<info> allocator_t;
 
 		// -- create the vtable -- //
 
@@ -1603,6 +1606,11 @@ public: // -- stdlib wrapper aliases -- //
 	using unordered_map = make_wrapped_t<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>, _Lockable>;
 	template<typename Key, typename T, typename Hash = std::hash<Key>, typename KeyEqual = std::equal_to<Key>, typename Allocator = std::allocator<std::pair<const Key, T>>, typename _Lockable = default_lockable_t>
 	using unordered_multimap = make_wrapped_t<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>, _Lockable>;
+
+	template<typename ...Types>
+	using variant = make_wrapped_t<std::variant<Types...>, default_lockable_t>; // uses default lockable
+	template<typename _Lockable, typename ...Types>
+	using variant_explicit = make_wrapped_t<std::variant<Types...>, _Lockable>; // uses explicitly-specified lockable
 
 public: // -- stdlib adapter aliases -- //
 
@@ -2247,7 +2255,7 @@ private: // -- data -- //
 	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
 
 	static std::atomic<sleep_time_t> _sleep_time; // the amount of time to sleep after an automatic timed collection cycle
-
+	
 private: // -- misc -- //
 
 	GC() = delete; // not instantiatable
@@ -2285,6 +2293,7 @@ private: // -- utility router functions -- //
 
 // ------------------------- //
 
+// hash functions for gc ptr
 template<typename T>
 struct std::hash<GC::ptr<T>>
 {
@@ -2347,6 +2356,52 @@ struct GC::router<std::atomic<GC::ptr<T>>>
 	{
 		GC::route(atomic.value, func);
 	}
+};
+
+// ------------------------------------------------------------
+
+namespace std
+{
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.get<I>(); }
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.get<I>(); }
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).get<I>(); }
+
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.get<T>(); }
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.get<T>(); }
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).get<T>(); }
+
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<I>() : nullptr; }
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<I>() : nullptr; }
+
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<T>() : nullptr; }
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<T>() : nullptr; }
+
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr bool holds_alternative(const __gc_variant<Lockable, Types...> &var) noexcept { return var.holds_alternative<T>(); }
+}
+
+template<typename Lockable, typename ...Types>
+struct std::variant_size<__gc_variant<Lockable, Types...>> : std::variant_size<std::variant<Types...>> {};
+
+template<std::size_t I, typename Lockable, typename ...Types>
+struct std::variant_alternative<I, __gc_variant<Lockable, Types...>> : std::variant_alternative<I, std::variant<Types...>> {};
+
+// hash function for gc variant
+template<typename Lockable, typename ...Types>
+struct std::hash<__gc_variant<Lockable, Types...>>
+{
+	std::hash<std::variant<Types...>> hasher; // the hasher may be non-trivial, so store it
+	std::size_t operator()(const __gc_variant<Lockable, Types...> &var) const { return hasher(var.wrapped()); }
 };
 
 // -------------------- //
@@ -7637,6 +7692,235 @@ struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Loc
 	}
 };
 
+template<typename Lockable, typename ...Types>
+class __gc_variant
+{
+private: // -- data -- //
+
+	typedef std::variant<Types...> wrapped_t; // the wrapped type
+
+	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
+
+	mutable Lockable mutex; // router synchronizer
+
+	friend struct GC::router<__gc_variant>;
+	friend struct std::hash<__gc_variant>;
+
+private: // -- data accessors -- //
+
+	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
+	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
+	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- ctor / dtor -- //
+
+	constexpr __gc_variant()
+	{
+		new (buffer) wrapped_t();
+	}
+
+	constexpr __gc_variant(const __gc_variant &other)
+	{
+		new (buffer) wrapped_t(other.wrapped());
+	}
+	constexpr __gc_variant(const wrapped_t &other)
+	{
+		new (buffer) wrapped_t(other);
+	}
+
+	constexpr __gc_variant(__gc_variant &&other)
+	{
+		new (buffer) wrapped_t(std::move(other.wrapped()));
+	}
+	constexpr __gc_variant(wrapped_t &&other)
+	{
+		new (buffer) wrapped_t(std::move(other));
+	}
+
+	template<typename T, std::enable_if_t<!std::is_same<std::decay_t<T>, __gc_variant>::value, int> = 0>
+	constexpr __gc_variant(T &&t)
+	{
+		new (buffer) wrapped_t(std::forward<T>(t));
+	}
+
+	template<typename T, typename ...Args>
+	constexpr explicit __gc_variant(std::in_place_type_t<T>, Args &&...args)
+	{
+		new (buffer) wrapped_t(std::in_place_type<T>, std::forward<Args>(args)...);
+	}
+	template<typename T, typename U, typename ...Args>
+	constexpr explicit __gc_variant(std::in_place_type_t<T>, std::initializer_list<U> il, Args &&...args)
+	{
+		new (buffer) wrapped_t(std::in_place_type<T>, il, std::forward<Args>(args)...);
+	}
+
+	template<std::size_t I, typename ...Args>
+	constexpr explicit __gc_variant(std::in_place_index_t<I>, Args &&...args)
+	{
+		new (buffer) wrapped_t(std::in_place_index<I>, std::forward<Args>(args)...);
+	}
+	template<std::size_t I, typename U, typename ...Args>
+	constexpr explicit __gc_variant(std::in_place_index_t<I>, std::initializer_list<U> il, Args &&...args)
+	{
+		new (buffer) wrapped_t(std::in_place_index<I>, il, std::forward<Args>(args)...);
+	}
+
+	~__gc_variant()
+	{
+		wrapped().~wrapped_t();
+	}
+
+public: // -- assign -- //
+
+	__gc_variant &operator=(const __gc_variant &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = other.wrapped();
+		return *this;
+	}
+	__gc_variant &operator=(const wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = other;
+		return *this;
+	}
+
+	__gc_variant &operator=(__gc_variant &&other)
+	{
+		std::scoped_lock locks(this->mutex, other.mutex);
+		wrapped() = std::move(other.wrapped());
+		return *this;
+	}
+	__gc_variant &operator=(wrapped_t &&other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = std::move(other);
+		return *this;
+	}
+
+	template<typename T, std::enable_if_t<!std::is_same<std::decay_t<T>, __gc_variant>::value, int> = 0>
+	__gc_variant &operator=(T &&t)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = std::forward<T>(t);
+		return *this;
+	}
+
+public: // -- std conversion -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
+
+public: // -- observers -- //
+
+	constexpr std::size_t index() const noexcept { return wrapped().index(); }
+	constexpr bool valueless_by_exception() const noexcept { return wrapped().valueless_by_exception(); }
+
+public: // -- modifiers -- //
+
+	template<typename T, typename ...Args>
+	T &emplace(Args &&...args)
+	{
+		std::lock_guard lock(this->mutex);
+		return wrapped().emplace<T>(std::forward<Args>(args)...);
+	}
+	template<typename T, typename U, typename ...Args>
+	T &emplace(std::initializer_list<U> il, Args &&...args)
+	{
+		std::lock_guard lock(this->mutex);
+		return wrapped().emplace<T>(il, std::forward<Args>(args)...);
+	}
+
+	template<std::size_t I, typename ...Args>
+	std::variant_alternative_t<I, wrapped_t> &emplace(Args &&...args)
+	{
+		std::lock_guard lock(this->mutex);
+		return wrapped().emplace<I>(std::forward<Args>(args)...);
+	}
+	template<std::size_t I, typename U, typename ...Args>
+	std::variant_alternative_t<I, wrapped_t> &emplace(std::initializer_list<U> il, Args &&...args)
+	{
+		std::lock_guard lock(this->mutex);
+		return wrapped().emplace<I>(il, std::forward<Args>(args)...);
+	}
+
+	void swap(__gc_variant &other)
+	{
+		std::scoped_lock locks(this->mutex, other.mutex);
+		wrapped().swap(other.wrapped());
+	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
+	friend void swap(__gc_variant &a, __gc_variant &b) { a.swap(b); }
+	friend void swap(__gc_variant &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_variant &b) { b.swap(a); }
+
+public: // -- helpers -- //
+
+	// equivalent to std::get<I> for the wrapped object.
+	// safe to use, but because std::variant doesn't have this i suggest you use GC::get<I> instead for compatibility.
+	template<std::size_t I>
+	constexpr decltype(auto) get() & { return std::get<I>(wrapped()); }
+	template<std::size_t I>
+	constexpr decltype(auto) get() const& { return std::get<I>(wrapped()); }
+	template<std::size_t I>
+	constexpr decltype(auto) get() && { return std::get<I>(std::move(wrapped())); }
+
+	// equivalent to std::get<T> for the wrapped object.
+	// safe to use, but because std::variant doesn't have this i suggest you use GC::get<T> instead for compatibility.
+	template<typename T>
+	constexpr decltype(auto) get() & { return std::get<T>(wrapped()); }
+	template<typename T>
+	constexpr decltype(auto) get() const& { return std::get<T>(wrapped()); }
+	template<typename T>
+	constexpr decltype(auto) get() && { return std::get<T>(std::move(wrapped())); }
+
+	// equivalent to std::get_if<I> for the wrapped object (except that this can't be null).
+	// safe to use, but because std::variant doesn't have this i suggest you use GC::get_if<I> instead for compatibility.
+	template<std::size_t I>
+	constexpr decltype(auto) get_if() & { return std::get_if<I>(std::addressof(wrapped())); }
+	template<std::size_t I>
+	constexpr decltype(auto) get_if() const& { return std::get_if<I>(std::addressof(wrapped())); }
+
+	// equivalent to std::get_if<T> for the wrapped object (except that this can't be null).
+	// safe to use, but because std::variant doesn't have this i suggest you use GC::get_if<T> instead for compatibility.
+	template<typename T>
+	constexpr decltype(auto) get_if() & { return std::get_if<T>(std::addressof(wrapped())); }
+	template<typename T>
+	constexpr decltype(auto) get_if() const& { return std::get_if<T>(std::addressof(wrapped())); }
+
+	// equivalent to std::holds_alternative<T> for the wrapped object
+	template<typename T>
+	constexpr bool holds_alternative() const noexcept { return std::holds_alternative<T>(wrapped()); }
+
+public: // -- comparison -- //
+
+	friend constexpr bool operator==(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() == b.wrapped(); }
+	friend constexpr bool operator!=(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() != b.wrapped(); }
+	friend constexpr bool operator<(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() < b.wrapped(); }
+	friend constexpr bool operator<=(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() <= b.wrapped(); }
+	friend constexpr bool operator>(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() > b.wrapped(); }
+	friend constexpr bool operator>=(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() >= b.wrapped(); }
+};
+template<typename Lockable, typename ...Types>
+struct GC::router<__gc_variant<Lockable, Types...>>
+{
+	// if all the variant options are trivial, the variant is always trivial
+	static constexpr bool is_trivial = GC::all_have_trivial_routers<Types...>::value;
+
+	template<typename F>
+	static void route(const __gc_variant<Lockable, Types...> &var, F func)
+	{
+		std::lock_guard lock(var.mutex);
+		GC::route(var.wrapped(), func);
+	}
+};
+
 // ------------------------ //
 
 // -- wrapper conversion -- //
@@ -7862,6 +8146,23 @@ struct GC::wrapper_traits<std::unordered_multimap<Key, T, Hash, KeyEqual, Alloca
 
 	template<typename _Lockable = GC::default_lockable_t>
 	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
+};
+
+template<typename Lockable, typename ...Types>
+struct GC::wrapper_traits<__gc_variant<Lockable, Types...>>
+{
+	using unwrapped_type = std::variant<Types...>;
+
+	template<typename _Lockable = Lockable>
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_variant<_Lockable, Types...>>;
+};
+template<typename ...Types>
+struct GC::wrapper_traits<std::variant<Types...>>
+{
+	using unwrapped_type = std::variant<Types...>;
+
+	template<typename _Lockable = GC::default_lockable_t>
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_variant<_Lockable, Types...>>;
 };
 
 // ------------------ //
