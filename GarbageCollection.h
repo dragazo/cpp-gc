@@ -18,6 +18,7 @@
 #include <climits>
 #include <typeinfo>
 #include <iterator>
+#include <functional>
 
 #include <memory>
 #include <tuple>
@@ -2360,49 +2361,7 @@ struct GC::router<std::atomic<GC::ptr<T>>>
 
 // ------------------------------------------------------------
 
-namespace std
-{
-	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.get<I>(); }
-	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.get<I>(); }
-	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).get<I>(); }
 
-	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.get<T>(); }
-	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.get<T>(); }
-	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).get<T>(); }
-
-	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<I>() : nullptr; }
-	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<I>() : nullptr; }
-
-	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<T>() : nullptr; }
-	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->get_if<T>() : nullptr; }
-
-	template<typename T, typename Lockable, typename ...Types>
-	constexpr bool holds_alternative(const __gc_variant<Lockable, Types...> &var) noexcept { return var.holds_alternative<T>(); }
-}
-
-template<typename Lockable, typename ...Types>
-struct std::variant_size<__gc_variant<Lockable, Types...>> : std::variant_size<std::variant<Types...>> {};
-
-template<std::size_t I, typename Lockable, typename ...Types>
-struct std::variant_alternative<I, __gc_variant<Lockable, Types...>> : std::variant_alternative<I, std::variant<Types...>> {};
-
-// hash function for gc variant
-template<typename Lockable, typename ...Types>
-struct std::hash<__gc_variant<Lockable, Types...>>
-{
-	std::hash<std::variant<Types...>> hasher; // the hasher may be non-trivial, so store it
-	std::size_t operator()(const __gc_variant<Lockable, Types...> &var) const { return hasher(var.wrapped()); }
-};
 
 // -------------------- //
 
@@ -7820,29 +7779,29 @@ public: // -- observers -- //
 public: // -- modifiers -- //
 
 	template<typename T, typename ...Args>
-	T &emplace(Args &&...args)
+	decltype(auto) emplace(Args &&...args)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().emplace<T>(std::forward<Args>(args)...);
+		return wrapped().template emplace<T>(std::forward<Args>(args)...);
 	}
 	template<typename T, typename U, typename ...Args>
-	T &emplace(std::initializer_list<U> il, Args &&...args)
+	decltype(auto) emplace(std::initializer_list<U> il, Args &&...args)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().emplace<T>(il, std::forward<Args>(args)...);
+		return wrapped().template emplace<T>(il, std::forward<Args>(args)...);
 	}
 
 	template<std::size_t I, typename ...Args>
-	std::variant_alternative_t<I, wrapped_t> &emplace(Args &&...args)
+	decltype(auto) emplace(Args &&...args)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().emplace<I>(std::forward<Args>(args)...);
+		return wrapped().template emplace<I>(std::forward<Args>(args)...);
 	}
 	template<std::size_t I, typename U, typename ...Args>
-	std::variant_alternative_t<I, wrapped_t> &emplace(std::initializer_list<U> il, Args &&...args)
+	decltype(auto) emplace(std::initializer_list<U> il, Args &&...args)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().emplace<I>(il, std::forward<Args>(args)...);
+		return wrapped().template emplace<I>(il, std::forward<Args>(args)...);
 	}
 
 	void swap(__gc_variant &other)
@@ -7919,6 +7878,50 @@ struct GC::router<__gc_variant<Lockable, Types...>>
 		std::lock_guard lock(var.mutex);
 		GC::route(var.wrapped(), func);
 	}
+};
+
+namespace std
+{
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.template get<I>(); }
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.template get<I>(); }
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).template get<I>(); }
+
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.template get<T>(); }
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.template get<T>(); }
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).template get<T>(); }
+
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<I>() : nullptr; }
+	template<std::size_t I, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<I>() : nullptr; }
+
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<T>() : nullptr; }
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<T>() : nullptr; }
+
+	template<typename T, typename Lockable, typename ...Types>
+	constexpr bool holds_alternative(const __gc_variant<Lockable, Types...> &var) noexcept { return var.template holds_alternative<T>(); }
+}
+
+template<typename Lockable, typename ...Types>
+struct std::variant_size<__gc_variant<Lockable, Types...>> : std::variant_size<std::variant<Types...>> {};
+
+template<std::size_t I, typename Lockable, typename ...Types>
+struct std::variant_alternative<I, __gc_variant<Lockable, Types...>> : std::variant_alternative<I, std::variant<Types...>> {};
+
+// hash function for gc variant
+template<typename Lockable, typename ...Types>
+struct std::hash<__gc_variant<Lockable, Types...>>
+{
+	std::hash<std::variant<Types...>> hasher; // the hasher may be non-trivial, so store it
+	std::size_t operator()(const __gc_variant<Lockable, Types...> &var) const { return hasher(var.wrapped()); }
 };
 
 // ------------------------ //

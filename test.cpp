@@ -560,8 +560,8 @@ struct cpy_mov_intrin
 	cpy_mov_intrin(const cpy_mov_intrin &other) { std::cerr << "cpy ctor\n"; }
 	cpy_mov_intrin(cpy_mov_intrin &&other) { std::cerr << "mov ctor\n"; }
 
-	cpy_mov_intrin &operator=(const cpy_mov_intrin &other) { std::cerr << "cpy asgn\n"; }
-	cpy_mov_intrin &operator=(cpy_mov_intrin &&other) { std::cerr << "mov asgn\n"; }
+	cpy_mov_intrin &operator=(const cpy_mov_intrin &other) { std::cerr << "cpy asgn\n"; return *this; }
+	cpy_mov_intrin &operator=(cpy_mov_intrin &&other) { std::cerr << "mov asgn\n"; return *this; }
 };
 void intrin_printer(cpy_mov_intrin, cpy_mov_intrin)
 {
