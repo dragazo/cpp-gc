@@ -20,7 +20,7 @@ template<typename ...Args>
 void sync_err_print(Args &&...args)
 {
 	std::lock_guard<std::mutex> io_lock(__io_mutex);
-	int _[] = { ((std::cerr << std::forward<Args>(args)), 0)... };
+	(std::cout << ... << std::forward<Args>(args));
 }
 
 
@@ -631,15 +631,7 @@ struct thread_func_t
 // ends the timer in the current scope - should not be used if there is no timer in the current scope.
 // units is the (unquoted) name of a std::chrono time unit. name is the name of the timer (a c-style string).
 #define TIMER_END(units, name) const auto __timer_end = std::chrono::high_resolution_clock::now(); \
-	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(__timer_end - __timer_begin).count() << " " #units "\n\n"; }
-
-template<typename T, typename L = int>
-struct wrapper_template_test_t {};
-
-template<template<typename> typename C>
-void wrapper_template_test() {}
-
-void _wrapper_template_test() { wrapper_template_test<wrapper_template_test_t>(); }
+	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(__timer_end - __timer_begin).count() << " " #units "\n"; }
 
 // represents a trivial gc type - used for forcing wrapped type conversions
 struct gc_t {};
@@ -706,47 +698,10 @@ int main() try
 
 	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
 	access_gc_at_ctor->p = access_gc_at_ctor;
-	
-	//return 0;
-
-	std::cerr << "\nstart vector print test\n";
-
-	{
-		std::vector<int> ints = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-
-		//std::thread(vector_printer, std::move(ints)).detach();
-		GC::thread(GC::inherit_disjunction, vector_printer, std::move(ints)).detach();
-	}
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	std::cerr << "\nstart inherit disjunction arg intrin\n";
-
-	{
-		cpy_mov_intrin a, b;
-		a.src = b.src = true;
-
-		std::thread(intrin_printer, std::move(a), std::move(b)).detach();
-		//GC::thread(GC::inherit_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
-	}
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	std::cerr << "\nstart new disjunction arg intrin\n";
-
-	{
-		cpy_mov_intrin a, b;
-		a.src = b.src = true;
-
-		//std::thread(intrin_printer, std::move(a), std::move(b)).detach();
-		GC::thread(GC::new_disjunction, intrin_printer, std::move(a), std::move(b)).detach();
-	}
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 	{
 		thread_func_t tt;
-		auto g = &thread_func_t::foo;
 
-		//constexpr std::size_t code = __gc_INVOKE_member_pointer_protocol<thread_func_t, void(), thread_func_t&>();
 		std::invoke(&thread_func_t::foo, tt);
 
 		std::thread(&thread_func_t::foo, tt).join();
@@ -840,7 +795,7 @@ int main() try
 
 			// --------------------------------------------------
 
-			std::cerr << "ctor alias test\n";
+			std::cerr << "starting ctor alias test\n";
 
 			GC::thread(GC::primary_disjunction, [](GC::ptr<int> &a)
 			{
@@ -857,7 +812,7 @@ int main() try
 
 			// --------------------------------------------------
 
-			std::cerr << "value to reference thread pass\n";
+			std::cerr << "starting value to reference thread pass - expecting 3:\n";
 
 			GC::thread(GC::primary_disjunction, [](const GC::ptr<std::string> &a)
 			{
@@ -874,30 +829,12 @@ int main() try
 
 			// --------------------------------------------------
 
-			std::cerr << "value to value thread pass\n";
+			std::cerr << "starting value to value thread pass - expecting 1:\n";
 
-			/**
-			GC::thread(GC::primary_disjunction, [](GC::ptr<std::string> a)
-			{
-				assert_nothrow(print_str(a));
-			}, GC::make<std::string>("  -- primary disj")).join();
-			std::cerr << " -\n";
-			/**/
 			GC::thread(GC::inherit_disjunction, [](GC::ptr<std::string> a)
 			{
 				assert_nothrow(print_str(a));
 			}, GC::make<std::string>("  -- inherit disj")).join();
-			/**
-			std::cerr << " -\n";
-			GC::thread(GC::new_disjunction, [](GC::ptr<std::string> a)
-			{
-				assert_nothrow(print_str(a));
-			}, GC::make<std::string>("  -- new disj")).join();
-			/**/
-
-			// --------------------------------------------------
-
-			std::cerr << "    -- success\n";
 		}
 		catch (...)
 		{
@@ -908,11 +845,8 @@ int main() try
 
 	#endif
 
-	GC::disjunction_error disj_error("hello world");
-	disj_error.what();
-
 	{
-		std::cerr << "\nstarting disjunction deletion test\n";
+		std::cerr << "starting disjunction deletion test\n";
 		std::atomic<bool> disjunction_deletion_flag;
 
 		for (int i = 0; i < 16; ++i)
@@ -929,11 +863,7 @@ int main() try
 
 			assert(disjunction_deletion_flag);
 		}
-
-		std::cerr << "    -- passed\n\n";
 	}
-
-	std::cin.get();
 
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<char>::value, "trivial assumption failure");
@@ -1072,7 +1002,7 @@ int main() try
 
 	// ---------------------------------
 
-	std::cerr << "-------- ctors --------\n";
+	std::cerr << "\n-------- ctors --------\n";
 	{
 		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
 		GC::ptr<gc_self_ptr> gcsp = GC::make<gc_self_ptr>();
@@ -1082,7 +1012,7 @@ int main() try
 	}
 	std::cerr << "-------- collect 1 --------\n";
 	GC::collect();
-	std::cerr << "-------- collect 2 --------\n";
+	std::cerr << "-------- collect 2 - SHOULD BE EMPTY --------\n";
 	GC::collect();
 	std::cerr << "-------- end --------\n\n";
 
@@ -1118,7 +1048,6 @@ int main() try
 	atomic_container_obj->atomic_4 = GC::make<double>(4.4);
 
 	GC::collect();
-	std::cerr << '\n';
 
 	global_atomic_ptr = nullptr;
 	for (int i = 0; i < 8; ++i) global_vec_ptr.emplace_back();
@@ -1135,17 +1064,17 @@ int main() try
 
 	GC::collect();
 
-	std::cerr << "\n----------------\n";
+	std::cerr << "------ SHOULD BE SELF-CONTAINED ------\n";
 	{
 		GC::ptr<alert_t> holder;
 
 		{
-			auto arr = GC::make<alert_t[]>(4);
+			auto arr = GC::make<alert_t[]>(2);
 			holder = arr.alias(2);
 		}
-		std::cerr << "destroyed array\n";
+		std::cerr << "destroyed array - element dtors should follow:\n";
 	}
-	std::cerr << "----------------\n\n";
+	std::cerr << "-----------------end ----------------\n\n";
 
 
 	static_assert(std::is_same<int(*)[6], decltype(std::declval<GC::ptr<int[6]>>().get())>::value, "ptr type error");
@@ -1186,16 +1115,8 @@ int main() try
 	GC::constCast<const int[6]>(arr_test_0);
 	GC::constCast<const int[]>(arr_test_4);
 	GC::staticCast<const int[]>(arr_test_4);
-	//GC::staticCast<const double[]>(arr_test_4);
-	//GC::dynamicCast<const int>(arr_test_4);
-	//GC::dynamicCast<int[]>(arr_test_5);
 
 	GC::staticCast<const int>(sc_test_0);
-
-	{
-		int *_t = nullptr;
-		const int *c_t = static_cast<const int*>(_t);
-	}
 
 	assert(std::is_same<decltype(arr_test_0.get()) COMMA int(*)[6]>::value);
 	assert(std::is_same<decltype(arr_test_1.get()) COMMA int(*)[5][6]>::value);
@@ -1238,9 +1159,6 @@ int main() try
 	static_assert(std::is_same<decltype(void_p_test_1.get()), void*>::value, "ptr<void> get type wrong");
 	assert(void_p_test_1.get() == non_const_arr.get());
 
-	//*void_p_test_1;
-	//void_p_test_1[5];
-
 	assert(GC::reinterpretCast<int[]>(void_p_test_1) == non_const_arr);
 
 	GC::ptr<const void> void_p_test_5 = const_arr;
@@ -1250,8 +1168,6 @@ int main() try
 	gc_vec.emplace_back(17);
 
 	assert(gc_vec == gc_vec);
-
-	//GC::ptr<int[]> arr_test = GC::make<int[]>(16);
 
 	std::allocator<int> int_alloc;
 
@@ -1285,28 +1201,18 @@ int main() try
 	GC::ptr<GC::set<float>> pset = GC::make<GC::set<float>>(gc_float_vec.begin(), gc_float_vec.end());
 
 	pset->insert(3.14159f);
-	for (auto i : *pset) std::cerr << i << ' ';
-	std::cerr << '\n';
 
 	GC::ptr<GC::unordered_set<float>> puset = GC::make<GC::unordered_set<float>>(pset->begin(), pset->end());
 
 	puset->insert(2.71828f);
-	for (auto i : *puset) std::cerr << i << ' ';
-	std::cerr << '\n';
 
 	GC::ptr<GC::multiset<float>> pmset = GC::make<GC::multiset<float>>(puset->begin(), puset->end());
 
 	pmset->insert(std::sqrt(2.0f));
-	for (auto i : *pmset) std::cerr << i << ' ';
-	std::cerr << '\n';
 
 	GC::ptr<GC::unordered_multiset<float>> pumset = GC::make<GC::unordered_multiset<float>>(pmset->begin(), pmset->end());
 
 	pumset->insert(std::sqrt(10.0f));
-	for (auto i : *pumset) std::cerr << i << ' ';
-	std::cerr << '\n';
-
-	std::cerr << '\n';
 
 	{ // -- variant tests -- //
 
@@ -1316,14 +1222,9 @@ int main() try
 
 		auto std_variant_2 = std_variant;
 		auto std_variant_3 = std::move(std_variant);
-		std_variant = std_variant;
-		std_variant = std::move(std_variant);
-
-		gc_variant = std::move(std_variant);
-		gc_variant = std::move(gc_variant);
 
 		gc_variant = std_variant;
-		gc_variant = gc_variant;
+		gc_variant = std::move(std_variant);
 
 		std_variant = 5;
 		gc_variant = std_variant;
@@ -1439,9 +1340,6 @@ int main() try
 	pmap->emplace(8, "eight-repeat");
 	pmap->emplace(9, "nine");
 	pmap->emplace(10, "ten");
-	for (const auto &i : *pmap) std::cerr << i.first << " -> " << i.second << '\n';
-
-	std::cerr << '\n';
 
 	GC::ptr<GC::multimap<int, std::string>> pmmap = GC::make<GC::multimap<int, std::string>>();
 	pmmap->emplace(0, "zero");
@@ -1456,9 +1354,6 @@ int main() try
 	pmmap->emplace(8, "eight-repeat");
 	pmmap->emplace(9, "nine");
 	pmmap->emplace(10, "ten");
-	for (const auto &i : *pmmap) std::cerr << i.first << " -> " << i.second << '\n';
-
-	std::cerr << '\n';
 
 	GC::ptr<GC::unordered_map<int, std::string>> pumap = GC::make<GC::unordered_map<int, std::string>>();
 	pumap->emplace(0, "zero");
@@ -1473,9 +1368,6 @@ int main() try
 	pumap->emplace(8, "eight-repeat");
 	pumap->emplace(9, "nine");
 	pumap->emplace(10, "ten");
-	for (const auto &i : *pumap) std::cerr << i.first << " -> " << i.second << '\n';
-
-	std::cerr << '\n';
 
 	GC::ptr<GC::unordered_multimap<int, std::string>> pummap = GC::make<GC::unordered_multimap<int, std::string>>();
 	pummap->emplace(0, "zero");
@@ -1490,31 +1382,6 @@ int main() try
 	pummap->emplace(8, "eight-repeat");
 	pummap->emplace(9, "nine");
 	pummap->emplace(10, "ten");
-	for (const auto &i : *pummap) std::cerr << i.first << " -> " << i.second << '\n';
-
-	std::cerr << '\n';
-
-	{
-		std::mutex mutex1, mutex2, mutex3, mutex4;
-
-		{
-			std::scoped_lock<std::mutex, std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3, mutex4);
-		}
-		{
-			std::scoped_lock<std::mutex, std::mutex, std::mutex> scoped_loq(mutex1, mutex2, mutex3);
-		}
-		{
-			std::scoped_lock<std::mutex, std::mutex> scoped_loq(mutex1, mutex2);
-		}
-		{
-			std::scoped_lock<std::mutex> scoped_loq(mutex1);
-		}
-		{
-			std::scoped_lock<> scoped_loq;
-		}
-	}
-
-
 
 	{
 		auto i1 = GC::make<TreeNode>();
@@ -1538,11 +1405,8 @@ int main() try
 		GC::ptr<TreeNode> nci1 = GC::constCast<TreeNode>(ci1);
 		GC::ptr<SymbolTable> nci2 = GC::constCast<SymbolTable>(ci2);
 		GC::ptr<MaybeTreeNode> nci3 = GC::constCast<MaybeTreeNode>(ci3);
-
-		//auto i1_ = GC::staticCast<int>(i1);
 	}
 	GC::collect();
-	std::cerr << "\n\n";
 
 	GC::ptr<std::unordered_multimap<int, GC::ptr<ListNode>>> merp = GC::make<std::unordered_multimap<int, GC::ptr<ListNode>>>();
 
@@ -1559,16 +1423,15 @@ int main() try
 	GC::ptr<int> not_arr = GC::make<int>();
 	GC::ptr<int[][16][16][16]> yes_arr = GC::make<int[][16][16][16]>(16);
 
-	//not_arr[0] = 9;
 	(**yes_arr)[1][5] = 7;
 	yes_arr[2][6][1][5] = 7;
 	****yes_arr = 7;
 
-	//GC::ptr<int[5]> wrong_t;
-	GC::ptr<int[]> right_t;
+	auto bound_array = GC::make<int[5]>();
+	auto unbound_array = GC::make<int[]>(5);
 
-	typedef int what_is_this[];
-	typedef what_is_this *what_is_this_2;
+	(*bound_array)[0] = 12;
+	unbound_array[0] = 12;
 
 	auto v_test1 = std::make_unique<std::vector<int>>(16);
 	auto v_test2 = std::make_shared<std::vector<int>>(16);
@@ -1577,10 +1440,6 @@ int main() try
 	assert(v_test1->size() == 16);
 	assert(v_test2->size() == 16);
 	assert(v_test3->size() == 16);
-
-	std::cerr << "convertible: " << std::is_convertible<int[1], int[1]>::value << '\n';
-
-	std::cerr << "what is this? " << std::is_same<what_is_this_2, int(*)[]>::value << "\n\n";
 
 	GC::atomic_ptr<float> atomic_test_0;
 	GC::atomic_ptr<float> atomic_test_1;
@@ -1592,16 +1451,13 @@ int main() try
 	atomic_test_0.swap(atomic_test_1);
 	swap(atomic_test_0, atomic_test_1);
 
-
 	GC::collect();
-	std::cerr << "\n\n";
 
 	GC::ptr<int> arr_of_ptr[16];
 
 	assert(std::is_default_constructible<GC::ptr<int>>::value);
 
 	{
-		std::cerr << "ptr<ptr<int>[2][2][2]>:\n";
 		GC::ptr<GC::ptr<int>[][2][2]> arr_ptr = GC::make<GC::ptr<int>[][2][2]>(2);
 
 		for (int i = 0; i < 2; ++i)
@@ -1612,29 +1468,22 @@ int main() try
 		for (int i = 0; i < 2; ++i)
 			for (int j = 0; j < 2; ++j)
 				for (int k = 0; k < 2; ++k)
-					std::cerr << "elem (" << i << ", " << j << ", " << k << ") = " << *arr_ptr[i][j][k] << '\n';
+				{
+					assert(*arr_ptr[i][j][k] == (i + j)*j + i * j*k + k * i + k + 1);
+				}
 
 		GC::collect();
-		std::cerr << "\n\n";
 	}
-
-	sse_t t;
-	t.d[4] = '6';
-	std::cerr << "max align: " << alignof(std::max_align_t) << "\n\n";
 
 	auto sse_t_obj = GC::make<sse_t>();
 
 	GC::ptr<int> ip = GC::make<int>(46);
 	GC::ptr<int> ip_self = ip;
-	std::cerr << "      int val:  " << *ip << '\n';
 
 	GC::ptr<const int> const_ip = GC::make<const int>(47);
-	std::cerr << "const int val:  " << *const_ip << '\n';
 
 	GC::ptr<const int> const_2 = ip;
 	GC::ptr<const int> const_self = const_2;
-	//GC::ptr<int> non_const_ref = const_2;
-	std::cerr << "const int cast: " << *const_2 << '\n';
 
 	GC::ptr<wrap<wrap<int>>> p = GC::make<wrap<wrap<int>>>();
 	p->ptr = GC::make<wrap<int>>();
@@ -1651,8 +1500,6 @@ int main() try
 	std::shared_ptr<double> otest1 = nullptr;
 	std::unique_ptr<double> _otest2;
 	std::unique_ptr<double> otest2 = nullptr;
-
-
 
 	GC::ptr<derived> dp = GC::make<derived>();
 	GC::ptr<base1> bp1 = GC::make<base1>();
@@ -1672,23 +1519,14 @@ int main() try
 	assert(interp_4.get() == (void*)dp.get());
 	assert(interp_5.get() == (void*)dp.get());
 
-	//GC::dynamicCast<void>(bp1);
-	//GC::dynamicCast<int>(bp1);
-
-	//GC::dynamicCast<const int>(const_2);
-
 	auto dyn_cast1 = GC::dynamicCast<virtual_type>(bp1);
 	auto dyn_cast2 = GC::dynamicCast<non_virtual_type>(bp1);
 
 	assert(dyn_cast1 == nullptr);
-	assert(dyn_cast1 == nullptr);
-
-	std::cerr << "\ndynamicCast():\nthese should be null: " << dyn_cast1 << ' ' << dyn_cast2 << "\n";
+	assert(dyn_cast2 == nullptr);
 
 	dp->a = 123;
 	dp->b = 456;
-
-	std::cerr << '\n';
 
 	GC::ptr<base1> dp_as_b1 = dp;
 	GC::ptr<base2> dp_as_b2 = dp;
@@ -1707,8 +1545,8 @@ int main() try
 	assert(back_to_derived_1 == back_to_derived_2);
 	assert(back_to_derived_1 == dp);
 
-	std::cerr << "a: " << dp_as_b1->a << '\n';
-	std::cerr << "b: " << dp_as_b2->b << '\n';
+	assert(dp_as_b1->a == dp->a);
+	assert(dp_as_b2->b == dp->b);
 
 	std::unique_ptr<int[]> raw_up(new int[16]);
 	GC::unique_ptr<int[]> gc_up(new int[16]);
@@ -1719,139 +1557,47 @@ int main() try
 	raw_up.reset(new int[16]);
 	gc_up.reset(new int[16]);
 
-	//auto _ii = std::make_unique<int[]>(56);
-	//auto _jj = std::make_shared<int[]>(56);
-	//auto _kk = GC::make<int[]>(56);
-
-	//assert(std::is_same<int,int>::value);
-
-	//GC::ptr<derived> wrong_dp = bp;
-
-	//dp_as_b = dp;
-	//dp_as_b = 67;
-
-	//std::cin.get();
-
-	/**/
 	{
 		std::thread t1([]()
 		{
 			try
 			{
-				//while (1)
+				GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
+
+				for (int pass = 0; pass < 1024; ++pass)
 				{
-					/*
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-
-
-					std::cerr << "--------------------------------------begin segment\n";
-					GC::ptr<atomic_container> _subptr = atomic_gc_ptr->load();
-					std::cerr << "--------------------------------------       subptr get\n";
-					_subptr->atomic_1 = GC::make<double>(1.1);
-					_subptr->atomic_2 = GC::make<double>(2.2);
-					_subptr->atomic_3 = GC::make<double>(3.3);
-					_subptr->atomic_4 = GC::make<double>(4.4);
-
-					using std::swap;
-
-					swap(_subptr->atomic_1, _subptr->atomic_2);
-
-					//(*atomic_gc_ptr).load()->atomic_1 = GC::make<double>(1.1);
-					//(*atomic_gc_ptr).load()->atomic_2 = GC::make<double>(2.2);
-					//(*atomic_gc_ptr).load()->atomic_3 = GC::make<double>(3.3);
-					//(*atomic_gc_ptr).load()->atomic_4 = GC::make<double>(4.4);
-					std::cerr << "--------------------------------------        end segment\n";
-
-					foo();
-
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*atomic_gc_ptr = GC::make<atomic_container>();
-					*/
-
-					/**/
-
-					GC::ptr<SymbolTable> table = GC::make<SymbolTable>();
-
-					for (int pass = 0; pass < 1024; ++pass)
+					for (int i = 0; i < 128; ++i)
 					{
-						for (int i = 0; i < 128; ++i)
-						{
-							GC::ptr<TreeNode> tree = GC::make<TreeNode>();
-							tree->left = GC::make<TreeNode>();
-							tree->right = GC::make<TreeNode>();
+						GC::ptr<TreeNode> tree = GC::make<TreeNode>();
+						tree->left = GC::make<TreeNode>();
+						tree->right = GC::make<TreeNode>();
 
-							std::string key = tostr(i);
+						std::string key = tostr(i);
 
-							table->update(key, tree); // the one with explicit locks
-							table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
-						}
-						table->clear();
-
-						std::cerr << "pass " << pass << '\n';
+						table->update(key, tree); // the one with explicit locks
+						table->better_symbols[key] = tree; // the one with implicit locks (wrapper type)
 					}
+					table->clear();
+				}
 
-					std::cerr << "phase 1 completed\n";
+				GC::ptr<int> pi;
 
-					/**/
-
-					GC::ptr<int> pi;
-
-					for (int i = 0; i < 8192; ++i)
-					{
-						GC::ptr<int> temp = GC::make<int>(i);
-						pi = temp;
-					}
-
-					std::cerr << "printy\n";
+				for (int i = 0; i < 8192; ++i)
+				{
+					GC::ptr<int> temp = GC::make<int>(i);
+					pi = temp;
 				}
 			}
 			catch (...) { std::cerr << "\n\nSYMTAB TEST EXCEPTION!!\n\n"; assert(false); }
 		});
-		//std::thread t2([]()
-		//{
 
-		int i = 0;
-		//while (1)
-		{
-			//*atomic_gc_ptr = GC::make<atomic_container>();
-
-			//std::cerr << "collecting pass " << ++i << '\n';
-			GC::collect();
-
-			//std::this_thread::sleep_for(std::chrono::seconds(2));
-
-			//*atomic_gc_ptr = GC::make<atomic_container>();
-		}
-		//});
+		GC::collect();
 
 		t1.join();
-		//t2.join();
 	}
-	/**/
-
-	std::cerr << "\n\n";
 
 	try
 	{
-		sizeof(std::mutex);
-		sizeof(std::recursive_mutex);
-
-		sizeof(std::timed_mutex);
-		sizeof(std::recursive_timed_mutex);
-
-		sizeof(std::shared_timed_mutex);
-
 		std::cerr << "beginning ctor collect vec\n";
 		auto ctor_vec = GC::make<GC::vector<ctor_collect_t>>();
 		ctor_vec->reserve(20);
@@ -1865,7 +1611,7 @@ int main() try
 		auto ctor_dtor_vec = GC::make<GC::vector<ctor_dtor_collect_t>>();
 		ctor_dtor_vec->reserve(20);
 		for (int i = 0; i < 10; ++i) ctor_dtor_vec->emplace_back();
-		std::cerr << "half\n";
+		std::cerr << "beginning cleanup\n";
 		while (!ctor_dtor_vec->empty()) ctor_dtor_vec->pop_back();
 
 		std::cerr << "completed ctor/dtor deadlock tests\n\n";
@@ -1894,14 +1640,22 @@ int main() try
 				for (std::size_t i = 0; i < 1000000; ++i)
 				{
 					// make 3 unique objects
-					x = GC::make<std::size_t>(i);
-					y = GC::make<std::size_t>(i);
-					z = GC::make<std::size_t>(i);
+					x = GC::make<std::size_t>(i + 0);
+					y = GC::make<std::size_t>(i + 1);
+					z = GC::make<std::size_t>(i + 2);
+
+					assert(*x == i + 0);
+					assert(*y == i + 1);
+					assert(*z == i + 2);
 
 					// rotate them 3 times
-					w = x; x = y; y = z; z = w;
-					w = x; x = y; y = z; z = w;
-					w = x; x = y; y = z; z = w;
+					for (std::size_t j = 1; j <= 3; ++j)
+					{
+						w = x; x = y; y = z; z = w;
+						assert(*x == i + ((0 + j) % 3));
+						assert(*y == i + ((1 + j) % 3));
+						assert(*z == i + ((2 + j) % 3));
+					}
 				}
 			}
 			catch (...) { std::cerr << "\n\nINTERFERENCE EXCEPTION!!\n\n"; assert(false); }
@@ -1916,7 +1670,6 @@ int main() try
 
 	TIMER_END(milliseconds, "all tests");
 
-	std::cin.get();
 	return 0;
 }
 catch (const std::exception &ex)

@@ -1201,6 +1201,15 @@ private: // -- checked allocators -- //
 	template<typename ...Types>
 	using checked_aligned_allocator_for = checked_allocator<raw_aligned_allocator_for<Types...>>;
 
+private: // -- data block alignment guards -- //
+
+	// given an element type and a number of elements, returns the padded size to safely put an info object at the end.
+	// assumes the base address will be at least aligned to the stricter of T and info - does not include space for the info block itself.
+	// usage: use this value instead of Count * sizeof(T) for use in single-allocation gc buffers containing one or more objects followed by an info block.
+	// this effectively computes Count * sizeof(T) and rounds up to the next multiple of alignof(info).
+	template<typename T, std::size_t Count>
+	struct pad_size_for_info : std::integral_constant<std::size_t, (Count * sizeof(T)) + ((~(Count * sizeof(T)) + 1) & (alignof(info) - 1))> {};
+
 public: // -- ptr allocation -- //
 
 	// creates a new dynamic instance of T that is bound to a ptr.
@@ -1230,12 +1239,15 @@ public: // -- ptr allocation -- //
 
 		// -- create the buffer for both the object and its info object -- //
 
+		// alias the pad size type
+		typedef pad_size_for_info<element_type, 1> pad_size;
+
 		// allocate the buffer space
-		void *const buf = allocator_t::alloc(sizeof(element_type) + sizeof(info));
+		void *const buf = allocator_t::alloc(pad_size::value + sizeof(info));
 
 		// alias the buffer partitions
 		element_type *const obj = reinterpret_cast<element_type*>(buf);
-		info         *const handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + sizeof(element_type));
+		info         *const handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + pad_size::value);
 
 		// -- construct the object -- //
 
@@ -1295,12 +1307,42 @@ public: // -- ptr allocation -- //
 
 		// -- create the buffer for the objects and their info object -- //
 
-		// allocate the buffer space
-		void *const buf = allocator_t::alloc(scalar_count * sizeof(scalar_type) + sizeof(info));
+		// allocate the buffer space (owning)
+		void *buf;
+		
+		// alias the buffer partitions (non-owning)
+		scalar_type *obj;
+		info        *handle;
 
-		// alias the buffer partitions
-		scalar_type *const obj = reinterpret_cast<scalar_type*>(buf);
-		info        *const handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + scalar_count * sizeof(scalar_type));
+		// A is a multiple of B implies C * A is a multiple of B.
+		// likewise, if A = X * Y and A is not a multiple of D, then neither is X or Y.
+		// thus if the first order element type size is a multiple of alignof(info) then the entire array is as well.
+		// in this case we know the info object will be aligned without the need for any additional padding.
+		if constexpr ((sizeof(element_type) & (alignof(info) - 1)) == 0)
+		{
+			// we're guaranteed alignment of the info object, so just get enough space for the array plus the info object
+			buf = allocator_t::alloc(scalar_count * sizeof(scalar_type) + sizeof(info));
+
+			// alias the two buffer partitions
+			obj = reinterpret_cast<scalar_type*>(buf);
+			handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + scalar_count * sizeof(scalar_type));
+		}
+		// otherwise this isn't guaranteed in general, so we may need to include some padding
+		else
+		{
+			// compute the size of the array (now dealing with runtime values)
+			std::size_t arr_sz = scalar_count * sizeof(scalar_type);
+
+			// round this up to the next multiple of alignof(info)
+			arr_sz = arr_sz + ((~arr_sz + 1) & (alignof(info) - 1));
+
+			// allocate that much space for the array, then enough to tack on the info object
+			buf = allocator_t::alloc(arr_sz + sizeof(info));
+
+			// alias the two buffer partitions
+			obj = reinterpret_cast<scalar_type*>(buf);
+			handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + arr_sz);
+		}
 
 		// -- construct the objects -- //
 
@@ -1543,26 +1585,31 @@ public: // -- wrapper traits -- //
 	{
 	private: // -- helpers -- //
 
-		// return type is the unwrapped type to use - uses sfinae to avoid self-referential typedefs.
-		template<typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && GC::no_cv<_T>::value, int> = 0>
-		static type_alias<_T> _get_unwrapped_type();
-		template<typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && !GC::no_cv<_T>::value, int> = 0>
-		static type_alias<GC::copy_cv_t<_T, typename wrapper_traits<std::remove_cv_t<_T>>::unwrapped_type>> _get_unwrapped_type();
+		// clang has a bug that requires template alias lookups to have the same first-order visibility as the usage site.
+		// thus the impl has to go in the public section of something for the alias to be used publically.
+		struct impl
+		{
+			// return type is the unwrapped type to use - uses sfinae to avoid self-referential typedefs.
+			template<typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && GC::no_cv<_T>::value, int> = 0>
+			static type_alias<_T> _get_unwrapped_type();
+			template<typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && !GC::no_cv<_T>::value, int> = 0>
+			static type_alias<GC::copy_cv_t<_T, typename wrapper_traits<std::remove_cv_t<_T>>::unwrapped_type>> _get_unwrapped_type();
 
-		// return type is the wrapped type to use - uses sfinae to avoid self-referential typedefs.
-		template<typename _Lockable, typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && GC::no_cv<_T>::value, int> = 0>
-		static type_alias<_T> _get_wrapped_type();
-		template<typename _Lockable, typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && !GC::no_cv<_T>::value, int> = 0>
-		static type_alias<GC::copy_cv_t<_T, typename wrapper_traits<std::remove_cv_t<_T>>::template wrapped_type<_Lockable>>> _get_wrapped_type();
+			// return type is the wrapped type to use - uses sfinae to avoid self-referential typedefs.
+			template<typename _Lockable, typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && GC::no_cv<_T>::value, int> = 0>
+			static type_alias<_T> _get_wrapped_type();
+			template<typename _Lockable, typename _T = T, std::enable_if_t<std::is_same<T, _T>::value && !GC::no_cv<_T>::value, int> = 0>
+			static type_alias<GC::copy_cv_t<_T, typename wrapper_traits<std::remove_cv_t<_T>>::template wrapped_type<_Lockable>>> _get_wrapped_type();
+		};
 
 	public: // -- typedefs -- //
 
 		// gets an equivalent type that is not necessarily gc-ready
-		using unwrapped_type = typename decltype(_get_unwrapped_type())::type;
+		using unwrapped_type = typename decltype(impl::_get_unwrapped_type())::type;
 		
 		// gets an equivalent type that is gc ready potentially via usage of _Lockable
 		template<typename _Lockable>
-		using wrapped_type = typename decltype(_get_wrapped_type<_Lockable>())::type;
+		using wrapped_type = typename decltype(impl::template _get_wrapped_type<_Lockable>())::type;
 	};
 
 	// given a type T, gets an equivalent type that is not necessarily gc-ready
@@ -2110,7 +2157,7 @@ private: // -- gc disjoint module -- //
 	public: // -- utility functions -- //
 
 		// gets the address of the buffer for holding the actual module - see buffer
-		constexpr disjoint_module *get() noexcept { return reinterpret_cast<disjoint_module*>(buffer); }
+		disjoint_module *get() noexcept { return reinterpret_cast<disjoint_module*>(buffer); }
 
 		// adds v to the tag atomically and returns the previous value
 		tag_t tag_add(tag_t v, std::memory_order order = std::memory_order_seq_cst);
@@ -5342,7 +5389,7 @@ public: // -- insert / erase -- //
 	iterator insert(const_iterator hint, value_type &&value)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().insert(hint, std::move(wrapped));
+		return wrapped().insert(hint, std::move(value));
 	}
 
 	insert_return_type insert(node_type &&nh)
@@ -5777,7 +5824,7 @@ public: // -- insert / erase -- //
 	iterator insert(const_iterator hint, value_type &&value)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().insert(hint, std::move(wrapped));
+		return wrapped().insert(hint, std::move(value));
 	}
 
 	iterator insert(node_type &&nh)

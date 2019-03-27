@@ -589,7 +589,7 @@ void GC::disjoint_module::schedule_handle_repoint_swap(smart_handle &handle_a, s
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
 	// if we're going to repoint outside the disjunction of either handle, that's a disjunction violation
-	if (target_b && handle_a.disjunction != target_b->disjunction || target_a && handle_b.disjunction != target_a->disjunction)
+	if ((target_b && handle_a.disjunction != target_b->disjunction) || (target_a && handle_b.disjunction != target_a->disjunction))
 	{
 		throw GC::disjunction_error("attempt to repoint GC::ptr outside of the current disjunction");
 	}
