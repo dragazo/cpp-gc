@@ -865,6 +865,8 @@ int main() try
 		}
 	}
 
+	// -----------------------------------------------------------------------------------------------------
+
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<char>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<double>::value, "trivial assumption failure");
@@ -894,7 +896,7 @@ int main() try
 	static_assert(!GC::has_trivial_router<std::pair<int, GC::ptr<int>>>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<std::tuple<int, GC::ptr<int>>>::value, "trivial assumption failure");
 	
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
 	static_assert(GC::has_trivial_router<int&>::value, "trivial assumption failure");
@@ -912,11 +914,11 @@ int main() try
 	static_assert(!GC::has_trivial_router<const self_ptr&>::value, "trivial assumption failure");
 	static_assert(!GC::has_trivial_router<const self_ptr&&>::value, "trivial assumption failure");
 	
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(GC::all_have_trivial_routers<>::value, "trivial assumption failure");
 
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(std::is_same<GC::vector<bool>, std::vector<bool>>::value, "smart wrapper opt check");
 	static_assert(std::is_same<GC::vector<bool_alerter>, std::vector<bool_alerter>>::value, "smart wrapper opt check");
@@ -934,7 +936,7 @@ int main() try
 	static_assert(!std::is_same<GC::queue<std::pair<double, TreeNode>>, std::queue<std::pair<double, TreeNode>>>::value, "smart wrapper opt check");
 	static_assert(!std::is_same<GC::priority_queue<std::tuple<SymbolTable>>, std::priority_queue<std::tuple<SymbolTable>>>::value, "smart wrapper opt check");
 
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(std::is_same<const GC::make_wrapped_t<GC::vector<int>>, GC::make_wrapped_t<const std::vector<int>>>::value, "wrapped const test");
 	static_assert(std::is_same<const GC::make_wrapped_t<std::vector<TreeNode>>, GC::make_wrapped_t<const std::vector<TreeNode>>>::value, "wrapped const test");
@@ -944,7 +946,7 @@ int main() try
 	static_assert(std::is_same<const GC::make_wrapped_t<const volatile std::vector<TreeNode>>, const volatile GC::make_wrapped_t<const volatile std::vector<TreeNode>>>::value, "wrapped const test");
 	static_assert(std::is_same<GC::make_wrapped_t<const volatile GC::vector<TreeNode>>, GC::make_wrapped_t<const volatile std::vector<TreeNode>>>::value, "wrapped const test");
 
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(std::is_same<int, GC::make_unwrapped_t<int>>::value, "unwrapped primitive test");
 	static_assert(std::is_same<const int, GC::make_unwrapped_t<const int>>::value, "unwrapped primitive test");
@@ -976,7 +978,7 @@ int main() try
 	static_assert(std::is_same<volatile std::tuple<void*, const char*, float, float, double>, GC::make_wrapped_t<volatile std::tuple<void*, const char*, float, float, double>>>::value, "wrapped trivial test");
 	static_assert(std::is_same<const volatile std::tuple<void*, const char*, float, float, double>, GC::make_wrapped_t<const volatile std::tuple<void*, const char*, float, float, double>>>::value, "wrapped trivial test");
 
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(GC::has_trivial_router<GC::variant<int>>::value, "trivial test");
 	static_assert(GC::has_trivial_router<GC::variant<int, float>>::value, "trivial test");
@@ -1000,7 +1002,24 @@ int main() try
 	static_assert(!std::is_same<std::variant<SymbolTable>, GC::variant<SymbolTable>>::value, "wrapped variant equivalence");
 	static_assert(!std::is_same<std::variant<std::string, SymbolTable>, GC::variant<std::string, SymbolTable>>::value, "wrapped variant equivalence");
 
-	// ---------------------------------
+	// -----------------------------------------------------------------------------------------------------
+
+	static_assert(GC::has_trivial_router<GC::optional<int>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::optional<float>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::optional<sse_t>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::optional<SymbolTable*>>::value, "trivial test");
+	static_assert(GC::has_trivial_router<GC::optional<const SymbolTable*>>::value, "trivial test");
+
+	static_assert(!GC::has_trivial_router<SymbolTable>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::optional<SymbolTable>>::value, "trivial test");
+	static_assert(!GC::has_trivial_router<std::optional<TreeNode>>::value, "trivial test");
+
+	static_assert(std::is_same<std::optional<int>, GC::optional<int>>::value, "wrapped optional equivalence");
+	static_assert(std::is_same<std::optional<double>, GC::optional<double>>::value, "wrapped optional equivalence");
+	static_assert(std::is_same<std::optional<std::string>, GC::optional<std::string>>::value, "wrapped optional equivalence");
+	static_assert(!std::is_same<std::optional<SymbolTable>, GC::optional<SymbolTable>>::value, "wrapped optional equivalence");
+
+	// -----------------------------------------------------------------------------------------------------
 
 	std::cerr << "\n-------- ctors --------\n";
 	{
@@ -1074,8 +1093,7 @@ int main() try
 		}
 		std::cerr << "destroyed array - element dtors should follow:\n";
 	}
-	std::cerr << "-----------------end ----------------\n\n";
-
+	std::cerr << "----------------- end ----------------\n\n";
 
 	static_assert(std::is_same<int(*)[6], decltype(std::declval<GC::ptr<int[6]>>().get())>::value, "ptr type error");
 	static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[6][8]>>().get())>::value, "ptr type error");
@@ -1325,6 +1343,64 @@ int main() try
 		assert(dyn_gc_variant->index() == 0);
 		*dyn_gc_variant = *dyn_gc_variant;
 		*dyn_gc_variant = std::move(*dyn_gc_variant);
+	}
+
+	{ // -- optional tests -- //
+		auto sym_1 = GC::make<GC::optional<SymbolTable>>();
+		auto sym_2 = GC::make<std::optional<SymbolTable>>();
+
+		assert(!sym_1->has_value());
+		assert(!sym_2->has_value());
+
+		sym_1->emplace();
+		sym_2->emplace();
+
+		assert(sym_1->has_value());
+		assert(sym_2->has_value());
+
+		sym_1->reset();
+		sym_2->reset();
+
+		assert(!sym_1->has_value());
+		assert(!sym_2->has_value());
+
+		auto sym_3 = GC::make<GC::optional<int>>(16);
+		auto sym_4 = GC::make<std::optional<int>>(32);
+
+		assert(sym_3->has_value());
+		assert(sym_4->has_value());
+
+		assert(sym_3->value() == 16);
+		assert(sym_4->value() == 32);
+
+		assert(*sym_3 < *sym_4);
+		assert(*sym_3 <= *sym_4);
+		assert(*sym_4 > *sym_3);
+		assert(*sym_4 >= *sym_3);
+		assert(*sym_4 != *sym_3);
+		assert(!(*sym_4 == *sym_3));
+
+		*sym_3 = 5;
+		*sym_4 = 5;
+
+		assert(sym_3->has_value());
+		assert(sym_4->has_value());
+
+		assert(sym_3->value() == 5);
+		assert(sym_4->value() == 5);
+
+		assert(!(*sym_3 < *sym_4));
+		assert(*sym_3 <= *sym_4);
+		assert(!(*sym_4 > *sym_3));
+		assert(*sym_4 >= *sym_3);
+		assert(*sym_4 == *sym_3);
+		assert(!(*sym_4 != *sym_3));
+
+		*sym_3 = std::nullopt;
+		*sym_4 = std::nullopt;
+
+		assert(!sym_1->has_value());
+		assert(!sym_2->has_value());
 	}
 
 	GC::ptr<GC::map<int, std::string>> pmap = GC::make<GC::map<int, std::string>>();

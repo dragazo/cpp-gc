@@ -39,6 +39,7 @@
 #include <queue>
 
 #include <variant>
+#include <optional>
 
 // --------------------- //
 
@@ -116,6 +117,9 @@ class __gc_unordered_multimap;
 
 template<typename Lockable, typename ...Types>
 class __gc_variant;
+
+template<typename T, typename Lockable>
+class __gc_optional;
 
 // ------------------------ //
 
@@ -1080,6 +1084,17 @@ public: // -- stdlib container router specializations -- //
 			std::visit([func](const auto &option) { GC::route(option, func); }, var);
 		}
 	};
+	template<typename T>
+	struct router<std::optional<T>>
+	{
+		static constexpr bool is_trivial = has_trivial_router<T>::value;
+
+		template<typename F>
+		static void route(const std::optional<T> &opt, F func)
+		{
+			if (opt.has_value()) GC::route(opt.value(), func);
+		}
+	};
 
 private: // -- std adapter internal container access functions -- //
 
@@ -1307,42 +1322,22 @@ public: // -- ptr allocation -- //
 
 		// -- create the buffer for the objects and their info object -- //
 
-		// allocate the buffer space (owning)
-		void *buf;
-		
-		// alias the buffer partitions (non-owning)
-		scalar_type *obj;
-		info        *handle;
+		// compute the size of the array
+		std::size_t arr_sz = scalar_count * sizeof(scalar_type);
 
-		// A is a multiple of B implies C * A is a multiple of B.
-		// likewise, if A = X * Y and A is not a multiple of D, then neither is X or Y.
-		// thus if the first order element type size is a multiple of alignof(info) then the entire array is as well.
-		// in this case we know the info object will be aligned without the need for any additional padding.
-		if constexpr ((sizeof(element_type) & (alignof(info) - 1)) == 0)
+		// to make sure the info object is aligned, round this up to a multiple of alignof(info).
+		// note: this is not necessary if the element type size is already a multiple of alignof(info).
+		if constexpr ((sizeof(element_type) & (alignof(info) - 1)) != 0)
 		{
-			// we're guaranteed alignment of the info object, so just get enough space for the array plus the info object
-			buf = allocator_t::alloc(scalar_count * sizeof(scalar_type) + sizeof(info));
-
-			// alias the two buffer partitions
-			obj = reinterpret_cast<scalar_type*>(buf);
-			handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + scalar_count * sizeof(scalar_type));
-		}
-		// otherwise this isn't guaranteed in general, so we may need to include some padding
-		else
-		{
-			// compute the size of the array (now dealing with runtime values)
-			std::size_t arr_sz = scalar_count * sizeof(scalar_type);
-
-			// round this up to the next multiple of alignof(info)
 			arr_sz = arr_sz + ((~arr_sz + 1) & (alignof(info) - 1));
-
-			// allocate that much space for the array, then enough to tack on the info object
-			buf = allocator_t::alloc(arr_sz + sizeof(info));
-
-			// alias the two buffer partitions
-			obj = reinterpret_cast<scalar_type*>(buf);
-			handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + arr_sz);
 		}
+
+		// allocate the buffer space (owning)
+		void *const buf = allocator_t::alloc(arr_sz + sizeof(info));
+		
+		// alias the two buffer partitions
+		scalar_type *const obj = reinterpret_cast<scalar_type*>(buf);
+		info        *const handle = reinterpret_cast<info*>(reinterpret_cast<char*>(buf) + arr_sz);
 
 		// -- construct the objects -- //
 
@@ -1659,6 +1654,9 @@ public: // -- stdlib wrapper aliases -- //
 	using variant = make_wrapped_t<std::variant<Types...>, default_lockable_t>; // uses default lockable
 	template<typename _Lockable, typename ...Types>
 	using variant_explicit = make_wrapped_t<std::variant<Types...>, _Lockable>; // uses explicitly-specified lockable
+
+	template<typename T, typename _Lockable = default_lockable_t>
+	using optional = make_wrapped_t<std::optional<T>, _Lockable>;
 
 public: // -- stdlib adapter aliases -- //
 
@@ -7698,6 +7696,23 @@ struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Loc
 	}
 };
 
+// -------------------------------------------------------------------------
+
+// checks if T is a valid type for value forwarding ctor/asgn for __gc_variant type objects.
+// the type checked should already be passed through std::decay.
+template<typename T>
+struct __gc_variant_valid_forward_type : std::true_type {};
+
+template<typename Lockable, typename ...Types>
+struct __gc_variant_valid_forward_type<__gc_variant<Lockable, Types...>> : std::false_type {};
+template<typename ...Types>
+struct __gc_variant_valid_forward_type<std::variant<Types...>> : std::false_type {};
+
+template<typename T>
+struct __gc_variant_valid_forward_type<std::in_place_type_t<T>> : std::false_type {};
+template<std::size_t I>
+struct __gc_variant_valid_forward_type<std::in_place_index_t<I>> : std::false_type {};
+
 template<typename Lockable, typename ...Types>
 class __gc_variant
 {
@@ -7719,7 +7734,7 @@ private: // -- data accessors -- //
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
 
 public: // -- ctor / dtor -- //
-
+	
 	constexpr __gc_variant()
 	{
 		new (buffer) wrapped_t();
@@ -7743,7 +7758,7 @@ public: // -- ctor / dtor -- //
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	template<typename T, std::enable_if_t<!std::is_same<std::decay_t<T>, __gc_variant>::value, int> = 0>
+	template<typename T, std::enable_if_t<__gc_variant_valid_forward_type<std::decay_t<T>>::value, int> = 0>
 	constexpr __gc_variant(T &&t)
 	{
 		new (buffer) wrapped_t(std::forward<T>(t));
@@ -7969,6 +7984,314 @@ struct std::hash<__gc_variant<Lockable, Types...>>
 {
 	std::hash<std::variant<Types...>> hasher; // the hasher may be non-trivial, so store it
 	std::size_t operator()(const __gc_variant<Lockable, Types...> &var) const { return hasher(var.wrapped()); }
+};
+
+// ------------------------------------------------------------------------------------
+
+template<typename T, typename Lockable>
+class __gc_optional
+{
+private: // -- data -- //
+
+	typedef std::optional<T> wrapped_t; // the wrapped type
+
+	alignas(wrapped_t) char buffer[sizeof(wrapped_t)]; // buffer for the wrapped object
+
+	mutable Lockable mutex; // router synchronizer
+
+	friend struct GC::router<__gc_optional>;
+	friend struct std::hash<__gc_optional>;
+
+private: // -- data accessors -- //
+
+	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
+	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
+	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- types -- //
+
+	typedef T value_type;
+
+public: // -- ctor / dtor -- //
+
+	constexpr __gc_optional() noexcept
+	{
+		new (buffer) wrapped_t();
+	}
+	constexpr __gc_optional(std::nullopt_t) noexcept
+	{
+		new (buffer) wrapped_t(std::nullopt);
+	}
+
+	constexpr __gc_optional(const __gc_optional &other)
+	{
+		new (buffer) wrapped_t(other.wrapped());
+	}
+	constexpr __gc_optional(const wrapped_t &other)
+	{
+		new (buffer) wrapped_t(other);
+	}
+
+	constexpr __gc_optional(__gc_optional &&other)
+	{
+		new (buffer) wrapped_t(std::move(other.wrapped()));
+	}
+	constexpr __gc_optional(wrapped_t &&other)
+	{
+		new (buffer) wrapped_t(std::move(other));
+	}
+
+	template<typename U, typename ULockable, std::enable_if_t<std::is_convertible<const U&, T>::value, int> = 0>
+	__gc_optional(const __gc_optional<U, ULockable> &other)
+	{
+		new (buffer) wrapped_t(other.wrapped());
+	}
+	template<typename U, std::enable_if_t<std::is_convertible<const U&, T>::value, int> = 0>
+	__gc_optional(const std::optional<U> &other)
+	{
+		new (buffer) wrapped_t(other);
+	}
+
+	template<typename U, typename ULockable, std::enable_if_t<!std::is_convertible<const U&, T>::value, int> = 0>
+	explicit __gc_optional(const __gc_optional<U, ULockable> &other)
+	{
+		new (buffer) wrapped_t(other.wrapped());
+	}
+	template<typename U, std::enable_if_t<!std::is_convertible<const U&, T>::value, int> = 0>
+	explicit __gc_optional(const std::optional<U> &other)
+	{
+		new (buffer) wrapped_t(other);
+	}
+
+	template<typename U, typename ULockable, std::enable_if_t<std::is_convertible<U&&, T>::value, int> = 0>
+	__gc_optional(__gc_optional<U, ULockable> &&other)
+	{
+		new (buffer) wrapped_t(std::move(other.wrapped()));
+	}
+	template<typename U, std::enable_if_t<std::is_convertible<U&&, T>::value, int> = 0>
+	__gc_optional(std::optional<U> &&other)
+	{
+		new (buffer) wrapped_t(std::move(other));
+	}
+
+	template<typename U, typename ULockable, std::enable_if_t<!std::is_convertible<U&&, T>::value, int> = 0>
+	explicit __gc_optional(__gc_optional<U, ULockable> &&other)
+	{
+		new (buffer) wrapped_t(std::move(other.wrapped()));
+	}
+	template<typename U, std::enable_if_t<!std::is_convertible<U&&, T>::value, int> = 0>
+	explicit __gc_optional(std::optional<U> &&other)
+	{
+		new (buffer) wrapped_t(std::move(other));
+	}
+
+	template<typename ...Args>
+	constexpr explicit __gc_optional(std::in_place_t, Args &&...args)
+	{
+		new (buffer) wrapped_t(std::in_place, std::forward<Args>(args)...);
+	}
+	template<typename U, typename ...Args>
+	constexpr explicit __gc_optional(std::in_place_t, std::initializer_list<U> il, Args &&...args)
+	{
+		new (buffer) wrapped_t(std::in_place, il, std::forward<Args>(args)...);
+	}
+
+	template<typename U = value_type, std::enable_if_t<std::is_convertible<U&&, T>::value, int> = 0>
+	constexpr __gc_optional(U &&value)
+	{
+		new (buffer) wrapped_t(std::forward<U>(value));
+	}
+	template<typename U = value_type, std::enable_if_t<!std::is_convertible<U&&, T>::value, int> = 0>
+	constexpr explicit __gc_optional(U &&value)
+	{
+		new (buffer) wrapped_t(std::forward<U>(value));
+	}
+
+	~__gc_optional()
+	{
+		wrapped().~wrapped_t();
+	}
+
+public: // -- assign -- //
+
+	__gc_optional &operator=(std::nullopt_t)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = std::nullopt;
+		return *this;
+	}
+
+	constexpr __gc_optional &operator=(const __gc_optional &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = other.wrapped();
+		return *this;
+	}
+	constexpr __gc_optional &operator=(const wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = other;
+		return *this;
+	}
+
+	constexpr __gc_optional &operator=(__gc_optional &&other)
+	{
+		std::scoped_lock locks(this->mutex, other.mutex);
+		wrapped() = std::move(other.wrapped());
+		return *this;
+	}
+	constexpr __gc_optional &operator=(wrapped_t &&other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = std::move(other);
+		return *this;
+	}
+
+	template<typename U = T>
+	__gc_optional &operator=(U &&value)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = std::forward<U>(value);
+		return *this;
+	}
+
+	template<typename U, typename ULockable>
+	__gc_optional &operator=(const __gc_optional<U, ULockable> &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = other.wrapped();
+		return *this;
+	}
+	template<typename U>
+	__gc_optional &operator=(const std::optional<U> &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = other;
+		return *this;
+	}
+
+	template<typename U, typename ULockable>
+	__gc_optional &operator=(__gc_optional<U, ULockable> &&other)
+	{
+		std::scoped_lock locks(this->mutex, other.mutex);
+		wrapped() = std::move(other.wrapped());
+		return *this;
+	}
+	template<typename U>
+	__gc_optional &operator=(std::optional<U> &&other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped() = std::move(other);
+		return *this;
+	}
+
+public: // -- observers -- //
+
+	constexpr decltype(auto) operator->() { return wrapped().operator->(); }
+	constexpr decltype(auto) operator->() const { return wrapped().operator->(); }
+
+	constexpr decltype(auto) operator*() & { return *wrapped(); }
+	constexpr decltype(auto) operator*() const& { return *wrapped(); }
+	constexpr decltype(auto) operator*() &&
+	{
+		std::lock_guard lock(this->mutex); // not sure if this lock is needed
+		return *std::move(wrapped());
+	}
+	constexpr decltype(auto) operator*() const&&
+	{
+		std::lock_guard lock(this->mutex); // not sure if this lock is needed
+		return *std::move(wrapped());
+	}
+
+	constexpr explicit operator bool() const noexcept { return static_cast<bool>(wrapped()); }
+	constexpr bool has_value() const noexcept { return wrapped().has_value(); }
+
+	constexpr decltype(auto) value() & { return wrapped().value(); }
+	constexpr decltype(auto) value() const& { return wrapped().value(); }
+	constexpr decltype(auto) value() &&
+	{
+		std::lock_guard lock(this->mutex); // not sure if this lock is needed
+		return std::move(wrapped()).value();
+	}
+	constexpr decltype(auto) value() const&&
+	{
+		std::lock_guard lock(this->mutex); // not sure if this lock is needed
+		return std::move(wrapped()).value();
+	}
+
+	template<typename U>
+	constexpr T value_or(U &&default_value) const& { return wrapped().value_or(std::forward<U>(default_value)); }
+	template<typename U>
+	constexpr T value_or(U &&default_value) &&
+	{
+		std::lock_guard lock(this->mutex); // not sure if this lock is needed
+		return std::move(wrapped()).value_or(std::forward<U>(default_value));
+	}
+
+public: // -- modifiers -- //
+
+	void swap(__gc_optional &other)
+	{
+		std::scoped_lock locks(this->mutex, other.mutex);
+		wrapped().swap(other.wrapped());
+	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
+	friend void swap(__gc_optional &a, __gc_optional &b) { a.swap(b); }
+	friend void swap(__gc_optional &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_optional &b) { b.swap(a); }
+
+	void reset()
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().reset();
+	}
+
+	template<typename ...Args>
+	T &emplace(Args &&...args)
+	{
+		std::lock_guard lock(this->mutex);
+		return wrapped().emplace(std::forward<Args>(args)...);
+	}
+	template<typename U, typename ...Args>
+	T &emplace(std::initializer_list<U> il, Args &&...args)
+	{
+		std::lock_guard lock(this->mutex);
+		return wrapped().emplace(il, std::forward<Args>(args)...);
+	}
+
+public: // -- comparison -- //
+
+	friend constexpr bool operator==(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() == b.wrapped(); }
+	friend constexpr bool operator!=(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() != b.wrapped(); }
+	friend constexpr bool operator<(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() < b.wrapped(); }
+	friend constexpr bool operator<=(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() <= b.wrapped(); }
+	friend constexpr bool operator>(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() > b.wrapped(); }
+	friend constexpr bool operator>=(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() >= b.wrapped(); }
+};
+template<typename T, typename Lockable>
+struct GC::router<__gc_optional<T, Lockable>>
+{
+	// if the optional type is trivial, so is this
+	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
+
+	template<typename F>
+	static void route(const __gc_optional<T, Lockable> &var, F func)
+	{
+		std::lock_guard lock(var.mutex);
+		GC::route(var.wrapped(), func);
+	}
+};
+
+template<typename T, typename Lockable>
+struct std::hash<__gc_optional<T, Lockable>>
+{
+	std::hash<std::optional<T>> hasher; // the hasher may be non-trivial, so store it
+	std::size_t operator()(const __gc_optional<T, Lockable> &var) const { return hasher(var.wrapped()); }
 };
 
 // ------------------------ //
@@ -8213,6 +8536,23 @@ struct GC::wrapper_traits<std::variant<Types...>>
 
 	template<typename _Lockable = GC::default_lockable_t>
 	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_variant<_Lockable, Types...>>;
+};
+
+template<typename T, typename Lockable>
+struct GC::wrapper_traits<__gc_optional<T, Lockable>>
+{
+	using unwrapped_type = std::optional<T>;
+
+	template<typename _Lockable = Lockable>
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_optional<T, _Lockable>>;
+};
+template<typename T>
+struct GC::wrapper_traits<std::optional<T>>
+{
+	using unwrapped_type = std::optional<T>;
+
+	template<typename _Lockable>
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_optional<T, _Lockable>>;
 };
 
 // ------------------ //
