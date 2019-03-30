@@ -31,11 +31,13 @@
 // if nonzero, displays info messages on cerr during GC::collect()
 #define DRAGAZO_GARBAGE_COLLECT_MSG 0
 
-// ---------- //
+// ------------- //
 
-// -- data -- //
+// -- globals -- //
 
-// ---------- //
+// ------------- //
+
+__gc_fake_lock_t __gc_fake_lock;
 
 std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
 

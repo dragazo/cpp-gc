@@ -121,6 +121,50 @@ class __gc_variant;
 template<typename T, typename Lockable>
 class __gc_optional;
 
+// -------------------------------- //
+
+// -- internal wrapper utilities -- //
+
+// -------------------------------- //
+
+// implements the same interface as Lockable, but does nothing - used for generic lockable logic - see below
+class __gc_fake_lock_t
+{
+	void lock() noexcept {}
+	void unlock() noexcept {}
+
+	bool try_lock() noexcept { return true; }
+};
+
+// since fake lock is trivial in every sense of the word, we use a common instance of it throughout
+extern __gc_fake_lock_t __gc_fake_lock;
+
+// allows uniform access to any wrapper's router synchronization mutex.
+// default behavior returns a reference to a fake lock, so the default returns a valid (no-op) lockable for any provided object.
+template<typename T>
+struct __gc_wrapper_internals_accessor
+{
+	static __gc_fake_lock_t &get_lockable(const volatile T&) noexcept { return __gc_fake_lock; }
+	
+	static T &get_object(T &obj) noexcept { return obj; }
+	static const T &get_object(const T &obj) noexcept { return obj; }
+	static volatile T &get_object(volatile T &obj) noexcept { return obj; }
+	static const volatile T &get_object(const volatile T &obj) noexcept { return obj; }
+};
+
+// gets the lockable for the given object - not for the feint of heart - (i suggest you not do this)
+template<typename T>
+decltype(auto) __gc_get_wrapper_lockable(const T &obj)
+{
+	return __gc_wrapper_internals_accessor<std::remove_cv_t<std::remove_reference_t<T>>>::get_lockable(obj);
+}
+// gets the raw container type from a wrapped object - not for the feint of heart - (i suggest you not do this)
+template<typename T>
+decltype(auto) __gc_get_wrapper_object(T &obj)
+{
+	return __gc_wrapper_internals_accessor<std::remove_cv_t<std::remove_reference_t<T>>>::get_object(obj);
+}
+
 // ------------------------ //
 
 // -- garbage collection -- //
@@ -775,8 +819,11 @@ public: // -- ptr -- //
 
 		void swap(atomic_ptr &other)
 		{
-			std::scoped_lock<std::mutex, std::mutex> locks(this->mutex, other.mutex);
-			value.swap(other.value);
+			if (this != &other)
+			{
+				std::scoped_lock locks(this->mutex, other.mutex);
+				value.swap(other.value);
+			}
 		}
 		friend void swap(atomic_ptr &a, atomic_ptr &b) { a.swap(b); }
 	};
@@ -2404,10 +2451,6 @@ struct GC::router<std::atomic<GC::ptr<T>>>
 	}
 };
 
-// ------------------------------------------------------------
-
-
-
 // -------------------- //
 
 // -- misc functions -- //
@@ -2440,6 +2483,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unique_ptr>;
+	friend struct __gc_wrapper_internals_accessor<__gc_unique_ptr>;
 
 private: // -- data accessors -- //
 
@@ -2504,8 +2548,11 @@ public: // -- asgn -- //
 
 	__gc_unique_ptr &operator=(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_unique_ptr &operator=(wrapped_t &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
@@ -2515,14 +2562,14 @@ public: // -- asgn -- //
 		return *this;
 	}
 
-	template<typename U, typename E, typename L>
+	template<typename U, typename E, typename L, std::enable_if_t<!std::is_same<__gc_unique_ptr, __gc_unique_ptr<U, E, L>>::value, int> = 0>
 	__gc_unique_ptr &operator=(__gc_unique_ptr<U, E, L> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::scoped_lock locks(this->mutex, other.mutex);
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
-	template<typename U, typename E>
+	template<typename U, typename E, std::enable_if_t<!std::is_same<wrapped_t, std::unique_ptr<U, E>>::value, int> = 0>
 	__gc_unique_ptr &operator=(std::unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(this->mutex);
@@ -2555,7 +2602,7 @@ public: // -- management -- //
 	void reset(U other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().reset(other); // std::unique_ptr doesn't know about cpp-gc stuff, so there's no way this can go wrong mutex-wise
+		wrapped().reset(other);
 	}
 
 	template<typename Z = T, std::enable_if_t<std::is_same<T, Z>::value && GC::is_unbound_array<T>::value, int> = 0>
@@ -2567,10 +2614,21 @@ public: // -- management -- //
 
 	void swap(__gc_unique_ptr &other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_unique_ptr &a, __gc_unique_ptr &b) { a.swap(b); }
+	friend void swap(__gc_unique_ptr &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_unique_ptr &b) { b.swap(a); }
 
 public: // -- obj access -- //
 
@@ -2599,6 +2657,11 @@ struct GC::router<__gc_unique_ptr<T, Deleter, Lockable>>
 		std::lock_guard lock(obj.mutex);
 		GC::route(obj.wrapped(), func);
 	}
+};
+template<typename T, typename Deleter, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_unique_ptr<T, Deleter, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_unique_ptr<T, Deleter, Lockable> &obj) noexcept { return obj.mutex; }
 };
 
 // -- __gc_unique_ptr cmp -- //
@@ -2660,6 +2723,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_vector>;
+	friend struct __gc_wrapper_internals_accessor<__gc_vector>;
 
 private: // -- data accessors -- //
 
@@ -2779,8 +2843,11 @@ public: // -- asgn -- //
 
 	__gc_vector &operator=(__gc_vector &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_vector &operator=(wrapped_t &&other)
@@ -2974,10 +3041,21 @@ public: // -- swap -- //
 
 	void swap(__gc_vector &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_vector &a, __gc_vector &b) { a.swap(b); }
+	friend void swap(__gc_vector &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_vector &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
@@ -3001,6 +3079,11 @@ struct GC::router<__gc_vector<T, Allocator, Lockable>>
 		GC::route(vec.wrapped(), func);
 	}
 };
+template<typename T, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_vector<T, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_vector<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename T, typename Allocator, typename Lockable>
 class __gc_deque
@@ -3014,6 +3097,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // the router synchronizer
 
 	friend struct GC::router<__gc_deque>;
+	friend struct __gc_wrapper_internals_accessor<__gc_deque>;
 
 private: // -- data accessors -- //
 
@@ -3133,8 +3217,11 @@ public: // -- asgn -- //
 
 	__gc_deque &operator=(__gc_deque &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_deque &operator=(wrapped_t &&other)
@@ -3349,10 +3436,21 @@ public: // -- swap -- //
 
 	void swap(__gc_deque &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_deque &a, __gc_deque &b) { a.swap(b); }
+	friend void swap(__gc_deque &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_deque &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
@@ -3376,6 +3474,11 @@ struct GC::router<__gc_deque<T, Allocator, Lockable>>
 		GC::route(vec.wrapped(), func);
 	}
 };
+template<typename T, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_deque<T, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_deque<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename T, typename Allocator, typename Lockable>
 class __gc_forward_list
@@ -3389,6 +3492,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_forward_list>;
+	friend struct __gc_wrapper_internals_accessor<__gc_forward_list>;
 
 private: // -- data accessors -- //
 
@@ -3505,8 +3609,11 @@ public: // -- asgn -- //
 
 	__gc_forward_list &operator=(__gc_forward_list &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_forward_list &operator=(wrapped_t &&other)
@@ -3670,10 +3777,21 @@ public: // -- swap -- //
 
 	void swap(__gc_forward_list &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_forward_list &a, __gc_forward_list &b) { a.swap(b); }
+	friend void swap(__gc_forward_list &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_forward_list &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
@@ -3688,26 +3806,38 @@ public: // -- merge -- //
 
 	void merge(__gc_forward_list &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(other.wrapped());
+		}
 	}
 	void merge(__gc_forward_list &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(std::move(other.wrapped()));
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(std::move(other.wrapped()));
+		}
 	}
 
 	template<typename Compare>
 	void merge(__gc_forward_list &other, Compare comp)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(other.wrapped(), comp);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(other.wrapped(), comp);
+		}
 	}
 	template<typename Compare>
 	void merge(__gc_forward_list &&other, Compare comp)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(std::move(other.wrapped()), comp);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(std::move(other.wrapped()), comp);
+		}
 	}
 
 	// ------------------------------------------------------------
@@ -3740,35 +3870,53 @@ public: // -- splice -- //
 
 	void splice_after(const_iterator pos, __gc_forward_list &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped());
+		}
 	}
 	void splice_after(const_iterator pos, __gc_forward_list &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, std::move(other.wrapped()));
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()));
+		}
 	}
 
 	void splice_after(const_iterator pos, __gc_forward_list &other, const_iterator it)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, other.wrapped(), it);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped(), it);
+		}
 	}
 	void splice_after(const_iterator pos, __gc_forward_list &&other, const_iterator it)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, std::move(other.wrapped()), it);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()), it);
+		}
 	}
 
 	void splice_after(const_iterator pos, __gc_forward_list &other, const_iterator first, const_iterator last)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, other.wrapped(), first, last);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped(), first, last);
+		}
 	}
 	void splice_after(const_iterator pos, __gc_forward_list &&other, const_iterator first, const_iterator last)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		}
 	}
 
 	// ------------------------------------------------------------
@@ -3866,6 +4014,11 @@ struct GC::router<__gc_forward_list<T, Allocator, Lockable>>
 		GC::route(list.wrapped(), func);
 	}
 };
+template<typename T, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_forward_list<T, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_forward_list<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename T, typename Allocator, typename Lockable>
 class __gc_list
@@ -3879,6 +4032,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_list>;
+	friend struct __gc_wrapper_internals_accessor<__gc_list>;
 
 private: // -- data accessors -- //
 
@@ -3998,8 +4152,11 @@ public: // -- asgn -- //
 
 	__gc_list &operator=(__gc_list &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_list &operator=(wrapped_t &&other)
@@ -4195,10 +4352,21 @@ public: // -- swap -- //
 
 	void swap(__gc_list &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_list &a, __gc_list &b) { a.swap(b); }
+	friend void swap(__gc_list &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_list &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
@@ -4213,26 +4381,38 @@ public: // -- merge -- //
 
 	void merge(__gc_list &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(other.wrapped());
+		}
 	}
 	void merge(__gc_list &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(std::move(other.wrapped()));
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(std::move(other.wrapped()));
+		}
 	}
 
 	template<typename Compare>
 	void merge(__gc_list &other, Compare comp)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(other.wrapped(), comp);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(other.wrapped(), comp);
+		}
 	}
 	template<typename Compare>
 	void merge(__gc_list &&other, Compare comp)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().merge(std::move(other.wrapped()), comp);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().merge(std::move(other.wrapped()), comp);
+		}
 	}
 
 	// ----------------------------------------------------------
@@ -4265,35 +4445,53 @@ public: // -- splice -- //
 
 	void splice_after(const_iterator pos, __gc_list &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped());
+		}
 	}
 	void splice_after(const_iterator pos, __gc_list &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, std::move(other.wrapped()));
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()));
+		}
 	}
 
 	void splice_after(const_iterator pos, __gc_list &other, const_iterator it)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, other.wrapped(), it);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped(), it);
+		}
 	}
 	void splice_after(const_iterator pos, __gc_list &&other, const_iterator it)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, std::move(other.wrapped()), it);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()), it);
+		}
 	}
 
 	void splice_after(const_iterator pos, __gc_list &other, const_iterator first, const_iterator last)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, other.wrapped(), first, last);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, other.wrapped(), first, last);
+		}
 	}
 	void splice_after(const_iterator pos, __gc_list &&other, const_iterator first, const_iterator last)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().splice_after(pos, std::move(other.wrapped()), first, last);
+		}
 	}
 
 	// ----------------------------------------------------------
@@ -4391,6 +4589,11 @@ struct GC::router<__gc_list<T, Allocator, Lockable>>
 		GC::route(list.wrapped(), func);
 	}
 };
+template<typename T, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_list<T, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_list<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
 class __gc_set
@@ -4404,6 +4607,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_set>;
+	friend struct __gc_wrapper_internals_accessor<__gc_set>;
 
 private: // -- data accessors -- //
 
@@ -4534,8 +4738,11 @@ public: // -- asgn -- //
 
 	__gc_set &operator=(__gc_set &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_set &operator=(wrapped_t &&other)
@@ -4669,10 +4876,21 @@ public: // -- swap -- //
 
 	void swap(__gc_set &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_set &a, __gc_set &b) { a.swap(b); }
+	friend void swap(__gc_set &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_set &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -4758,6 +4976,11 @@ struct GC::router<__gc_set<Key, Compare, Allocator, Lockable>>
 		GC::route(set.wrapped(), func);
 	}
 };
+template<typename Key, typename Compare, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_set<Key, Compare, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_set<Key, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
 class __gc_multiset
@@ -4771,6 +4994,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_multiset>;
+	friend struct __gc_wrapper_internals_accessor<__gc_multiset>;
 
 private: // -- data accessors -- //
 
@@ -4900,8 +5124,11 @@ public: // -- asgn -- //
 
 	__gc_multiset &operator=(__gc_multiset &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_multiset &operator=(wrapped_t &&other)
@@ -5035,10 +5262,21 @@ public: // -- swap -- //
 
 	void swap(__gc_multiset &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_multiset &a, __gc_multiset &b) { a.swap(b); }
+	friend void swap(__gc_multiset &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_multiset &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -5124,6 +5362,11 @@ struct GC::router<__gc_multiset<Key, Compare, Allocator, Lockable>>
 		GC::route(set.wrapped(), func);
 	}
 };
+template<typename Key, typename Compare, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_multiset<Key, Compare, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_multiset<Key, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
 class __gc_map
@@ -5137,6 +5380,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_map>;
+	friend struct __gc_wrapper_internals_accessor<__gc_map>;
 
 private: // -- data accessors -- //
 
@@ -5270,8 +5514,11 @@ public: // -- asgn -- //
 
 	__gc_map &operator=(__gc_map &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_map &operator=(wrapped_t &&other)
@@ -5487,10 +5734,21 @@ public: // -- swap -- //
 
 	void swap(__gc_map &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_map &a, __gc_map &b) { a.swap(b); }
+	friend void swap(__gc_map &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_map &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -5576,6 +5834,11 @@ struct GC::router<__gc_map<Key, T, Compare, Allocator, Lockable>>
 		GC::route(map.wrapped(), func);
 	}
 };
+template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_map<Key, T, Compare, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_map<Key, T, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
 class __gc_multimap
@@ -5589,6 +5852,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_multimap>;
+	friend struct __gc_wrapper_internals_accessor<__gc_multimap>;
 
 private: // -- data accessors -- //
 
@@ -5721,8 +5985,11 @@ public: // -- asgn -- //
 
 	__gc_multimap &operator=(__gc_multimap &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_multimap &operator=(wrapped_t &&other)
@@ -5870,10 +6137,21 @@ public: // -- swap -- //
 
 	void swap(__gc_multimap &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_multimap &a, __gc_multimap &b) { a.swap(b); }
+	friend void swap(__gc_multimap &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_multimap &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -5959,6 +6237,11 @@ struct GC::router<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
 		GC::route(map.wrapped(), func);
 	}
 };
+template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_multimap<Key, T, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_set
@@ -5972,6 +6255,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_set>;
+	friend struct __gc_wrapper_internals_accessor<__gc_unordered_set>;
 
 private: // -- data accessors -- //
 
@@ -6133,8 +6417,11 @@ public: // -- asgn -- //
 
 	__gc_unordered_set &operator=(__gc_unordered_set &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_unordered_set &operator=(wrapped_t &&other)
@@ -6260,10 +6547,21 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_set &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_unordered_set &a, __gc_unordered_set &b) { a.swap(b); }
+	friend void swap(__gc_unordered_set &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_unordered_set &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -6368,6 +6666,11 @@ struct GC::router<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
 		GC::route(set.wrapped(), func);
 	}
 };
+template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_multiset
@@ -6381,6 +6684,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_multiset>;
+	friend struct __gc_wrapper_internals_accessor<__gc_unordered_multiset>;
 
 private: // -- data accessors -- //
 
@@ -6541,8 +6845,11 @@ public: // -- asgn -- //
 
 	__gc_unordered_multiset &operator=(__gc_unordered_multiset &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_unordered_multiset &operator=(wrapped_t &&other)
@@ -6668,10 +6975,21 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_multiset &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_unordered_multiset &a, __gc_unordered_multiset &b) { a.swap(b); }
+	friend void swap(__gc_unordered_multiset &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_unordered_multiset &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -6776,6 +7094,11 @@ struct GC::router<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockab
 		GC::route(set.wrapped(), func);
 	}
 };
+template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_map
@@ -6789,6 +7112,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_map>;
+	friend struct __gc_wrapper_internals_accessor<__gc_unordered_map>;
 
 private: // -- data accessors -- //
 
@@ -6952,8 +7276,11 @@ public: // -- assign -- //
 
 	__gc_unordered_map &operator=(__gc_unordered_map &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_unordered_map &operator=(wrapped_t &&other)
@@ -7146,10 +7473,21 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_map &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_unordered_map &a, __gc_unordered_map &b) { a.swap(b); }
+	friend void swap(__gc_unordered_map &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_unordered_map &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -7270,6 +7608,11 @@ struct GC::router<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable
 		GC::route(map.wrapped(), func);
 	}
 };
+template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_multimap
@@ -7283,6 +7626,7 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_multimap>;
+	friend struct __gc_wrapper_internals_accessor<__gc_unordered_multimap>;
 
 private: // -- data accessors -- //
 
@@ -7445,8 +7789,11 @@ public: // -- assign -- //
 
 	__gc_unordered_multimap &operator=(__gc_unordered_multimap &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_unordered_multimap &operator=(wrapped_t &&other)
@@ -7587,10 +7934,21 @@ public: // -- swap -- //
 
 	void swap(__gc_unordered_multimap &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
+	void swap(wrapped_t &other)
+	{
+		std::lock_guard lock(this->mutex);
+		wrapped().swap(other);
+	}
+
 	friend void swap(__gc_unordered_multimap &a, __gc_unordered_multimap &b) { a.swap(b); }
+	friend void swap(__gc_unordered_multimap &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, __gc_unordered_multimap &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -7695,6 +8053,11 @@ struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Loc
 		GC::route(map.wrapped(), func);
 	}
 };
+template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
+};
 
 // -------------------------------------------------------------------------
 
@@ -7725,6 +8088,8 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_variant>;
+	friend struct __gc_wrapper_internals_accessor<__gc_variant>;
+	
 	friend struct std::hash<__gc_variant>;
 
 private: // -- data accessors -- //
@@ -7808,8 +8173,11 @@ public: // -- assign -- //
 
 	__gc_variant &operator=(__gc_variant &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	__gc_variant &operator=(wrapped_t &&other)
@@ -7868,8 +8236,11 @@ public: // -- modifiers -- //
 
 	void swap(__gc_variant &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
 	void swap(wrapped_t &other)
 	{
@@ -7941,6 +8312,11 @@ struct GC::router<__gc_variant<Lockable, Types...>>
 		GC::route(var.wrapped(), func);
 	}
 };
+template<typename Lockable, typename ...Types>
+struct __gc_wrapper_internals_accessor<__gc_variant<Lockable, Types...>>
+{
+	static Lockable &get_lockable(const __gc_variant<Lockable, Types...> &obj) noexcept { return obj.mutex; }
+};
 
 namespace std
 {
@@ -8000,6 +8376,8 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_optional>;
+	friend struct __gc_wrapper_internals_accessor<__gc_optional>;
+
 	friend struct std::hash<__gc_optional>;
 
 private: // -- data accessors -- //
@@ -8136,8 +8514,11 @@ public: // -- assign -- //
 
 	constexpr __gc_optional &operator=(__gc_optional &&other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped() = std::move(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped() = std::move(other.wrapped());
+		}
 		return *this;
 	}
 	constexpr __gc_optional &operator=(wrapped_t &&other)
@@ -8155,14 +8536,14 @@ public: // -- assign -- //
 		return *this;
 	}
 
-	template<typename U, typename ULockable>
+	template<typename U, typename ULockable, std::enable_if_t<!std::is_same<__gc_optional, __gc_optional<U, ULockable>>::value, int> = 0>
 	__gc_optional &operator=(const __gc_optional<U, ULockable> &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	template<typename U>
+	template<typename U, std::enable_if_t<!std::is_same<wrapped_t, std::optional<U>>::value, int> = 0>
 	__gc_optional &operator=(const std::optional<U> &other)
 	{
 		std::lock_guard lock(this->mutex);
@@ -8170,14 +8551,14 @@ public: // -- assign -- //
 		return *this;
 	}
 
-	template<typename U, typename ULockable>
+	template<typename U, typename ULockable, std::enable_if_t<!std::is_same<__gc_optional, __gc_optional<U, ULockable>>::value, int> = 0>
 	__gc_optional &operator=(__gc_optional<U, ULockable> &&other)
 	{
 		std::scoped_lock locks(this->mutex, other.mutex);
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
-	template<typename U>
+	template<typename U, std::enable_if_t<!std::is_same<wrapped_t, std::optional<U>>::value, int> = 0>
 	__gc_optional &operator=(std::optional<U> &&other)
 	{
 		std::lock_guard lock(this->mutex);
@@ -8232,8 +8613,11 @@ public: // -- modifiers -- //
 
 	void swap(__gc_optional &other)
 	{
-		std::scoped_lock locks(this->mutex, other.mutex);
-		wrapped().swap(other.wrapped());
+		if (this != &other)
+		{
+			std::scoped_lock locks(this->mutex, other.mutex);
+			wrapped().swap(other.wrapped());
+		}
 	}
 	void swap(wrapped_t &other)
 	{
@@ -8285,6 +8669,11 @@ struct GC::router<__gc_optional<T, Lockable>>
 		std::lock_guard lock(var.mutex);
 		GC::route(var.wrapped(), func);
 	}
+};
+template<typename T, typename Lockable>
+struct __gc_wrapper_internals_accessor<__gc_optional<T, Lockable>>
+{
+	static Lockable &get_lockable(const __gc_optional<T, Lockable> &obj) noexcept { return obj.mutex; }
 };
 
 template<typename T, typename Lockable>
