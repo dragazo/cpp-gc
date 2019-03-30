@@ -121,50 +121,6 @@ class __gc_variant;
 template<typename T, typename Lockable>
 class __gc_optional;
 
-// -------------------------------- //
-
-// -- internal wrapper utilities -- //
-
-// -------------------------------- //
-
-// implements the same interface as Lockable, but does nothing - used for generic lockable logic - see below
-class __gc_fake_lock_t
-{
-	void lock() noexcept {}
-	void unlock() noexcept {}
-
-	bool try_lock() noexcept { return true; }
-};
-
-// since fake lock is trivial in every sense of the word, we use a common instance of it throughout
-extern __gc_fake_lock_t __gc_fake_lock;
-
-// allows uniform access to any wrapper's router synchronization mutex.
-// default behavior returns a reference to a fake lock, so the default returns a valid (no-op) lockable for any provided object.
-template<typename T>
-struct __gc_wrapper_internals_accessor
-{
-	static __gc_fake_lock_t &get_lockable(const volatile T&) noexcept { return __gc_fake_lock; }
-	
-	static T &get_object(T &obj) noexcept { return obj; }
-	static const T &get_object(const T &obj) noexcept { return obj; }
-	static volatile T &get_object(volatile T &obj) noexcept { return obj; }
-	static const volatile T &get_object(const volatile T &obj) noexcept { return obj; }
-};
-
-// gets the lockable for the given object - not for the feint of heart - (i suggest you not do this)
-template<typename T>
-decltype(auto) __gc_get_wrapper_lockable(const T &obj)
-{
-	return __gc_wrapper_internals_accessor<std::remove_cv_t<std::remove_reference_t<T>>>::get_lockable(obj);
-}
-// gets the raw container type from a wrapped object - not for the feint of heart - (i suggest you not do this)
-template<typename T>
-decltype(auto) __gc_get_wrapper_object(T &obj)
-{
-	return __gc_wrapper_internals_accessor<std::remove_cv_t<std::remove_reference_t<T>>>::get_object(obj);
-}
-
 // ------------------------ //
 
 // -- garbage collection -- //
@@ -688,12 +644,15 @@ public: // -- ptr -- //
 	public: // -- obj access -- //
 
 		// gets a pointer to the managed object. if this ptr does not point at a managed object, returns null.
+		// note that the returned pointer may become invalid if this ptr is reassigned or destroyed.
 		element_type *get() const noexcept { return obj; }
 
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && !std::is_same<J, void>::value, int> = 0>
-		auto &operator*() const { return *get(); }
+		auto &operator*() const& { return *get(); }
+		void operator*() && = delete; // for safety reasons, we don't allow dereferencing an rvalue ptr
 
-		element_type *operator->() const noexcept { return get(); }
+		element_type *operator->() const& noexcept { return get(); }
+		void operator->() && = delete; // for safety reasons, we don't allow dereferencing an rvalue ptr
 
 		// returns true iff this ptr points to a managed object (non-null)
 		explicit operator bool() const noexcept { return get() != nullptr; }
@@ -703,13 +662,15 @@ public: // -- ptr -- //
 		// accesses an item in an array. only defined if T is an array type.
 		// undefined behavior if index is out of bounds.
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value && !std::is_same<J, void>::value, int> = 0>
-		auto &operator[](std::ptrdiff_t index) const { return get()[index]; }
+		auto &operator[](std::ptrdiff_t index) const& { return get()[index]; }
+		void operator[](std::ptrdiff_t) && = delete; // for safety reasons, we don't allow dereferencing an rvalue ptr
 
 		// returns a ptr to the element with the specified index (no bounds checking).
 		// said ptr aliases the entire array - the array will not be deleted while the alias is still reachable.
 		// if this pointer does not refer to an object, the returned ptr is null and does not alias anything.
 		// exactly equivalent to GC::alias(p.get() + index, p).
 		template<typename J = T, std::enable_if_t<std::is_same<T, J>::value && GC::is_unbound_array<J>::value, int> = 0>
+		[[nodiscard]]
 		ptr<element_type> alias(std::ptrdiff_t index) const { return GC::alias(get() + index, *this); }
 
 	public: // -- comparison -- //
@@ -831,12 +792,14 @@ public: // -- ptr -- //
 public: // -- ptr casting -- //
 
 	template<typename To, typename From, std::enable_if_t<std::is_convertible<From, To>::value || std::is_same<std::remove_cv_t<To>, std::remove_cv_t<From>>::value, int> = 0>
+	[[nodiscard]]
 	static ptr<To> staticCast(const GC::ptr<From> &p)
 	{
 		return ptr<To>(static_cast<typename ptr<To>::element_type*>(p.obj), p.handle);
 	}
 
 	template<typename To, typename From, std::enable_if_t<std::is_polymorphic<From>::value && !std::is_array<To>::value, int> = 0>
+	[[nodiscard]]
 	static ptr<To> dynamicCast(const GC::ptr<From> &p)
 	{
 		auto obj = dynamic_cast<typename ptr<To>::element_type*>(p.obj);
@@ -844,12 +807,14 @@ public: // -- ptr casting -- //
 	}
 
 	template<typename To, typename From, std::enable_if_t<std::is_same<std::remove_cv_t<To>, std::remove_cv_t<From>>::value, int> = 0>
+	[[nodiscard]]
 	static ptr<To> constCast(const GC::ptr<From> &p)
 	{
 		return ptr<To>(const_cast<typename ptr<To>::element_type*>(p.obj), p.handle);
 	}
 
 	template<typename To, typename From>
+	[[nodiscard]]
 	static ptr<To> reinterpretCast(const GC::ptr<From> &p)
 	{
 		return ptr<To>(reinterpret_cast<typename ptr<To>::element_type*>(p.obj), p.handle);
@@ -1277,6 +1242,7 @@ public: // -- ptr allocation -- //
 	// creates a new dynamic instance of T that is bound to a ptr.
 	// throws any exception resulting from T's constructor but does not leak resources if this occurs.
 	template<typename T, typename ...Args, std::enable_if_t<!std::is_array<T>::value, int> = 0>
+	[[nodiscard]]
 	static ptr<T> make(Args &&...args)
 	{
 		// -- normalize T -- //
@@ -1339,6 +1305,7 @@ public: // -- ptr allocation -- //
 	// creates a new dynamic array of T that is bound to a ptr.
 	// throws any exception resulting from any T object's construction, but does not leak resources if this occurs.
 	template<typename T, std::enable_if_t<GC::is_unbound_array<T>::value, int> = 0>
+	[[nodiscard]]
 	static ptr<T> make(std::size_t count)
 	{
 		// -- normalize T -- //
@@ -1431,6 +1398,7 @@ public: // -- ptr allocation -- //
 	// creates a new dynamic instance of T that is bound to a ptr.
 	// throws any exception resulting from any T's constructor but does not leak resources if this occurs.
 	template<typename T, std::enable_if_t<GC::is_bound_array<T>::value, int> = 0>
+	[[nodiscard]]
 	static ptr<T> make()
 	{
 		// create it with the unbound array form and reinterpret it to the bound array form
@@ -1444,6 +1412,7 @@ public: // -- ptr allocation -- //
 	// it is UNDEFINED BEHAVIOR for obj to not have a true object type of T - e.g. obj must not be pointer to base.
 	// if EXTRA_UND_CHECKS is enabled and T is a polymorphic type, throws std::invalid_argument if this is violated.
 	template<typename T, typename Deleter = std::default_delete<T>>
+	[[nodiscard]]
 	static ptr<T> adopt(T *obj)
 	{
 		// -- verification -- //
@@ -1517,6 +1486,7 @@ public: // -- ptr allocation -- //
 	// if obj is null, does nothing and returns a null ptr object (which does not refer to an object).
 	// otherwise obj must point to a valid array of exactly size count (no more, no less).
 	template<typename T, typename Deleter = std::default_delete<T[]>>
+	[[nodiscard]]
 	static ptr<T[]> adopt(T obj[], std::size_t count)
 	{
 		// -- verification -- //
@@ -1575,6 +1545,7 @@ public: // -- ptr allocation -- //
 	// while allowed, it is ill-advised to alias a part of src's pointed-to object that could be deleted (e.g. element of std::vector).
 	// if obj or src is null, creates a null ptr that does not alias an object.
 	template<typename T, typename U>
+	[[nodiscard]]
 	static ptr<T> alias(T *obj, const ptr<U> &src)
 	{
 		return obj && src ? ptr<T>(obj, src.handle) : ptr<T>();
@@ -2159,6 +2130,7 @@ private: // -- gc disjoint module -- //
 		// performs a collection pass for all stored dynamic disjunctions.
 		// additionally performs culling logic for dangling disjunction handles.
 		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
+		// this is because the internals of this function will repoint the local disjunction handle all over the place and leave it severed.
 		// if collect is true, performs a collection on each stored disjunction, otherwise only culls dangling handles.
 		void BACKGROUND_COLLECTOR_ONLY___collect(bool collect);
 	};
@@ -2358,6 +2330,7 @@ private: // -- misc -- //
 	// allocating zero bytes returns null.
 	// on failure, returns null.
 	// must be deallocated via aligned_free().
+	[[nodiscard]]
 	static void *aligned_malloc(std::size_t size, std::size_t align);
 	// deallocates a block of memory allocated by aligned_malloc().
 	// if <ptr> is null, does nothing.
@@ -2483,13 +2456,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unique_ptr>;
-	friend struct __gc_wrapper_internals_accessor<__gc_unique_ptr>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- types -- //
 
@@ -2515,7 +2493,11 @@ public: // -- ctor / dtor -- //
 		new (buffer) wrapped_t(p);
 	}
 
-	// !! ADD DELETER OBJ CTORS (3-4) https://en.cppreference.com/w/cpp/memory/__gc_unique_ptr/__gc_unique_ptr
+	template<typename D>
+	__gc_unique_ptr(pointer p, D &&d)
+	{
+		new (buffer) wrapped_t(p, std::forward<D>(d)); // covers both deleter constructor forms
+	}
 
 	__gc_unique_ptr(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
@@ -2658,11 +2640,6 @@ struct GC::router<__gc_unique_ptr<T, Deleter, Lockable>>
 		GC::route(obj.wrapped(), func);
 	}
 };
-template<typename T, typename Deleter, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_unique_ptr<T, Deleter, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_unique_ptr<T, Deleter, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 // -- __gc_unique_ptr cmp -- //
 
@@ -2723,13 +2700,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_vector>;
-	friend struct __gc_wrapper_internals_accessor<__gc_vector>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -3079,11 +3061,6 @@ struct GC::router<__gc_vector<T, Allocator, Lockable>>
 		GC::route(vec.wrapped(), func);
 	}
 };
-template<typename T, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_vector<T, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_vector<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename T, typename Allocator, typename Lockable>
 class __gc_deque
@@ -3097,13 +3074,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // the router synchronizer
 
 	friend struct GC::router<__gc_deque>;
-	friend struct __gc_wrapper_internals_accessor<__gc_deque>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -3474,11 +3456,6 @@ struct GC::router<__gc_deque<T, Allocator, Lockable>>
 		GC::route(vec.wrapped(), func);
 	}
 };
-template<typename T, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_deque<T, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_deque<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename T, typename Allocator, typename Lockable>
 class __gc_forward_list
@@ -3492,13 +3469,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_forward_list>;
-	friend struct __gc_wrapper_internals_accessor<__gc_forward_list>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -4014,11 +3996,6 @@ struct GC::router<__gc_forward_list<T, Allocator, Lockable>>
 		GC::route(list.wrapped(), func);
 	}
 };
-template<typename T, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_forward_list<T, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_forward_list<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename T, typename Allocator, typename Lockable>
 class __gc_list
@@ -4032,13 +4009,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_list>;
-	friend struct __gc_wrapper_internals_accessor<__gc_list>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -4589,11 +4571,6 @@ struct GC::router<__gc_list<T, Allocator, Lockable>>
 		GC::route(list.wrapped(), func);
 	}
 };
-template<typename T, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_list<T, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_list<T, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
 class __gc_set
@@ -4607,13 +4584,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_set>;
-	friend struct __gc_wrapper_internals_accessor<__gc_set>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -4976,11 +4958,6 @@ struct GC::router<__gc_set<Key, Compare, Allocator, Lockable>>
 		GC::route(set.wrapped(), func);
 	}
 };
-template<typename Key, typename Compare, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_set<Key, Compare, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_set<Key, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
 class __gc_multiset
@@ -4994,13 +4971,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_multiset>;
-	friend struct __gc_wrapper_internals_accessor<__gc_multiset>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -5362,11 +5344,6 @@ struct GC::router<__gc_multiset<Key, Compare, Allocator, Lockable>>
 		GC::route(set.wrapped(), func);
 	}
 };
-template<typename Key, typename Compare, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_multiset<Key, Compare, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_multiset<Key, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
 class __gc_map
@@ -5380,13 +5357,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_map>;
-	friend struct __gc_wrapper_internals_accessor<__gc_map>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -5834,11 +5816,6 @@ struct GC::router<__gc_map<Key, T, Compare, Allocator, Lockable>>
 		GC::route(map.wrapped(), func);
 	}
 };
-template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_map<Key, T, Compare, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_map<Key, T, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
 class __gc_multimap
@@ -5852,13 +5829,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_multimap>;
-	friend struct __gc_wrapper_internals_accessor<__gc_multimap>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -6237,11 +6219,6 @@ struct GC::router<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
 		GC::route(map.wrapped(), func);
 	}
 };
-template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_multimap<Key, T, Compare, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_set
@@ -6255,13 +6232,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_set>;
-	friend struct __gc_wrapper_internals_accessor<__gc_unordered_set>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -6666,11 +6648,6 @@ struct GC::router<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
 		GC::route(set.wrapped(), func);
 	}
 };
-template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_multiset
@@ -6684,13 +6661,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_multiset>;
-	friend struct __gc_wrapper_internals_accessor<__gc_unordered_multiset>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -7094,11 +7076,6 @@ struct GC::router<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockab
 		GC::route(set.wrapped(), func);
 	}
 };
-template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_map
@@ -7112,13 +7089,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_map>;
-	friend struct __gc_wrapper_internals_accessor<__gc_unordered_map>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -7608,11 +7590,6 @@ struct GC::router<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable
 		GC::route(map.wrapped(), func);
 	}
 };
-template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
 class __gc_unordered_multimap
@@ -7626,13 +7603,18 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_unordered_multimap>;
-	friend struct __gc_wrapper_internals_accessor<__gc_unordered_multimap>;
 
 private: // -- data accessors -- //
 
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- typedefs -- //
 
@@ -8053,11 +8035,6 @@ struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Loc
 		GC::route(map.wrapped(), func);
 	}
 };
-template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable> &obj) noexcept { return obj.mutex; }
-};
 
 // -------------------------------------------------------------------------
 
@@ -8088,7 +8065,6 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_variant>;
-	friend struct __gc_wrapper_internals_accessor<__gc_variant>;
 	
 	friend struct std::hash<__gc_variant>;
 
@@ -8097,6 +8073,12 @@ private: // -- data accessors -- //
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- ctor / dtor -- //
 	
@@ -8194,12 +8176,6 @@ public: // -- assign -- //
 		wrapped() = std::forward<T>(t);
 		return *this;
 	}
-
-public: // -- std conversion -- //
-
-	// gets the std::variant wrapped object
-	operator const wrapped_t&() const& { return wrapped(); }
-	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- observers -- //
 
@@ -8312,11 +8288,6 @@ struct GC::router<__gc_variant<Lockable, Types...>>
 		GC::route(var.wrapped(), func);
 	}
 };
-template<typename Lockable, typename ...Types>
-struct __gc_wrapper_internals_accessor<__gc_variant<Lockable, Types...>>
-{
-	static Lockable &get_lockable(const __gc_variant<Lockable, Types...> &obj) noexcept { return obj.mutex; }
-};
 
 namespace std
 {
@@ -8376,7 +8347,6 @@ private: // -- data -- //
 	mutable Lockable mutex; // router synchronizer
 
 	friend struct GC::router<__gc_optional>;
-	friend struct __gc_wrapper_internals_accessor<__gc_optional>;
 
 	friend struct std::hash<__gc_optional>;
 
@@ -8385,6 +8355,12 @@ private: // -- data accessors -- //
 	// gets the wrapped object from the buffer by reference - und if the buffered object has not yet been constructed
 	wrapped_t &wrapped() noexcept { return *reinterpret_cast<wrapped_t*>(buffer); }
 	const wrapped_t &wrapped() const noexcept { return *reinterpret_cast<const wrapped_t*>(buffer); }
+
+public: // -- wrapped obj access -- //
+
+	// gets the std::variant wrapped object
+	operator const wrapped_t&() const& { return wrapped(); }
+	operator wrapped_t() && { return std::move(wrapped()); }
 
 public: // -- types -- //
 
@@ -8669,11 +8645,6 @@ struct GC::router<__gc_optional<T, Lockable>>
 		std::lock_guard lock(var.mutex);
 		GC::route(var.wrapped(), func);
 	}
-};
-template<typename T, typename Lockable>
-struct __gc_wrapper_internals_accessor<__gc_optional<T, Lockable>>
-{
-	static Lockable &get_lockable(const __gc_optional<T, Lockable> &obj) noexcept { return obj.mutex; }
 };
 
 template<typename T, typename Lockable>

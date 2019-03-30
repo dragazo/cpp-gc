@@ -660,6 +660,7 @@ int main() try
 	// they're merely to make sure that, given no interference, the desired behavior is taking effect.
 
 	GC::strategy(GC::strategies::manual);
+	GC::sleep_time(std::chrono::milliseconds(1));
 
 	// make sure that ref count decrements to zero result in the object being deleted.
 	// additionally, make sure that if a collection is happening in another thread the ref count guarantee is satisfied.
@@ -687,7 +688,6 @@ int main() try
 	// -- all other tests -- //
 
 	GC::strategy(GC::strategies::timed);
-	GC::sleep_time(std::chrono::milliseconds(0));
 
 	GC::thread(GC::new_disjunction, [] {
 		GC::ptr<router_allocator> p_router_allocator = GC::make<router_allocator>();
@@ -1038,19 +1038,21 @@ int main() try
 
 	#if DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS
 	{
+		GC::ptr<void> sink; // sink location to avoid invoking nodiscard
+
 		derived *d = new derived;
 		base1 *b1 = new base1;
 		base2 *b2 = new base2;
 
-		assert_nothrow(GC::adopt(d));
-		assert_nothrow(GC::adopt(b1));
-		assert_nothrow(GC::adopt(b2));
+		assert_nothrow(sink = GC::adopt(d));
+		assert_nothrow(sink = GC::adopt(b1));
+		assert_nothrow(sink = GC::adopt(b2));
 
 		base1 *d_b1 = new derived;
 		base2 *d_b2 = new derived;
 
-		assert_throws(GC::adopt(d_b1), std::invalid_argument);
-		assert_throws(GC::adopt(d_b2), std::invalid_argument);
+		assert_throws(sink = GC::adopt(d_b1), std::invalid_argument);
+		assert_throws(sink = GC::adopt(d_b2), std::invalid_argument);
 	}
 	#endif
 
@@ -1095,53 +1097,58 @@ int main() try
 	}
 	std::cerr << "----------------- end ----------------\n\n";
 
-	static_assert(std::is_same<int(*)[6], decltype(std::declval<GC::ptr<int[6]>>().get())>::value, "ptr type error");
-	static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[6][8]>>().get())>::value, "ptr type error");
-	static_assert(std::is_same<int(*)[8], decltype(std::declval<GC::ptr<int[][8]>>().get())>::value, "ptr type error");
-	static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[][6][8]>>().get())>::value, "ptr type error");
+	{ // -- array-form GC::ptr tests -- //
 
+		static_assert(std::is_same<int(*)[6], decltype(std::declval<GC::ptr<int[6]>>().get())>::value, "array-form ptr type error");
+		static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[6][8]>>().get())>::value, "array-form ptr type error");
+		static_assert(std::is_same<int(*)[8], decltype(std::declval<GC::ptr<int[][8]>>().get())>::value, "array-form ptr type error");
+		static_assert(std::is_same<int(*)[6][8], decltype(std::declval<GC::ptr<int[][6][8]>>().get())>::value, "array-form ptr type error");
 
-	GC::ptr<int[6]> arr_test_0 = GC::make<int[6]>();
-	GC::ptr<int[5][6]> arr_test_1 = GC::make<int[5][6]>();
-	GC::ptr<int[][6]> arr_test_2 = GC::make<int[][6]>(12);
-	GC::ptr<int[][5][6]> arr_test_3 = GC::make<int[][5][6]>(14);
-	GC::ptr<int[]> arr_test_4 = GC::make<int[]>(16);
+		GC::ptr<int[6]> arr_test_0 = GC::make<int[6]>();
+		GC::ptr<int[5][6]> arr_test_1 = GC::make<int[5][6]>();
+		GC::ptr<int[][6]> arr_test_2 = GC::make<int[][6]>(12);
+		GC::ptr<int[][5][6]> arr_test_3 = GC::make<int[][5][6]>(14);
+		GC::ptr<int[]> arr_test_4 = GC::make<int[]>(16);
 
-	GC::ptr<virtual_type> arr_test_5;
+		static_assert(std::is_same<decltype(arr_test_0.get()), int(*)[6]>::value, "array-form ptr error");
+		static_assert(std::is_same<decltype(arr_test_1.get()), int(*)[5][6]>::value, "array-form ptr error");
+		static_assert(std::is_same<decltype(arr_test_2.get()), int(*)[6]>::value, "array-form ptr error");
+		static_assert(std::is_same<decltype(arr_test_3.get()), int(*)[5][6]>::value, "array-form ptr error");
+		static_assert(std::is_same<decltype(arr_test_4.get()), int(*)>::value, "array-form ptr error");
 
-	GC::ptr<int> arr_sub_0_0 = GC::alias(*arr_test_0 + 4, arr_test_0);
+		GC::ptr<void> sink;
+		GC::ptr<const void> csink;
+		GC::ptr<volatile void> vsink;
+		GC::ptr<const volatile void> cvsink;
 
-	assert(arr_sub_0_0 != nullptr);
+		GC::ptr<virtual_type> arr_test_5;
 
-	GC::ptr<int[6]> arr_sub_1_0 = GC::alias(*arr_test_1 + 2, arr_test_0);
-	GC::ptr<int[6]> arr_sub_1_1 = GC::alias(&(*arr_test_1)[2], arr_test_0);
+		GC::ptr<int> arr_sub_0_0 = GC::alias(*arr_test_0 + 4, arr_test_0);
 
-	assert(arr_sub_1_0 != nullptr);
-	assert(arr_sub_1_0 == arr_sub_1_1);
+		assert(arr_sub_0_0 != nullptr);
 
-	GC::ptr<int> arr_sub_1_2 = GC::alias(*(*arr_test_1 + 2) + 3, arr_test_1);
-	GC::ptr<int> arr_sub_1_3 = GC::alias((*arr_test_1)[2] + 3, arr_test_1);
-	GC::ptr<int> arr_sub_1_4 = GC::alias(&(*arr_test_1)[2][3], arr_test_1);
-	
-	assert(arr_sub_1_2 != nullptr);
-	assert(arr_sub_1_2 == arr_sub_1_3 && arr_sub_1_3 == arr_sub_1_4);
+		GC::ptr<int[6]> arr_sub_1_0 = GC::alias(*arr_test_1 + 2, arr_test_0);
+		GC::ptr<int[6]> arr_sub_1_1 = GC::alias(&(*arr_test_1)[2], arr_test_0);
 
-	GC::ptr<int> sc_test_0;
+		assert(arr_sub_1_0 != nullptr);
+		assert(arr_sub_1_0 == arr_sub_1_1);
 
-	GC::reinterpretCast<int[]>(arr_test_0);
-	GC::reinterpretCast<double[]>(arr_test_0);
-	GC::constCast<const int[6]>(arr_test_0);
-	GC::constCast<const int[]>(arr_test_4);
-	GC::staticCast<const int[]>(arr_test_4);
+		GC::ptr<int> arr_sub_1_2 = GC::alias(*(*arr_test_1 + 2) + 3, arr_test_1);
+		GC::ptr<int> arr_sub_1_3 = GC::alias((*arr_test_1)[2] + 3, arr_test_1);
+		GC::ptr<int> arr_sub_1_4 = GC::alias(&(*arr_test_1)[2][3], arr_test_1);
 
-	GC::staticCast<const int>(sc_test_0);
+		assert(arr_sub_1_2 != nullptr);
+		assert(arr_sub_1_2 == arr_sub_1_3 && arr_sub_1_3 == arr_sub_1_4);
 
-	assert(std::is_same<decltype(arr_test_0.get()) COMMA int(*)[6]>::value);
-	assert(std::is_same<decltype(arr_test_1.get()) COMMA int(*)[5][6]>::value);
-	assert(std::is_same<decltype(arr_test_2.get()) COMMA int(*)[6]>::value);
-	assert(std::is_same<decltype(arr_test_3.get()) COMMA int(*)[5][6]>::value);
-	assert(std::is_same<decltype(arr_test_4.get()) COMMA int(*)>::value);
+		GC::ptr<int> sc_test_0;
 
+		sink = GC::reinterpretCast<int[]>(arr_test_0);
+		vsink = GC::reinterpretCast<double[]>(arr_test_0);
+		cvsink = GC::constCast<const int[6]>(arr_test_0);
+		csink = GC::constCast<const int[]>(arr_test_4);
+		cvsink = GC::staticCast<const int[]>(arr_test_4);
+		csink = GC::staticCast<const int>(sc_test_0);
+	}
 
 	GC::ptr<std::stack<int>> stack_ptr = GC::make<std::stack<int>>();
 	GC::ptr<std::queue<int>> queue_ptr = GC::make<std::queue<int>>();

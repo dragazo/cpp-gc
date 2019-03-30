@@ -37,8 +37,6 @@
 
 // ------------- //
 
-__gc_fake_lock_t __gc_fake_lock;
-
 std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
 
 std::atomic<GC::sleep_time_t> GC::_sleep_time(std::chrono::milliseconds(60000));
@@ -1204,6 +1202,10 @@ void GC::start_timed_collect()
 		{
 			std::thread([]
 			{
+				// begin sever ties to the default disjunction.
+				// this is because we're going to be a detached thread and we don't want to impede object deletion.
+				disjoint_module::local_handle() = nullptr;
+
 				#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 				std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
 				#endif
