@@ -2066,7 +2066,7 @@ private: // -- gc disjoint module -- //
 		// this is only meant to be used by logic internally imbedded within the below factory accessor functions.
 		// this is not atomic because it's only modified during the dtor of the primary disjunction at static dtor time, and thus threads are not expected to exist.
 		// if this is null, use local_handle().get(), otherwise use this (a detour around the destroyed therad_local local handle object which would otherwise point to the same object).
-		static disjoint_module *local_detour;
+		static disjoint_module *&local_detour();
 
 	public: // -- factory accessors -- //
 
@@ -2317,9 +2317,9 @@ private: // -- gc disjoint module -- //
 
 private: // -- data -- //
 
-	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
+	static std::atomic<strategies> &_strategy(); // the auto collect tactics currently in place
 
-	static std::atomic<sleep_time_t> _sleep_time; // the amount of time to sleep after an automatic timed collection cycle
+	static std::atomic<sleep_time_t> &_sleep_time(); // the amount of time to sleep after an automatic timed collection cycle
 	
 private: // -- misc -- //
 

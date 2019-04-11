@@ -37,9 +37,17 @@
 
 // ------------- //
 
-std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
+std::atomic<GC::strategies> &GC::_strategy()
+{
+	static std::atomic<GC::strategies> v(GC::strategies::timed | GC::strategies::allocfail);
+	return v;
+}
 
-std::atomic<GC::sleep_time_t> GC::_sleep_time(std::chrono::milliseconds(60000));
+std::atomic<GC::sleep_time_t> &GC::_sleep_time()
+{
+	static std::atomic<GC::sleep_time_t> v(std::chrono::milliseconds(60000));
+	return v;
+}
 
 // ---------- //
 
@@ -735,7 +743,11 @@ GC::primary_disjunction_t GC::primary_disjunction;
 GC::inherit_disjunction_t GC::inherit_disjunction;
 GC::new_disjunction_t GC::new_disjunction;
 
-GC::disjoint_module *GC::disjoint_module::local_detour = nullptr;
+GC::disjoint_module *&GC::disjoint_module::local_detour()
+{
+	static disjoint_module *detour = nullptr;
+	return detour;
+}
 
 const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 {
@@ -755,6 +767,10 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 
 		primary_handle_t()
 		{
+			// make sure local_detour is initialized at this point
+			local_detour();
+
+			// create a new (first) disjunction and bind it to m
 			disjoint_module_container::get().create_new_disjunction(m);
 		}
 
@@ -763,19 +779,19 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 			// because this happens at static dtor time, all thread_local objects have been destroyed already - including the local handle.
 			// thus accesses to the local handle will result in und memory accesses.
 			// set up the local detour to bypass the local handle and instead go to the primary module - which is still alive.
-			local_detour = m.get();
+			local_detour() = m.get();
 
 			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
 			#endif
 		}
-	} primary_handle;
+	} dat;
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 	std::cerr << "                                !!!! primary handle access\n";
 	#endif
 
-	return primary_handle.m;
+	return dat.m;
 }
 GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 {
@@ -792,7 +808,7 @@ GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 			~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle " << std::this_thread::get_id() << '\n'; }
 		} __;
 		#endif
-	} local_handle;
+	} dat;
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 	std::cerr << "                                ~~~~ local handle access " << std::this_thread::get_id() << '\n';
@@ -800,9 +816,9 @@ GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 
 	// if local detour is non-null it means we're in the static dtors (from primary() dtor handler), which means the thread_local handle has already been destroyed.
 	// this would be und access of a destroyed object, but would theoretically only happen if a static dtor tried to make a thread for some reason.
-	assert(local_detour == nullptr);
+	assert(local_detour() == nullptr);
 
-	return local_handle.m;
+	return dat.m;
 }
 
 GC::disjoint_module *GC::disjoint_module::primary()
@@ -812,7 +828,7 @@ GC::disjoint_module *GC::disjoint_module::primary()
 GC::disjoint_module *GC::disjoint_module::local()
 {
 	// get the local detour
-	disjoint_module *detour = local_detour;
+	disjoint_module *detour = local_detour();
 
 	// if we're taking a detour, use that, otherwise the handle is alive and we should read that instead
 	return detour ? detour : local_handle().get();
@@ -1188,11 +1204,11 @@ void GC::router_unroot(const smart_handle &arc)
 
 // --------------------- //
 
-GC::strategies GC::strategy() { return _strategy; }
-void GC::strategy(strategies new_strategy) { _strategy = new_strategy; }
+GC::strategies GC::strategy() { return _strategy(); }
+void GC::strategy(strategies new_strategy) { _strategy() = new_strategy; }
 
-GC::sleep_time_t GC::sleep_time() { return _sleep_time; }
-void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time = new_sleep_time; }
+GC::sleep_time_t GC::sleep_time() { return _sleep_time(); }
+void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time() = new_sleep_time; }
 
 void GC::start_timed_collect()
 {
