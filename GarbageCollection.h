@@ -2088,12 +2088,12 @@ private: // -- gc disjoint module -- //
 		static disjoint_module *local();
 	};
 
-	// holds the info concerning all allocated disjunctions across all threads - including the primary disjunction.
+	// singleton type - holds the info concerning all allocated disjunctions across all threads - including the primary disjunction.
 	// this is the only source for creating new disjunctions.
 	// this is used by the background collector to perform batch collections accross all threads.
 	class disjoint_module_container
 	{
-	private: // -- data -- //
+	private: // -- private (sensitive) data -- //
 
 		std::mutex internal_mutex;
 		
@@ -2110,22 +2110,25 @@ private: // -- gc disjoint module -- //
 		// unless in collecting mode, this cache must at all times be empty.
 		std::list<weak_disjoint_handle> disjunction_add_cache;
 
+	public: // -- public (safe) data -- //
+
+		// the collection of strategy flags used for managing all contained modules
+		std::atomic<strategies> strategy = strategies::allocfail | strategies::timed;
+
+		// the time to wait after each collection cycle before starting the next
+		std::atomic<sleep_time_t> sleep_time = std::chrono::milliseconds(60000);
+
 	private: // -- ctor / dtor / asgn -- //
 
+		// creates the (singleton) module.
 		disjoint_module_container() = default;
-		~disjoint_module_container() = default;
+		// destroys the (singleton) module.
+		~disjoint_module_container();
 
 		disjoint_module_container(const disjoint_module_container&) = delete;
 		disjoint_module_container &operator=(const disjoint_module_container&) = delete;
 
-	public: // -- interface -- //
-
-		// gets the (only) disjoint module container instance
-		static disjoint_module_container &get() { static disjoint_module_container c; return c; }
-
-		// creates a new disjunction and stores it to dest.
-		// this is the only valid repoint target for the local disjunction handle.
-		void create_new_disjunction(shared_disjoint_handle &dest);
+	public: // -- management utilities -- //
 
 		// performs a collection pass for all stored dynamic disjunctions.
 		// additionally performs culling logic for dangling disjunction handles.
@@ -2133,6 +2136,15 @@ private: // -- gc disjoint module -- //
 		// this is because the internals of this function will repoint the local disjunction handle all over the place and leave it severed.
 		// if collect is true, performs a collection on each stored disjunction, otherwise only culls dangling handles.
 		void BACKGROUND_COLLECTOR_ONLY___collect(bool collect);
+
+	public: // -- interface -- //
+
+		// gets the (only) disjoint module container instance
+		static disjoint_module_container &get();
+
+		// creates a new disjunction and stores it to dest.
+		// this is the only valid repoint target for the local disjunction handle.
+		void create_new_disjunction(shared_disjoint_handle &dest);
 	};
 
 	// data object used by shared/weak disjoint handles - entirely externally-managed
@@ -2315,12 +2327,6 @@ private: // -- gc disjoint module -- //
 	friend struct __gc_primary_usage_guard_t;
 	friend struct __gc_local_usage_guard_t;
 
-private: // -- data -- //
-
-	static std::atomic<strategies> &_strategy(); // the auto collect tactics currently in place
-
-	static std::atomic<sleep_time_t> &_sleep_time(); // the amount of time to sleep after an automatic timed collection cycle
-	
 private: // -- misc -- //
 
 	GC() = delete; // not instantiatable

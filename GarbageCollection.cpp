@@ -10,11 +10,11 @@
 
 #include "GarbageCollection.h"
 
-// ------------------------------------------------------------- //
+// ------------------------ //
 
-// -- dev build settings - you probably want all of these off -- //
+// -- dev build settings -- //
 
-// ------------------------------------------------------------- //
+// ------------------------ //
 
 // iff nonzero, prints log messages for disjunction handle activity
 #define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING 0
@@ -31,23 +31,8 @@
 // if nonzero, displays info messages on cerr during GC::collect()
 #define DRAGAZO_GARBAGE_COLLECT_MSG 0
 
-// ------------- //
-
-// -- globals -- //
-
-// ------------- //
-
-std::atomic<GC::strategies> &GC::_strategy()
-{
-	static std::atomic<GC::strategies> v(GC::strategies::timed | GC::strategies::allocfail);
-	return v;
-}
-
-std::atomic<GC::sleep_time_t> &GC::_sleep_time()
-{
-	static std::atomic<GC::sleep_time_t> v(std::chrono::milliseconds(60000));
-	return v;
-}
+// if nonzero, performs extremely unlikely checks that (if they happen) are my fault, not yours
+#define DRAGAZO_GARBAGE_COLLECT_DRAGAZO_SCREWED_UP_CHECK 1
 
 // ---------- //
 
@@ -755,7 +740,10 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 	// the default value creates that actual collection module.
 	static struct primary_handle_t
 	{
-		shared_disjoint_handle m;
+		// the primary handle (singleton) should never be destroyed.
+		// if it were, it's possible for another thread to try to access it after its lifetime has ended (e.g. during program termination).
+		// this could potentially result in a segmentation fault or other miscellaneous hard-to-debug issues for users.
+		shared_disjoint_handle *m = new shared_disjoint_handle; // intentional leak
 
 		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 		struct _
@@ -771,7 +759,7 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 			local_detour();
 
 			// create a new (first) disjunction and bind it to m
-			disjoint_module_container::get().create_new_disjunction(m);
+			disjoint_module_container::get().create_new_disjunction(*m);
 		}
 
 		~primary_handle_t()
@@ -779,7 +767,12 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 			// because this happens at static dtor time, all thread_local objects have been destroyed already - including the local handle.
 			// thus accesses to the local handle will result in und memory accesses.
 			// set up the local detour to bypass the local handle and instead go to the primary module - which is still alive.
-			local_detour() = m.get();
+			local_detour() = m->get();
+
+			// additionally __gc_primary_usage_guard ensures that all (static) gc-aware objects are constructed after the primary handle.
+			// therefore at this point all gc aware objects with automatic duration have been destroyed.
+			// we now need to perform a final blocking collection on the primary disjunction to clean up any remaining cyclic dependencies.
+			m->get()->blocking_collect();
 
 			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
@@ -791,7 +784,7 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 	std::cerr << "                                !!!! primary handle access\n";
 	#endif
 
-	return dat.m;
+	return *dat.m;
 }
 GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 {
@@ -832,6 +825,28 @@ GC::disjoint_module *GC::disjoint_module::local()
 
 	// if we're taking a detour, use that, otherwise the handle is alive and we should read that instead
 	return detour ? detour : local_handle().get();
+}
+
+GC::disjoint_module_container::~disjoint_module_container()
+{
+	#if DRAGAZO_GARBAGE_COLLECT_DRAGAZO_SCREWED_UP_CHECK
+
+	// the disjoint module container (singleton) should never be destroyed.
+	// if it were, it's possible for another thread to try to access it after its lifetime has ended (e.g. during program termination).
+	// this could potentially result in a segmentation fault or other miscellaneous hard-to-debug issues for users.
+	std::cerr << "CRITICAL ERROR: disjoint module container was destroyed\n";
+	std::abort();
+
+	#endif
+}
+
+GC::disjoint_module_container &GC::disjoint_module_container::get()
+{
+	// the disjoint module container (singleton) should never be destroyed.
+	// if it were, it's possible for another thread to try to access it after its lifetime has ended (e.g. during program termination).
+	// this could potentially result in a segmentation fault or other miscellaneous hard-to-debug issues for users.
+	static disjoint_module_container *c = new disjoint_module_container; // intentional leak
+	return *c;
 }
 
 void GC::disjoint_module_container::create_new_disjunction(shared_disjoint_handle &dest)
@@ -901,7 +916,7 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 		// for each stored disjunction:
 		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
 		// (otherwise we need to constantly update the end iterator after each erasure).
-		for (auto i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+		for (std::list<weak_disjoint_handle>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
 		{
 			// if this is a dangling pointer, erase it
 			if (i->expired()) i = disjunctions.erase(i);
@@ -1204,11 +1219,11 @@ void GC::router_unroot(const smart_handle &arc)
 
 // --------------------- //
 
-GC::strategies GC::strategy() { return _strategy(); }
-void GC::strategy(strategies new_strategy) { _strategy() = new_strategy; }
+GC::strategies GC::strategy() /* */ { return disjoint_module_container::get().strategy; }
+void GC::strategy(strategies new_strategy) { disjoint_module_container::get().strategy = new_strategy; }
 
-GC::sleep_time_t GC::sleep_time() { return _sleep_time(); }
-void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time() = new_sleep_time; }
+GC::sleep_time_t GC::sleep_time() /*   */ { return disjoint_module_container::get().sleep_time; }
+void GC::sleep_time(sleep_time_t new_sleep_time) { disjoint_module_container::get().sleep_time = new_sleep_time; }
 
 void GC::start_timed_collect()
 {
@@ -1218,7 +1233,7 @@ void GC::start_timed_collect()
 		{
 			std::thread([]
 			{
-				// begin sever ties to the default disjunction.
+				// begin by severing ties to the default disjunction.
 				// this is because we're going to be a detached thread and we don't want to impede object deletion.
 				disjoint_module::local_handle() = nullptr;
 
@@ -1235,24 +1250,18 @@ void GC::start_timed_collect()
 						// sleep the sleep time
 						std::this_thread::sleep_for(sleep_time());
 
-						// if we're using timed strategy
-						if ((int)strategy() & (int)strategies::timed)
-						{
-							// run a collect pass for all the dynamic disjunctions
-							disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect(true);
-						}
-						// otherwise perform any other relevant logic
-						else
-						{
-							// even if we don't perform a dynamic disjunction collection, we need to cull dangling references
-							disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect(false);
-						}
+						// perform a background collection pass - if using timed collection this is a full collection, otherwise just a disjunction prune
+						disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect((int)strategy() & (int)strategies::timed);
 					}
 				}
 				// if we ever hit an error, something terrible happened
+				catch (const std::exception &ex)
+				{
+					std::cerr << "CRITICAL ERROR: garbage collection threw an exception:\n" << ex.what() << '\n';
+					std::abort();
+				}
 				catch (...)
 				{
-					// print error message and terminate with a nonzero code
 					std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
 					std::abort();
 				}
