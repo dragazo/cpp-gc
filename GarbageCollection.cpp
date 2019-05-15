@@ -7,6 +7,8 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_set>
+#include <thread>
+#include <condition_variable>
 
 #include "GarbageCollection.h"
 
@@ -30,16 +32,6 @@
 
 // if nonzero, displays info messages on cerr during GC::collect()
 #define DRAGAZO_GARBAGE_COLLECT_MSG 0
-
-// ------------- //
-
-// -- globals -- //
-
-// ------------- //
-
-std::atomic<GC::strategies> GC::_strategy(GC::strategies::timed | GC::strategies::allocfail);
-
-std::atomic<GC::sleep_time_t> GC::_sleep_time(std::chrono::milliseconds(60000));
 
 // ---------- //
 
@@ -735,8 +727,6 @@ GC::primary_disjunction_t GC::primary_disjunction;
 GC::inherit_disjunction_t GC::inherit_disjunction;
 GC::new_disjunction_t GC::new_disjunction;
 
-GC::disjoint_module *GC::disjoint_module::local_detour = nullptr;
-
 const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 {
 	// not thread_local because the primary disjunction must exist for the entire program runtime.
@@ -763,7 +753,7 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 			// because this happens at static dtor time, all thread_local objects have been destroyed already - including the local handle.
 			// thus accesses to the local handle will result in und memory accesses.
 			// set up the local detour to bypass the local handle and instead go to the primary module - which is still alive.
-			local_detour = m.get();
+			disjoint_module_container::get().local_detour = m.get();
 
 			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
 			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
@@ -800,7 +790,8 @@ GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 
 	// if local detour is non-null it means we're in the static dtors (from primary() dtor handler), which means the thread_local handle has already been destroyed.
 	// this would be und access of a destroyed object, but would theoretically only happen if a static dtor tried to make a thread for some reason.
-	assert(local_detour == nullptr);
+	// could also happen upon sudden (early) program exit, but that's already undefined behavior.
+	assert(disjoint_module_container::get().local_detour == nullptr);
 
 	return local_handle.m;
 }
@@ -812,7 +803,7 @@ GC::disjoint_module *GC::disjoint_module::primary()
 GC::disjoint_module *GC::disjoint_module::local()
 {
 	// get the local detour
-	disjoint_module *detour = local_detour;
+	disjoint_module *detour = disjoint_module_container::get().local_detour;
 
 	// if we're taking a detour, use that, otherwise the handle is alive and we should read that instead
 	return detour ? detour : local_handle().get();
@@ -1188,11 +1179,33 @@ void GC::router_unroot(const smart_handle &arc)
 
 // --------------------- //
 
-GC::strategies GC::strategy() { return _strategy; }
-void GC::strategy(strategies new_strategy) { _strategy = new_strategy; }
+GC::strategies GC::strategy() { return disjoint_module_container::get()._background_collector_strategy; }
+void GC::strategy(strategies new_strategy) { disjoint_module_container::get()._background_collector_strategy = new_strategy; }
 
-GC::sleep_time_t GC::sleep_time() { return _sleep_time; }
-void GC::sleep_time(sleep_time_t new_sleep_time) { _sleep_time = new_sleep_time; }
+GC::sleep_time_t GC::sleep_time() { return disjoint_module_container::get()._background_collector_sleep_time; }
+void GC::sleep_time(sleep_time_t new_sleep_time) { disjoint_module_container::get()._background_collector_sleep_time = new_sleep_time; }
+
+GC::disjoint_module_container::disjoint_module_container() {}
+GC::disjoint_module_container::~disjoint_module_container()
+{
+	// we need to lock the background collector mutex before we can read the collector thread handle state (and everything else)
+	std::unique_lock collector_lock(this->_background_collector_mutex);
+
+	// if we have a running background thread we have to terminate it
+	if (this->_background_collector_thread.joinable())
+	{
+		// set the background collector term flag to force it to exit upon waking up
+		this->_background_collector_term = true;
+		// signal the background collector condition variable to wake it up early (if it's sleeping) (no one else will be using it otherwise)
+		this->_background_collector_cv.notify_one();
+
+		// then wait on the background collector cv - this will unlock the background collector mutex and allow it to process the term flag
+		this->_background_collector_cv.wait(collector_lock, [this] { return this->_background_collector_term_processed; });
+
+		// once we wake up we can join the background collector thread
+		this->_background_collector_thread.join();
+	}
+}
 
 void GC::start_timed_collect()
 {
@@ -1200,9 +1213,13 @@ void GC::start_timed_collect()
 	{
 		_()
 		{
-			std::thread([]
+			// we need to lock the collector mutex before we can modify its stored thread handle
+			std::lock_guard collection_lock(disjoint_module_container::get()._background_collector_mutex);
+
+			// create the background collector thread in the disjunction collection (singleton)
+			disjoint_module_container::get()._background_collector_thread = std::thread([]
 			{
-				// begin sever ties to the default disjunction.
+				// sever ties to the default disjunction.
 				// this is because we're going to be a detached thread and we don't want to impede object deletion.
 				disjoint_module::local_handle() = nullptr;
 
@@ -1210,37 +1227,62 @@ void GC::start_timed_collect()
 				std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
 				#endif
 
+				// alias the disjunction collection (singleton)
+				disjoint_module_container &con = disjoint_module_container::get();
+
 				// try the operation
 				try
 				{
+					// create the unique lock to bind the collector mutex, but don't lock it yet
+					std::unique_lock collector_lock(con._background_collector_mutex, std::defer_lock);
+
 					// we'll run forever
 					while (true)
 					{
-						// sleep the sleep time
-						std::this_thread::sleep_for(sleep_time());
+						// lock the collector mutex
+						collector_lock.lock();
 
-						// if we're using timed strategy
-						if ((int)strategy() & (int)strategies::timed)
-						{
-							// run a collect pass for all the dynamic disjunctions
-							disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect(true);
-						}
-						// otherwise perform any other relevant logic
-						else
-						{
-							// even if we don't perform a dynamic disjunction collection, we need to cull dangling references
-							disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect(false);
-						}
+						// pre-check the term flag before performing the sleep operation (mark term flag as processed)
+						if (con._background_collector_term) { con._background_collector_term_processed = true; break; }
+
+						// ----------------------------------------------------------- //
+
+						// fetch sleep time
+						auto sleep_time = con._background_collector_sleep_time.load();
+
+						// sleep the sleep time on the collector condition variable.
+						// use a predicate to ensure we wake up only when term is set or when the time has elapsed (i.e. ignore spurious wakeups)
+						con._background_collector_cv.wait_for(collector_lock, sleep_time,
+							[&con, sleep_time, now = std::chrono::steady_clock::now()]{ return con._background_collector_term || std::chrono::steady_clock::now() >= now + sleep_time; });
+
+						// ----------------------------------------------------------- //
+						
+						// (post-check) if we woke up because the term flag was set, exit immediately (mark term flag as processed)
+						if (con._background_collector_term) { con._background_collector_term_processed = true; break; }
+
+						// perform the collection - if using timed collect strategy perform a full collection, otherwise just a prune action
+						con.BACKGROUND_COLLECTOR_ONLY___collect((int)con._background_collector_strategy.load() & (int)strategies::timed);
+
+						// unlock the collector mutex
+						collector_lock.unlock();
 					}
+
+					// the only way we get here is if we broke out of the loop due to the collector term flag.
+					// (while we still hold the mutex) we need to signal the condition variable to wake up the thread that signaled us to stop (which is now waiting on us to finish)
+					con._background_collector_cv.notify_one();
 				}
 				// if we ever hit an error, something terrible happened
+				catch (const std::exception &ex)
+				{
+					std::cerr << "CRITICAL ERROR: garbage bollection threw an exception:\n-> " << ex.what() << '\n';
+					std::abort();
+				}
 				catch (...)
 				{
-					// print error message and terminate with a nonzero code
 					std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
 					std::abort();
 				}
-			}).detach();
+			});
 		}
 	} __;
 }

@@ -2060,14 +2060,6 @@ private: // -- gc disjoint module -- //
 		// THIS MUST BE THE LAST THING YOU DO UNDER INTERNAL_MUTEX LOCK.
 		void __MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
 
-	private: // -- factory accessor shared data -- //
-
-		// the repoint target for the local disjunction.
-		// this is only meant to be used by logic internally imbedded within the below factory accessor functions.
-		// this is not atomic because it's only modified during the dtor of the primary disjunction at static dtor time, and thus threads are not expected to exist.
-		// if this is null, use local_handle().get(), otherwise use this (a detour around the destroyed therad_local local handle object which would otherwise point to the same object).
-		static disjoint_module *local_detour;
-
 	public: // -- factory accessors -- //
 
 		// gets the primary disjunction - the default one that all threads use unless instructed otherwise.
@@ -2110,10 +2102,45 @@ private: // -- gc disjoint module -- //
 		// unless in collecting mode, this cache must at all times be empty.
 		std::list<weak_disjoint_handle> disjunction_add_cache;
 
+	public: // -- background collector control -- //
+
+		// ----------------------------------------------------------
+		// everything in this section must be guarded by locking _background_collector_mutex in order to safely read/write.
+		// internal_mutex does not need to be locked.
+		// ----------------------------------------------------------
+
+		// thread handle for the background collector
+		std::thread _background_collector_thread;
+
+		// mutex and condition variable for controlling background collector thread
+		std::mutex              _background_collector_mutex;
+		std::condition_variable _background_collector_cv;
+
+		// flag that triggers immediate background collector termination when true.
+		// must only be read/written under collector mutex lock.
+		bool _background_collector_term = false;
+		// flag that marks that the collection term flag was processed and the collector is exiting.
+		// this is used as a condition variable spurious wakeup check during program termination logic.
+		bool _background_collector_term_processed = false;
+
+	public: // -- background collector settings -- //
+
+		// the repoint target for the local disjunction.
+		// this is only meant to be used by logic internally imbedded within the below factory accessor functions.
+		// this is not atomic because it's only modified during the dtor of the primary disjunction at static dtor time, and thus threads are not expected to exist.
+		// if this is null, use local_handle().get(), otherwise use this (a detour around the destroyed therad_local local handle object which would otherwise point to the same object).
+		disjoint_module *local_detour = nullptr;
+
+		// the collection of strategy flags to use for automatic collection logic
+		std::atomic<GC::strategies> _background_collector_strategy = GC::strategies::timed | GC::strategies::allocfail;
+		
+		// the amount of time to wait after each automatic collection cycle before starting the next
+		std::atomic<GC::sleep_time_t> _background_collector_sleep_time = std::chrono::milliseconds(60000);
+
 	private: // -- ctor / dtor / asgn -- //
 
-		disjoint_module_container() = default;
-		~disjoint_module_container() = default;
+		disjoint_module_container();
+		~disjoint_module_container();
 
 		disjoint_module_container(const disjoint_module_container&) = delete;
 		disjoint_module_container &operator=(const disjoint_module_container&) = delete;
@@ -2314,12 +2341,6 @@ private: // -- gc disjoint module -- //
 
 	friend struct __gc_primary_usage_guard_t;
 	friend struct __gc_local_usage_guard_t;
-
-private: // -- data -- //
-
-	static std::atomic<strategies> _strategy; // the auto collect tactics currently in place
-
-	static std::atomic<sleep_time_t> _sleep_time; // the amount of time to sleep after an automatic timed collection cycle
 	
 private: // -- misc -- //
 
