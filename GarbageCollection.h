@@ -1296,7 +1296,7 @@ public: // -- ptr allocation -- //
 		ptr<T> res(obj, handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
-		GC::start_timed_collect();
+		GC::background_collector_controller::get().start();
 
 		// return the now-initialized ptr
 		return res;
@@ -1389,7 +1389,7 @@ public: // -- ptr allocation -- //
 		ptr<T> res(reinterpret_cast<element_type*>(obj), handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
-		GC::start_timed_collect();
+		GC::background_collector_controller::get().start();
 
 		// return the now-initialized ptr
 		return res;
@@ -1474,7 +1474,7 @@ public: // -- ptr allocation -- //
 		ptr<T> res(obj, handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
-		GC::start_timed_collect();
+		GC::background_collector_controller::get().start();
 
 		// return the now-initialized ptr
 		return res;
@@ -1532,7 +1532,7 @@ public: // -- ptr allocation -- //
 		ptr<T[]> res(obj, handle, GC::bind_new_obj);
 
 		// begin timed collection (if it's not already)
-		GC::start_timed_collect();
+		GC::background_collector_controller::get().start();
 
 		// return the now-initialized ptr
 		return res;
@@ -1556,7 +1556,7 @@ public: // -- ptr allocation -- //
 	// objects that are in use will not be moved (i.e. pointers will still be valid).
 	static void collect();
 
-public: // -- auto collection -- //
+public: // -- auto collection utilities -- //
 
 	// represents the type of automatic garbage collection to perform.
 	enum class strategies
@@ -2102,27 +2102,6 @@ private: // -- gc disjoint module -- //
 		// unless in collecting mode, this cache must at all times be empty.
 		std::list<weak_disjoint_handle> disjunction_add_cache;
 
-	public: // -- background collector control -- //
-
-		// ----------------------------------------------------------
-		// everything in this section must be guarded by locking _background_collector_mutex in order to safely read/write.
-		// internal_mutex does not need to be locked.
-		// ----------------------------------------------------------
-
-		// thread handle for the background collector
-		std::thread _background_collector_thread;
-
-		// mutex and condition variable for controlling background collector thread
-		std::mutex              _background_collector_mutex;
-		std::condition_variable _background_collector_cv;
-
-		// flag that triggers immediate background collector termination when true.
-		// must only be read/written under collector mutex lock.
-		bool _background_collector_term = false;
-		// flag that marks that the collection term flag was processed and the collector is exiting.
-		// this is used as a condition variable spurious wakeup check during program termination logic.
-		bool _background_collector_term_processed = false;
-
 	public: // -- background collector settings -- //
 
 		// the repoint target for the local disjunction.
@@ -2132,25 +2111,18 @@ private: // -- gc disjoint module -- //
 		// this is read/written with acquire-release semantics - it should only be assigned to once after initialization
 		std::atomic<disjoint_module*> local_detour = nullptr;
 
-		// the collection of strategy flags to use for automatic collection logic
-		std::atomic<GC::strategies> _background_collector_strategy = GC::strategies::timed | GC::strategies::allocfail;
-		
-		// the amount of time to wait after each automatic collection cycle before starting the next
-		std::atomic<GC::sleep_time_t> _background_collector_sleep_time = std::chrono::milliseconds(60000);
-
 	private: // -- ctor / dtor / asgn -- //
 
-		disjoint_module_container();
-		~disjoint_module_container();
+		disjoint_module_container() = default;
 
 		disjoint_module_container(const disjoint_module_container&) = delete;
 		disjoint_module_container &operator=(const disjoint_module_container&) = delete;
 
 	public: // -- interface -- //
 
-		// gets the (only) disjoint module container instance
+		// gets the (singleton) disjoint module container instance
 		static disjoint_module_container &get() { static disjoint_module_container c; return c; }
-
+		
 		// creates a new disjunction and stores it to dest.
 		// this is the only valid repoint target for the local disjunction handle.
 		void create_new_disjunction(shared_disjoint_handle &dest);
@@ -2234,6 +2206,12 @@ private: // -- gc disjoint module -- //
 		friend class weak_disjoint_handle;
 		friend class disjoint_module_container;
 
+	private: // -- custom cleanup logic data -- //
+
+		// if non-null, this function will be called by the handle destructor (before invalidating the handle).
+		// obviously, it's undefined behavior for this function to throw an exception.
+		std::atomic<void(*)()> on_handle_dtor = nullptr;
+
 	private: // -- repointing -- //
 
 		// repoints this handle at other - performs all relevant reference counting logic for automatic cleanup.
@@ -2247,6 +2225,13 @@ private: // -- gc disjoint module -- //
 		// other must be sourced from a valid WEAK disjoint handle object.
 		// MUST BE USED FOR LOCKING!!
 		void lock(handle_data *other);
+
+	public: // -- custom cleanup logic utilities -- //
+
+		// sets an event to be fired by this handle's destructor (before invalidating the handle).
+		// pass nullptr to specify no event (the default).
+		// there can only be one event for each handle - specifying more than one on a given handle at the same time is undefined behavior.
+		void set_on_handle_dtor_event(void(*e)()) { on_handle_dtor.store(e, std::memory_order_release); }
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -2340,9 +2325,68 @@ private: // -- gc disjoint module -- //
 		bool expired() const noexcept;
 	};
 
+	friend struct __gc_background_collector_usage_guard_t;
 	friend struct __gc_primary_usage_guard_t;
 	friend struct __gc_local_usage_guard_t;
 	
+private: // -- (automatic) background collection -- //
+
+	class background_collector_controller
+	{
+	public: // -- (safe) settings
+
+		// the collection of strategy flags to use for auto collection logic
+		std::atomic<strategies> strategy = strategies::timed | strategies::allocfail;
+
+		// the amount of time to sleep after each automatic collection pass before starting the next
+		std::atomic<sleep_time_t> sleep_time = std::chrono::milliseconds(60000);
+
+	public: // -- (unsafe) controls -- //
+
+		// ------------------------------------------------------------------------------------------------- //
+		// everything in this section must be guarded by locking control_mutex in order to safely read/write //
+		// ------------------------------------------------------------------------------------------------- //
+
+		// mutex and condition variable used for guarding/controlling/waiting on background collector logic
+		std::mutex thread_mutex;
+
+		// the condition variable that the background collection thread uses for interuptable sleep logic between collections.
+		std::condition_variable thread_sleep_cv;
+		// the conditions variable that one should wait (indefinitely) on after setting the term flag.
+		std::condition_variable term_waiters_cv;
+
+		// flag that marks if the thread has (ever) been initialized.
+		bool thread_init = false;
+
+		// flag that triggers immediate background collector termination when true.
+		// must only be read/written under collector mutex lock.
+		bool thread_term = false;
+		// flag that marks that the collection term flag was processed and the collector is exiting.
+		// this is used as a condition variable spurious wakeup check during program termination logic.
+		bool thread_term_processed = false;
+
+	private: // -- ctor / dtor / asgn -- //
+
+		background_collector_controller() = default;
+		~background_collector_controller() { stop(); }
+
+		background_collector_controller(const background_collector_controller&) = delete;
+		background_collector_controller &operator=(const background_collector_controller&) = delete;
+
+	public: // -- access -- //
+
+		// gets the static (singleton) instance that controlls the background collector
+		static background_collector_controller &get();
+
+		// starts the background collector thread exactly once (ever) if it hasn't already (and only if it hasn't already been requested to stop).
+		// calling this multiple times from multiple threads is safe.
+		// returns true if the invocation started the background collector thread (for the first time (ever)) - (false is a no-op case).
+		bool start();
+		// stops the background collector thread if it exists.
+		// calling this multiple times from multiple threads is safe.
+		void stop();
+	};
+
 private: // -- misc -- //
 
 	GC() = delete; // not instantiatable
@@ -2357,18 +2401,6 @@ private: // -- misc -- //
 	// deallocates a block of memory allocated by aligned_malloc().
 	// if <ptr> is null, does nothing.
 	static void aligned_free(void *ptr);
-
-private: // -- private interface -- //
-
-	// -----------------------------------------------------------------
-	// from here on out, function names follow these conventions:
-	// starts with "__" = GC::mutex must be locked prior to invocation.
-	// otherwise = GC::mutex must not be locked prior to invocation.
-	// -----------------------------------------------------------------
-	
-	// the first invocation of this function begins a new thread to perform timed garbage collection.
-	// all subsequent invocations do nothing.
-	static void start_timed_collect();
 
 private: // -- utility router functions -- //
 	
@@ -8942,6 +8974,11 @@ struct GC::wrapper_traits<std::optional<T>>
 // -- usage guards -- //
 
 // ------------------ //
+
+static struct __gc_background_collector_usage_guard_t
+{
+	__gc_background_collector_usage_guard_t() { GC::background_collector_controller::get(); }
+} __gc_background_collector_usage_guard;
 
 static struct __gc_primary_usage_guard_t
 {

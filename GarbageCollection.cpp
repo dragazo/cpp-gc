@@ -987,7 +987,14 @@ void GC::shared_disjoint_handle::lock(handle_data *other)
 }
 
 GC::shared_disjoint_handle::shared_disjoint_handle(std::nullptr_t) noexcept : __module(nullptr), data(nullptr) {}
-GC::shared_disjoint_handle::~shared_disjoint_handle() { reset(); }
+GC::shared_disjoint_handle::~shared_disjoint_handle()
+{
+	// if we have a non-null on_handle_dtor event, call it - it's guaranteed not to throw
+	if (auto dtor_event = on_handle_dtor.load(std::memory_order_acquire); dtor_event) dtor_event();
+	
+	// sever ties to the current module - after which we're ok to trivially destruct
+	reset();
+}
 
 GC::shared_disjoint_handle::shared_disjoint_handle(const shared_disjoint_handle &other)
 {
@@ -1150,112 +1157,122 @@ void GC::router_unroot(const smart_handle &arc)
 	arc.disjunction->schedule_handle_unroot(arc);
 }
 
-// --------------------- //
+// ------------------------------- //
 
-// -- auto collection -- //
+// -- auto collection utilities -- //
 
-// --------------------- //
+// ------------------------------- //
 
-GC::strategies GC::strategy() { return disjoint_module_container::get()._background_collector_strategy; }
-void GC::strategy(strategies new_strategy) { disjoint_module_container::get()._background_collector_strategy = new_strategy; }
+GC::strategies GC::strategy() { return background_collector_controller::get().strategy; }
+void GC::strategy(strategies new_strategy) { background_collector_controller::get().strategy = new_strategy; }
 
-GC::sleep_time_t GC::sleep_time() { return disjoint_module_container::get()._background_collector_sleep_time; }
-void GC::sleep_time(sleep_time_t new_sleep_time) { disjoint_module_container::get()._background_collector_sleep_time = new_sleep_time; }
+GC::sleep_time_t GC::sleep_time() { return background_collector_controller::get().sleep_time; }
+void GC::sleep_time(sleep_time_t new_sleep_time) { background_collector_controller::get().sleep_time = new_sleep_time; }
 
-GC::disjoint_module_container::disjoint_module_container() {}
-GC::disjoint_module_container::~disjoint_module_container()
+// ------------------------------------- //
+
+// -- background collector controller -- //
+
+// ------------------------------------- //
+
+GC::background_collector_controller &GC::background_collector_controller::get()
 {
-	// we need to lock the background collector mutex before we can read the collector thread handle state (and everything else)
-	std::unique_lock collector_lock(this->_background_collector_mutex);
-
-	// if we have a running background thread we have to terminate it
-	if (this->_background_collector_thread.joinable())
-	{
-		// set the background collector term flag to force it to exit upon waking up
-		this->_background_collector_term = true;
-		// signal the background collector condition variable to wake it up early (if it's sleeping) (no one else will be using it otherwise)
-		this->_background_collector_cv.notify_one();
-
-		// then wait on the background collector cv - this will unlock the background collector mutex and allow it to process the term flag
-		this->_background_collector_cv.wait(collector_lock, [this] { return this->_background_collector_term_processed; });
-
-		// once we wake up we can join the background collector thread
-		this->_background_collector_thread.join();
-	}
+	static background_collector_controller c;
+	return c;
 }
 
-void GC::start_timed_collect()
+bool GC::background_collector_controller::start()
 {
-	static struct _
+	// lock the mutex
+	std::lock_guard lock(this->thread_mutex);
+
+	// if the init flag or the term flag is set, we do nothing
+	if (this->thread_init || this->thread_term) return false;
+	this->thread_init = true; // set the thread init flag to true, since we're about to create it
+
+	// create the background collector thread - this will run as a detached thread but we have internal logic to request termination of it and to wait for termination to complete
+	std::thread([this]
 	{
-		_()
+		// bind the local_handle() dtor to call stop() on this (singleton) object
+		disjoint_module::local_handle().set_on_handle_dtor_event([] { GC::background_collector_controller::get().stop(); });
+
+		// sever ties to the default module - we don't want to impede object deletion while sleeping.
+		disjoint_module::local_handle() = nullptr;
+
+		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
+		std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
+		#endif
+
+		// try the operation
+		try
 		{
-			// we need to lock the collector mutex before we can modify its stored thread handle
-			std::lock_guard collection_lock(disjoint_module_container::get()._background_collector_mutex);
+			// create a unique lock to bind the background thread mutex but don't lock it yet
+			std::unique_lock thread_lock(this->thread_mutex, std::defer_lock);
 
-			// create the background collector thread in the disjunction collection (singleton)
-			disjoint_module_container::get()._background_collector_thread = std::thread([]
+			// we'll run forever
+			while (true)
 			{
-				// sever ties to the default disjunction.
-				// this is because we're going to be a detached thread and we don't want to impede object deletion.
-				disjoint_module::local_handle() = nullptr;
+				// lock the mutex
+				thread_lock.lock();
 
-				#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-				std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
-				#endif
+				// ----------------------------------------------------------- //
 
-				// alias the disjunction collection (singleton)
-				disjoint_module_container &con = disjoint_module_container::get();
+				// pre-check the term flag before performing the sleep operation (if set, mark term flag as processed)
+				if (this->thread_term) { this->thread_term_processed = true; break; }
 
-				// try the operation
-				try
-				{
-					// create the unique lock to bind the collector mutex, but don't lock it yet
-					std::unique_lock collector_lock(con._background_collector_mutex, std::defer_lock);
+				// sleep the sleep time on the collector condition variable.
+				// use a predicate to ensure we wake up only when the time has elapsed or when term is set (i.e. ignore spurious wakeups)
+				this->thread_sleep_cv.wait_for(thread_lock, this->sleep_time.load(), [this] { return this->thread_term; });
 
-					// we'll run forever
-					while (true)
-					{
-						// lock the collector mutex
-						collector_lock.lock();
+				// (post-check) if we woke up because the term flag was set, exit immediately (if set, mark term flag as processed)
+				if (this->thread_term) { this->thread_term_processed = true; break; }
 
-						// pre-check the term flag before performing the sleep operation (mark term flag as processed)
-						if (con._background_collector_term) { con._background_collector_term_processed = true; break; }
+				// ----------------------------------------------------------- //
 
-						// ----------------------------------------------------------- //
+				// unlock the mutex before we perform the collection action.
+				// this is because collection logic might need to call start(), which would need to lock the same mutex we have locked.
+				thread_lock.unlock();
 
-						// sleep the sleep time on the collector condition variable.
-						// use a predicate to ensure we wake up only when term is set or when the time has elapsed (i.e. ignore spurious wakeups)
-						con._background_collector_cv.wait_for(collector_lock, con._background_collector_sleep_time.load(), [&con]{ return con._background_collector_term; });
+				// perform the collection - if using timed collect strategy perform a full collection, otherwise just a prune action
+				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect((int)this->strategy.load() & (int)strategies::timed);
+			}
 
-						// ----------------------------------------------------------- //
-						
-						// (post-check) if we woke up because the term flag was set, exit immediately (mark term flag as processed)
-						if (con._background_collector_term) { con._background_collector_term_processed = true; break; }
-
-						// perform the collection - if using timed collect strategy perform a full collection, otherwise just a prune action
-						con.BACKGROUND_COLLECTOR_ONLY___collect((int)con._background_collector_strategy.load() & (int)strategies::timed);
-
-						// unlock the collector mutex
-						collector_lock.unlock();
-					}
-
-					// the only way we get here is if we broke out of the loop due to the collector term flag.
-					// (while we still hold the mutex) we need to signal the condition variable to wake up the thread that signaled us to stop (which is now waiting on us to finish)
-					con._background_collector_cv.notify_one();
-				}
-				// if we ever hit an error, something terrible happened
-				catch (const std::exception &ex)
-				{
-					std::cerr << "CRITICAL ERROR: garbage bollection threw an exception:\n-> " << ex.what() << '\n';
-					std::abort();
-				}
-				catch (...)
-				{
-					std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
-					std::abort();
-				}
-			});
+			// at this point we still own the lock - this is important for the following line:
+			// the only way we get here is if we broke out of the loop due to the collector term flag.
+			// (while we still hold the mutex) we need to signal the term_waiters cv to wake up any (and all) threads that signaled us to stop (which are now waiting on us to finish).
+			// if we didn't currently hold the mutex, some threads could miss their signal and potentially never wake up, thus hanging the entire program.
+			this->term_waiters_cv.notify_all();
 		}
-	} __;
+		// if we ever hit an error, something terrible happened
+		catch (const std::exception &ex)
+		{
+			std::cerr << "CRITICAL ERROR: garbage collection threw an exception:\n-> " << ex.what() << '\n';
+			std::abort();
+		}
+		catch (...)
+		{
+			std::cerr << "CRITICAL ERROR: garbage collection threw an exception\n";
+			std::abort();
+		}
+	}).detach();
+
+	// return true to denote that this invocation started the (only ever) background collector thread
+	return true;
+}
+void GC::background_collector_controller::stop()
+{
+	// we need to lock the background collector mutex before we can read the collector thread handle state (and everything else)
+	std::unique_lock lock(this->thread_mutex);
+
+	// set the termination signal and wake up the background collector thread (if it happens to be asleep right now).
+	// if there's not currently a running background thread, setting this will prevent its creation via future uses of start().
+	this->thread_term = true;
+	this->thread_sleep_cv.notify_one();
+
+	// if we do in fact have a running background thread and the term flag has not already been processed
+	if (this->thread_init && !this->thread_term_processed)
+	{
+		// wait for it to be processed
+		this->term_waiters_cv.wait(lock, [this] { return this->thread_term_processed; });
+	}
 }
