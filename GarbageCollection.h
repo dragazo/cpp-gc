@@ -2129,7 +2129,8 @@ private: // -- gc disjoint module -- //
 		// this is only meant to be used by logic internally imbedded within the below factory accessor functions.
 		// this is not atomic because it's only modified during the dtor of the primary disjunction at static dtor time, and thus threads are not expected to exist.
 		// if this is null, use local_handle().get(), otherwise use this (a detour around the destroyed therad_local local handle object which would otherwise point to the same object).
-		disjoint_module *local_detour = nullptr;
+		// this is read/written with acquire-release semantics - it should only be assigned to once after initialization
+		std::atomic<disjoint_module*> local_detour = nullptr;
 
 		// the collection of strategy flags to use for automatic collection logic
 		std::atomic<GC::strategies> _background_collector_strategy = GC::strategies::timed | GC::strategies::allocfail;

@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <thread>
 #include <condition_variable>
+#include <atomic>
 
 #include "GarbageCollection.h"
 
@@ -735,14 +736,6 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 	{
 		shared_disjoint_handle m;
 
-		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-		struct _
-		{
-			_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ctor primary handle\n"; }
-			~_() { std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! dtor primary handle\n"; }
-		} __;
-		#endif
-
 		primary_handle_t()
 		{
 			disjoint_module_container::get().create_new_disjunction(m);
@@ -753,17 +746,11 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 			// because this happens at static dtor time, all thread_local objects have been destroyed already - including the local handle.
 			// thus accesses to the local handle will result in und memory accesses.
 			// set up the local detour to bypass the local handle and instead go to the primary module - which is still alive.
-			disjoint_module_container::get().local_detour = m.get();
-
-			#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-			std::cerr << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! primary mid dtor - roots: " << m->roots.size() << '\n';
-			#endif
+			// this must be in the dtor here because it must be set prior to destroying the primary handle (field).
+			// this is so that its potential collection logic can reference the local() disjunction - but not the local_handle() itself (which is already destroyed)
+			disjoint_module_container::get().local_detour.store(m.get(), std::memory_order_release);
 		}
 	} primary_handle;
-
-	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-	std::cerr << "                                !!!! primary handle access\n";
-	#endif
 
 	return primary_handle.m;
 }
@@ -771,29 +758,18 @@ GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 {
 	// thread_local because this is a thread-specific owning handle.
 	// the default value points the current thread to use the primary disjunction.
-	thread_local struct local_handle_t
-	{
-		shared_disjoint_handle m = primary_handle();
-
-		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-		struct _
-		{
-			_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ctor local handle " << std::this_thread::get_id() << '\n'; }
-			~_() { std::cerr << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ dtor local handle " << std::this_thread::get_id() << '\n'; }
-		} __;
-		#endif
-	} local_handle;
-
-	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-	std::cerr << "                                ~~~~ local handle access " << std::this_thread::get_id() << '\n';
-	#endif
+	thread_local shared_disjoint_handle m = primary_handle();
 
 	// if local detour is non-null it means we're in the static dtors (from primary() dtor handler), which means the thread_local handle has already been destroyed.
 	// this would be und access of a destroyed object, but would theoretically only happen if a static dtor tried to make a thread for some reason.
 	// could also happen upon sudden (early) program exit, but that's already undefined behavior.
-	assert(disjoint_module_container::get().local_detour == nullptr);
+	if (disjoint_module_container::get().local_detour.load(std::memory_order_acquire) != nullptr)
+	{
+		std::cerr << "\n\nATTEMPT TO ACCESS LOCAL GC HANDLE DURING STATIC OBJECT DESTRUCTION\n";
+		std::abort();
+	}
 
-	return local_handle.m;
+	return m;
 }
 
 GC::disjoint_module *GC::disjoint_module::primary()
@@ -803,9 +779,10 @@ GC::disjoint_module *GC::disjoint_module::primary()
 GC::disjoint_module *GC::disjoint_module::local()
 {
 	// get the local detour
-	disjoint_module *detour = disjoint_module_container::get().local_detour;
+	disjoint_module *detour = disjoint_module_container::get().local_detour.load(std::memory_order_acquire);
 
-	// if we're taking a detour, use that, otherwise the handle is alive and we should read that instead
+	// if we're taking a detour, use that, otherwise the handle is alive and we should read that instead.
+	// the only time this isn't safe is during abnormal program termination, but that's already undefined behavior so i don't care.
 	return detour ? detour : local_handle().get();
 }
 
@@ -851,7 +828,7 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 		// for each stored disjunction:
 		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
 		// (otherwise we need to constantly update the end iterator after each erasure).
-		for (auto i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+		for (std::list<GC::weak_disjoint_handle>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
 		{
 			// lock and use this disjunction as the local disjunction - then get the raw handle
 			disjoint_module *const raw_handle = (disjoint_module::local_handle() = *i).get();
@@ -876,7 +853,7 @@ void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool col
 		// for each stored disjunction:
 		// (the EXPLICIT std::list::iterator ensures it is indeed a LIST).
 		// (otherwise we need to constantly update the end iterator after each erasure).
-		for (auto i = disjunctions.begin(), end = disjunctions.end(); i != end; )
+		for (std::list<GC::weak_disjoint_handle>::iterator i = disjunctions.begin(), end = disjunctions.end(); i != end; )
 		{
 			// if this is a dangling pointer, erase it
 			if (i->expired()) i = disjunctions.erase(i);
@@ -1247,13 +1224,9 @@ void GC::start_timed_collect()
 
 						// ----------------------------------------------------------- //
 
-						// fetch sleep time
-						auto sleep_time = con._background_collector_sleep_time.load();
-
 						// sleep the sleep time on the collector condition variable.
 						// use a predicate to ensure we wake up only when term is set or when the time has elapsed (i.e. ignore spurious wakeups)
-						con._background_collector_cv.wait_for(collector_lock, sleep_time,
-							[&con, sleep_time, now = std::chrono::steady_clock::now()]{ return con._background_collector_term || std::chrono::steady_clock::now() >= now + sleep_time; });
+						con._background_collector_cv.wait_for(collector_lock, con._background_collector_sleep_time.load(), [&con]{ return con._background_collector_term; });
 
 						// ----------------------------------------------------------- //
 						
