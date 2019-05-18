@@ -2325,9 +2325,8 @@ private: // -- gc disjoint module -- //
 		bool expired() const noexcept;
 	};
 
-	friend struct __gc_background_collector_usage_guard_t;
-	friend struct __gc_primary_usage_guard_t;
-	friend struct __gc_local_usage_guard_t;
+	friend struct __gc_static_guard_t;
+	friend struct __gc_thread_local_guard_t;
 	
 private: // -- (automatic) background collection -- //
 
@@ -8975,19 +8974,20 @@ struct GC::wrapper_traits<std::optional<T>>
 
 // ------------------ //
 
-static struct __gc_background_collector_usage_guard_t
+static struct __gc_static_guard_t
 {
-	__gc_background_collector_usage_guard_t() { GC::background_collector_controller::get(); }
-} __gc_background_collector_usage_guard;
-
-static struct __gc_primary_usage_guard_t
+	__gc_static_guard_t()
+	{
+		GC::disjoint_module::primary_handle(); // first create the primary handle (which creates the module container)
+		GC::background_collector_controller::get(); // then create the background controller (must be initialized after module container so that it's destroyed before it)
+	}
+} __gc_static_guard;
+static thread_local struct __gc_thread_local_guard_t
 {
-	__gc_primary_usage_guard_t() { GC::disjoint_module::primary_handle(); }
-} __gc_primary_usage_guard;
-
-static thread_local struct __gc_local_usage_guard_t
-{
-	__gc_local_usage_guard_t() { GC::disjoint_module::local_handle(); }
-} __gc_local_usage_guard;
+	__gc_thread_local_guard_t()
+	{
+		GC::disjoint_module::local_handle(); // create the local handle - required for nearly every global operation in cpp-gc
+	}
+} __gc_thread_local_guard;
 
 #endif

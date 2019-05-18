@@ -756,19 +756,7 @@ const GC::shared_disjoint_handle &GC::disjoint_module::primary_handle()
 }
 GC::shared_disjoint_handle &GC::disjoint_module::local_handle()
 {
-	// thread_local because this is a thread-specific owning handle.
-	// the default value points the current thread to use the primary disjunction.
 	thread_local shared_disjoint_handle m = primary_handle();
-
-	// if local detour is non-null it means we're in the static dtors (from primary() dtor handler), which means the thread_local handle has already been destroyed.
-	// this would be und access of a destroyed object, but would theoretically only happen if a static dtor tried to make a thread for some reason.
-	// could also happen upon sudden (early) program exit, but that's already undefined behavior.
-	if (disjoint_module_container::get().local_detour.load(std::memory_order_acquire) != nullptr)
-	{
-		std::cerr << "\n\nATTEMPT TO ACCESS LOCAL GC HANDLE DURING STATIC OBJECT DESTRUCTION\n";
-		std::abort();
-	}
-
 	return m;
 }
 
