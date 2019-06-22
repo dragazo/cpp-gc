@@ -78,10 +78,8 @@ template<> struct GC::router<ptr_set>
 
 		GC::route(set.doodle_dud_0, func);
 		GC::route(set.doodle_dud_1, func);
-
-		//GC::route(set.a, set.a);
 	}
-	static void route(const ptr_set &set, GC::mutable_router_fn func) {} // no mutable things to route to
+	static void route(const ptr_set &set, GC::mutable_router_fn func) {}
 };
 
 struct ListNode
@@ -90,12 +88,6 @@ struct ListNode
 	GC::ptr<ListNode> next;
 
 	ptr_set set;
-
-	// show a message that says we called ctor
-	ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(4)); }
-
-	// show a message that says we called dtor
-	~ListNode() { std::this_thread::sleep_for(std::chrono::microseconds(4)); }
 };
 template<> struct GC::router<ListNode>
 {
@@ -106,10 +98,8 @@ template<> struct GC::router<ListNode>
 
 		GC::route(node.set, func);
 	}
-	static void route(const ListNode &node, GC::mutable_router_fn func) // this is correct
-	//static void route(ListNode node, GC::mutable_router_fn func) // this is wrong - by-value T could cause deadlocking
+	static void route(const ListNode &node, GC::mutable_router_fn func)
 	{
-		// only routing to set for future-proofing
 		GC::route(node.set, func);
 	}
 };
@@ -117,34 +107,25 @@ template<> struct GC::router<ListNode>
 // creates a linked list that has a cycle
 void foo()
 {
+	GC::ptr<ListNode> root = GC::make<ListNode>();
+
+	GC::ptr<ListNode> *prev = &root;
+	for (int i = 0; i < 10; ++i)
 	{
-		//GC::collect();
-		
-		// create the first node
-		GC::ptr<ListNode> root = GC::make<ListNode>();
+		(*prev)->next = GC::make<ListNode>();
+		(*prev)->next->prev = *prev;
 
-		// we'll make 10 links in the chain
-		GC::ptr<ListNode> *prev = &root;
-		for (int i = 0; i < 10; ++i)
-		{
-			(*prev)->next = GC::make<ListNode>();
-			(*prev)->next->prev = *prev;
-
-			prev = &(*prev)->next;
-		}
-
-		// then we'll merege the ends into a cycle
-		root->prev = *prev;
-		(*prev)->next = root;
-
-		using std::swap;
-
-		root.swap(*prev);
-		swap(root, *prev);
-
-		//GC::collect();
-		//std::cerr << "\n\n";
+		prev = &(*prev)->next;
 	}
+
+	root->prev = *prev;
+	(*prev)->next = root;
+
+	using std::swap;
+
+	root.swap(*prev);
+	swap(root, *prev);
+
 }
 
 template<typename T>
@@ -692,9 +673,7 @@ int main() try
 	GC::thread(GC::new_disjunction, [] {
 		GC::ptr<router_allocator> p_router_allocator = GC::make<router_allocator>();
 		p_router_allocator->self = p_router_allocator;
-
-		std::this_thread::sleep_for(std::chrono::seconds(2));
-	}).detach();
+	}).join();
 
 	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
 	access_gc_at_ctor->p = access_gc_at_ctor;
@@ -1078,7 +1057,7 @@ int main() try
 	GC::thread(GC::new_disjunction, []
 	{
 		for (int i = 0; i < 8; ++i) thread_local_vec_ptr.emplace_back();
-	}).detach();
+	}).join();
 
 	GC::ptr<int[16]> arr_ptr_new = GC::make<int[16]>();
 	assert(arr_ptr_new != nullptr);
@@ -1720,7 +1699,7 @@ int main() try
 			{
 				GC::ptr<std::size_t> x, y, z, w;
 
-				for (std::size_t i = 0; i < 1000000; ++i)
+				for (std::size_t i = 0; i < 100000; ++i)
 				{
 					// make 3 unique objects
 					x = GC::make<std::size_t>(i + 0);

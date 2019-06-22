@@ -19,6 +19,7 @@
 #include <typeinfo>
 #include <iterator>
 #include <functional>
+#include <condition_variable>
 
 #include <memory>
 #include <tuple>
