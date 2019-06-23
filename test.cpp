@@ -643,6 +643,8 @@ int main() try
 	GC::strategy(GC::strategies::manual);
 	GC::sleep_time(std::chrono::milliseconds(1));
 
+	std::cerr << "here 0\n";
+/*
 	// make sure that ref count decrements to zero result in the object being deleted.
 	// additionally, make sure that if a collection is happening in another thread the ref count guarantee is satisfied.
 	// i.e. if the ref count decs to zero during a collection the object will be destroyed at least by the end of collection.
@@ -665,15 +667,23 @@ int main() try
 			assert(flag);
 		}
 	}
+	*/
+	std::cerr << "here 1\n";
 
 	// -- all other tests -- //
 
 	GC::strategy(GC::strategies::timed);
 
+	std::cerr << "here 2\n";
+
+	// PROBLEM BOI
 	GC::thread(GC::new_disjunction, [] {
 		GC::ptr<router_allocator> p_router_allocator = GC::make<router_allocator>();
 		p_router_allocator->self = p_router_allocator;
 	}).join();
+
+	std::cerr << "here 3\n";
+	return 0;
 
 	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
 	access_gc_at_ctor->p = access_gc_at_ctor;
@@ -689,6 +699,7 @@ int main() try
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
+	std::cerr << "disjunction safety tests:";
 	GC::thread(GC::new_disjunction, []
 	{
 		try
@@ -1070,7 +1081,7 @@ int main() try
 
 		{
 			auto arr = GC::make<alert_t[]>(2);
-			holder = arr.alias(2);
+			holder = arr.alias(0);
 		}
 		std::cerr << "destroyed array - element dtors should follow:\n";
 	}
@@ -1538,6 +1549,7 @@ int main() try
 	}
 
 	auto sse_t_obj = GC::make<sse_t>();
+	assert(((std::uintptr_t)sse_t_obj.get() & (alignof(sse_t) - 1)) == 0);
 
 	GC::ptr<int> ip = GC::make<int>(46);
 	GC::ptr<int> ip_self = ip;
