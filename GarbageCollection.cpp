@@ -19,10 +19,10 @@
 
 // ------------------------------------------------------------- //
 
-// iff nonzero, prints log messages for disjunction handle activity
+// if nonzero, prints log messages for disjunction handle activity
 #define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING 0
 
-// iff nonzero, does extra und safety checks for atomic disjuction handle internals
+// if nonzero, does extra und safety checks for atomic disjuction handle internals
 #define DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_DATA_UND_SAFETY 1
 
 // if nonzero, displays a message on cerr that an object was added to gc database (+ its address)
@@ -446,7 +446,7 @@ void GC::disjoint_module::schedule_handle_create_null(smart_handle &handle)
 	handle.raw = nullptr;
 	
 	// root it
-	__schedule_handle_root(handle);
+	_schedule_handle_root(handle);
 }
 void GC::disjoint_module::schedule_handle_create_bind_new_obj(smart_handle &handle, info *new_obj)
 {
@@ -456,7 +456,7 @@ void GC::disjoint_module::schedule_handle_create_bind_new_obj(smart_handle &hand
 	handle.raw = new_obj;
 
 	// root it
-	__schedule_handle_root(handle);
+	_schedule_handle_root(handle);
 
 	// -- add the object -- //
 
@@ -479,7 +479,7 @@ void GC::disjoint_module::schedule_handle_create_alias(smart_handle &handle, con
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// get the target
-	info *target = __get_current_target(src_handle);
+	info *target = _get_current_target(src_handle);
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
@@ -498,7 +498,7 @@ void GC::disjoint_module::schedule_handle_create_alias(smart_handle &handle, con
 	if (handle.raw) ++handle.raw->ref_count;
 
 	// root it
-	__schedule_handle_root(handle);
+	_schedule_handle_root(handle);
 }
 
 void GC::disjoint_module::schedule_handle_destroy(const smart_handle &handle)
@@ -506,17 +506,17 @@ void GC::disjoint_module::schedule_handle_destroy(const smart_handle &handle)
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 
 	// get the old target
-	info *old_target = __get_current_target(handle);
+	info *old_target = _get_current_target(handle);
 
 	// unroot the handle
-	__schedule_handle_unroot(handle);
+	_schedule_handle_unroot(handle);
 
 	// purge the handle from the repoint cache so we don't dereference undefined memory.
 	// the const cast is ok because we won't be modifying it - just for lookup.
 	handle_repoint_cache.erase(const_cast<info**>(&handle.raw));
 
 	// dec the reference count
-	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
+	_MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
 
 void GC::disjoint_module::schedule_handle_unroot(const smart_handle &handle)
@@ -524,7 +524,7 @@ void GC::disjoint_module::schedule_handle_unroot(const smart_handle &handle)
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 	
 	// unroot it
-	__schedule_handle_unroot(handle);
+	_schedule_handle_unroot(handle);
 }
 
 void GC::disjoint_module::schedule_handle_repoint_null(smart_handle &handle)
@@ -532,21 +532,21 @@ void GC::disjoint_module::schedule_handle_repoint_null(smart_handle &handle)
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 
 	// get the old target
-	info *old_target = __get_current_target(handle);
+	info *old_target = _get_current_target(handle);
 
 	// repoint handle to null
-	__raw_schedule_handle_repoint(handle, nullptr);
+	_raw_schedule_handle_repoint(handle, nullptr);
 
 	// decrement old target reference count
-	__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
+	_MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 }
 void GC::disjoint_module::schedule_handle_repoint(smart_handle &handle, const smart_handle &new_value)
 {
 	std::unique_lock<std::mutex> internal_lock(internal_mutex);
 	
 	// get the old/new targets
-	info *old_target = __get_current_target(handle);
-	info *new_target = __get_current_target(new_value);
+	info *old_target = _get_current_target(handle);
+	info *new_target = _get_current_target(new_value);
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
@@ -562,13 +562,13 @@ void GC::disjoint_module::schedule_handle_repoint(smart_handle &handle, const sm
 	if (old_target != new_target)
 	{
 		// repoint handle to the new target
-		__raw_schedule_handle_repoint(handle, new_target);
+		_raw_schedule_handle_repoint(handle, new_target);
 
 		// increment new target reference count
 		if (new_target) ++new_target->ref_count;
 
 		// decrement old target reference count
-		__MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
+		_MUST_BE_LAST_ref_count_dec(old_target, std::move(internal_lock));
 	}
 }
 void GC::disjoint_module::schedule_handle_repoint_swap(smart_handle &handle_a, smart_handle &handle_b)
@@ -576,8 +576,8 @@ void GC::disjoint_module::schedule_handle_repoint_swap(smart_handle &handle_a, s
 	std::lock_guard<std::mutex> internal_lock(internal_mutex);
 
 	// get their current repoint targets
-	info *target_a = __get_current_target(handle_a);
-	info *target_b = __get_current_target(handle_b);
+	info *target_a = _get_current_target(handle_a);
+	info *target_b = _get_current_target(handle_b);
 
 	#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_SAFETY_CHECKS
 
@@ -593,8 +593,8 @@ void GC::disjoint_module::schedule_handle_repoint_swap(smart_handle &handle_a, s
 	if (target_a != target_b)
 	{
 		// schedule repoint actions to swap them
-		__raw_schedule_handle_repoint(handle_a, target_b);
-		__raw_schedule_handle_repoint(handle_b, target_a);
+		_raw_schedule_handle_repoint(handle_a, target_b);
+		_raw_schedule_handle_repoint(handle_b, target_a);
 
 		// there's no need for reference counting logic in a swap operation
 	}
@@ -612,7 +612,7 @@ void GC::disjoint_module::end_ignore_collect()
 	--ignore_collect_count;
 }
 
-void GC::disjoint_module::__schedule_handle_root(const smart_handle &handle)
+void GC::disjoint_module::_schedule_handle_root(const smart_handle &handle)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -630,7 +630,7 @@ void GC::disjoint_module::__schedule_handle_root(const smart_handle &handle)
 		roots_remove_cache.erase(&handle.raw); // ensure the sets are disjoint
 	}
 }
-void GC::disjoint_module::__schedule_handle_unroot(const smart_handle &handle)
+void GC::disjoint_module::_schedule_handle_unroot(const smart_handle &handle)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -649,7 +649,7 @@ void GC::disjoint_module::__schedule_handle_unroot(const smart_handle &handle)
 	}
 }
 
-void GC::disjoint_module::__raw_schedule_handle_repoint(smart_handle &handle, info *target)
+void GC::disjoint_module::_raw_schedule_handle_repoint(smart_handle &handle, info *target)
 {
 	// if there's no collector thread, we MUST apply the change immediately
 	if (collector_thread == std::thread::id())
@@ -664,7 +664,7 @@ void GC::disjoint_module::__raw_schedule_handle_repoint(smart_handle &handle, in
 	else handle_repoint_cache[&handle.raw] = target;
 }
 
-GC::info *GC::disjoint_module::__get_current_target(const smart_handle &handle)
+GC::info *GC::disjoint_module::_get_current_target(const smart_handle &handle)
 {
 	// find new_value's repoint target from the cache.
 	// const cast is safe because we won't be modifying it (just for lookup in the repoint cache).
@@ -675,7 +675,7 @@ GC::info *GC::disjoint_module::__get_current_target(const smart_handle &handle)
 	return new_value_iter != handle_repoint_cache.end() ? new_value_iter->second : handle.raw;
 }
 
-void GC::disjoint_module::__MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
+void GC::disjoint_module::_MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock)
 {
 	// decrement the reference count
 	// if it falls to zero we need to perform ref count deletion logic
@@ -774,6 +774,13 @@ GC::disjoint_module *GC::disjoint_module::local()
 	return detour ? detour : local_handle().get();
 }
 
+GC::disjoint_module_container::~disjoint_module_container()
+{
+	// the background collector controller needs this object to still be alive while it does its work.
+	// so if we're about to die, notify it to stop and wait for it to finish before we actually kick the bucket.
+	background_collector_controller::get().stop();
+}
+
 void GC::disjoint_module_container::create_new_disjunction(shared_disjoint_handle &dest)
 {
 	// create a new disjoint module handle data block
@@ -795,7 +802,7 @@ void GC::disjoint_module_container::create_new_disjunction(shared_disjoint_handl
 	}
 }
 
-void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY___collect(bool collect)
+void GC::disjoint_module_container::BACKGROUND_COLLECTOR_ONLY_collect(bool collect)
 {
 	{
 		std::lock_guard<std::mutex> internal_lock(internal_mutex);
@@ -923,8 +930,8 @@ void GC::shared_disjoint_handle::reset(handle_data *other)
 		// we include the lock strong refs because those locks succeeded - i.e. our very existence as a non-lock strong owner proves those locks succeeded.
 		if ((prev & handle_data::strong_mask) == handle_data::strong_1)
 		{
-			__module->blocking_collect(); // perform one final collection to make sure everything's collected
-			__module->~disjoint_module(); // then destroy the module itself - its dtor asserts that all objects were collected
+			_module->blocking_collect(); // perform one final collection to make sure everything's collected
+			_module->~disjoint_module(); // then destroy the module itself - its dtor asserts that all objects were collected
 
 			// if there were also no more weak references, delete the handle
 			if ((prev & handle_data::weak_mask) == 0) delete data;
@@ -937,10 +944,10 @@ void GC::shared_disjoint_handle::reset(handle_data *other)
 	data = other;
 	if (data)
 	{
-		__module = data->get(); // cache the module pointer
+		_module = data->get(); // cache the module pointer
 		data->tag_add(handle_data::strong_1, std::memory_order_acq_rel); // bump up the strong ref count
 	}
-	else __module = nullptr; // cache the module pointer (in this case null)
+	else _module = nullptr; // cache the module pointer (in this case null)
 }
 
 void GC::shared_disjoint_handle::lock(handle_data *other)
@@ -963,7 +970,7 @@ void GC::shared_disjoint_handle::lock(handle_data *other)
 
 			// we now own a reference - do the raw repoint
 			data = other;
-			__module = other->get();
+			_module = other->get();
 		}
 		// otherwise the object is expired
 		else
@@ -974,7 +981,7 @@ void GC::shared_disjoint_handle::lock(handle_data *other)
 	}
 }
 
-GC::shared_disjoint_handle::shared_disjoint_handle(std::nullptr_t) noexcept : __module(nullptr), data(nullptr) {}
+GC::shared_disjoint_handle::shared_disjoint_handle(std::nullptr_t) noexcept : _module(nullptr), data(nullptr) {}
 GC::shared_disjoint_handle::~shared_disjoint_handle()
 {
 	// if we have a non-null on_handle_dtor event, call it - it's guaranteed not to throw
@@ -988,7 +995,7 @@ GC::shared_disjoint_handle::shared_disjoint_handle(const shared_disjoint_handle 
 {
 	// alias the same disjunction
 	data = other.data;
-	__module = other.__module;
+	_module = other._module;
 
 	// bump up the strong ref count to account for our aliasing
 	if (data) data->tag_add(handle_data::strong_1, std::memory_order_acq_rel);
@@ -997,7 +1004,7 @@ GC::shared_disjoint_handle::shared_disjoint_handle(shared_disjoint_handle &&othe
 {
 	// steal disjunction ownership - ref count change is net zero
 	data = std::exchange(other.data, nullptr);
-	__module = std::exchange(other.__module, nullptr);
+	_module = std::exchange(other._module, nullptr);
 }
 
 GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(const shared_disjoint_handle &other)
@@ -1014,7 +1021,7 @@ GC::shared_disjoint_handle &GC::shared_disjoint_handle::operator=(shared_disjoin
 
 		// then steal disjunction ownership - ref count change is net zero
 		data = std::exchange(other.data, nullptr);
-		__module = std::exchange(other.__module, nullptr);
+		_module = std::exchange(other._module, nullptr);
 	}
 
 	return *this;
@@ -1182,14 +1189,17 @@ bool GC::background_collector_controller::start()
 	std::thread([this]
 	{
 		// bind the local_handle() dtor to call stop() on this (singleton) object
+		// disjunction_module_container will also call stop() on this object in the destructor (implicitly).
+		// these are required to guarantee that those objects are still alive while we're using them (otherwise undefined memory access).
 		disjoint_module::local_handle().set_on_handle_dtor_event([] { GC::background_collector_controller::get().stop(); });
 
 		// sever ties to the default module - we don't want to impede object deletion while sleeping.
 		disjoint_module::local_handle() = nullptr;
 
-		#if DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING
-		std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
-		#endif
+		if constexpr (DRAGAZO_GARBAGE_COLLECT_DISJUNCTION_HANDLE_LOGGING)
+		{
+			std::cerr << "start timed collect thread: " << std::this_thread::get_id() << '\n';
+		}
 
 		// try the operation
 		try
@@ -1206,14 +1216,14 @@ bool GC::background_collector_controller::start()
 				// ----------------------------------------------------------- //
 
 				// pre-check the term flag before performing the sleep operation (if set, mark term flag as processed)
-				if (this->thread_term) { this->thread_term_processed = true; break; }
+				if (this->thread_term) break;
 
 				// sleep the sleep time on the collector condition variable.
 				// use a predicate to ensure we wake up only when the time has elapsed or when term is set (i.e. ignore spurious wakeups)
 				this->thread_sleep_cv.wait_for(thread_lock, this->sleep_time.load(), [this] { return this->thread_term; });
 
 				// (post-check) if we woke up because the term flag was set, exit immediately (if set, mark term flag as processed)
-				if (this->thread_term) { this->thread_term_processed = true; break; }
+				if (this->thread_term) break;
 
 				// ----------------------------------------------------------- //
 
@@ -1222,13 +1232,14 @@ bool GC::background_collector_controller::start()
 				thread_lock.unlock();
 
 				// perform the collection - if using timed collect strategy perform a full collection, otherwise just a prune action
-				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY___collect((int)this->strategy.load() & (int)strategies::timed);
+				disjoint_module_container::get().BACKGROUND_COLLECTOR_ONLY_collect((int)this->strategy.load() & (int)strategies::timed);
 			}
 
 			// at this point we still own the lock - this is important for the following line:
 			// the only way we get here is if we broke out of the loop due to the collector term flag.
 			// (while we still hold the mutex) we need to signal the term_waiters cv to wake up any (and all) threads that signaled us to stop (which are now waiting on us to finish).
 			// if we didn't currently hold the mutex, some threads could miss their signal and potentially never wake up, thus hanging the entire program.
+			this->thread_term_processed = true;
 			this->term_waiters_cv.notify_all();
 		}
 		// if we ever hit an error, something terrible happened

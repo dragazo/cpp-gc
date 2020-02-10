@@ -14,12 +14,12 @@
 #include "GarbageCollection.h"
 
 
-std::mutex __io_mutex;
+std::mutex _io_mutex;
 // prints stuff to cerr in a thread-safe fashion
 template<typename ...Args>
 void sync_err_print(Args &&...args)
 {
-	std::lock_guard<std::mutex> io_lock(__io_mutex);
+	std::lock_guard<std::mutex> io_lock(_io_mutex);
 	(std::cout << ... << std::forward<Args>(args));
 }
 
@@ -79,7 +79,7 @@ template<> struct GC::router<ptr_set>
 		GC::route(set.doodle_dud_0, func);
 		GC::route(set.doodle_dud_1, func);
 	}
-	static void route(const ptr_set &set, GC::mutable_router_fn func) {}
+	static void route(const ptr_set&, GC::mutable_router_fn) {}
 };
 
 struct ListNode
@@ -504,7 +504,7 @@ template<>
 struct GC::router<ctor_collect_t>
 {
 	template<typename F>
-	static void route(const ctor_collect_t &v, F f) {}
+	static void route(const ctor_collect_t&, F) {}
 };
 
 struct dtor_collect_t
@@ -515,7 +515,7 @@ template<>
 struct GC::router<dtor_collect_t>
 {
 	template<typename F>
-	static void route(const dtor_collect_t &v, F f) {}
+	static void route(const dtor_collect_t&, F) {}
 };
 
 struct ctor_dtor_collect_t
@@ -527,7 +527,7 @@ template<>
 struct GC::router<ctor_dtor_collect_t>
 {
 	template<typename F>
-	static void route(const ctor_dtor_collect_t &v, F f) {}
+	static void route(const ctor_dtor_collect_t&, F) {}
 };
 
 
@@ -538,11 +538,11 @@ struct cpy_mov_intrin
 	cpy_mov_intrin() { std::cerr << "ctor\n"; }
 	~cpy_mov_intrin() { std::cerr << (src ? "SRC dtor\n" : "dtor\n"); }
 
-	cpy_mov_intrin(const cpy_mov_intrin &other) { std::cerr << "cpy ctor\n"; }
-	cpy_mov_intrin(cpy_mov_intrin &&other) { std::cerr << "mov ctor\n"; }
+	cpy_mov_intrin(const cpy_mov_intrin&) { std::cerr << "cpy ctor\n"; }
+	cpy_mov_intrin(cpy_mov_intrin&&) { std::cerr << "mov ctor\n"; }
 
-	cpy_mov_intrin &operator=(const cpy_mov_intrin &other) { std::cerr << "cpy asgn\n"; return *this; }
-	cpy_mov_intrin &operator=(cpy_mov_intrin &&other) { std::cerr << "mov asgn\n"; return *this; }
+	cpy_mov_intrin &operator=(const cpy_mov_intrin&) { std::cerr << "cpy asgn\n"; return *this; }
+	cpy_mov_intrin &operator=(cpy_mov_intrin&&) { std::cerr << "mov asgn\n"; return *this; }
 };
 void intrin_printer(cpy_mov_intrin, cpy_mov_intrin)
 {
@@ -608,11 +608,11 @@ struct thread_func_t
 
 
 // begins a timer in a new scope - requires a matching timer end point.
-#define TIMER_BEGIN() { const auto __timer_begin = std::chrono::high_resolution_clock::now();
+#define TIMER_BEGIN() { const auto _timer_begin = std::chrono::high_resolution_clock::now();
 // ends the timer in the current scope - should not be used if there is no timer in the current scope.
 // units is the (unquoted) name of a std::chrono time unit. name is the name of the timer (a c-style string).
-#define TIMER_END(units, name) const auto __timer_end = std::chrono::high_resolution_clock::now(); \
-	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(__timer_end - __timer_begin).count() << " " #units "\n"; }
+#define TIMER_END(units, name) const auto _timer_end = std::chrono::high_resolution_clock::now(); \
+	std::cerr << "\ntimer elapsed - " name ": " << std::chrono::duration_cast<std::chrono::units>(_timer_end - _timer_begin).count() << " " #units "\n"; }
 
 // represents a trivial gc type - used for forcing wrapped type conversions
 struct gc_t {};
@@ -632,7 +632,7 @@ int main() try
 		~_end_logger_t() { std::cerr << "\nend main: " << std::this_thread::get_id() << "\n\n"; }
 	} _end_logger;
 
-	TIMER_BEGIN();
+	const auto full_start = std::chrono::high_resolution_clock::now();
 
 	// -- tests that require no background collector to work -- //
 
@@ -643,8 +643,6 @@ int main() try
 	GC::strategy(GC::strategies::manual);
 	GC::sleep_time(std::chrono::milliseconds(1));
 
-	std::cerr << "here 0\n";
-/*
 	// make sure that ref count decrements to zero result in the object being deleted.
 	// additionally, make sure that if a collection is happening in another thread the ref count guarantee is satisfied.
 	// i.e. if the ref count decs to zero during a collection the object will be destroyed at least by the end of collection.
@@ -667,23 +665,18 @@ int main() try
 			assert(flag);
 		}
 	}
-	*/
-	std::cerr << "here 1\n";
 
 	// -- all other tests -- //
 
-	GC::strategy(GC::strategies::timed);
-
-	std::cerr << "here 2\n";
-
+	
+/*
 	// PROBLEM BOI
 	GC::thread(GC::new_disjunction, [] {
 		GC::ptr<router_allocator> p_router_allocator = GC::make<router_allocator>();
 		p_router_allocator->self = p_router_allocator;
 	}).join();
 
-	std::cerr << "here 3\n";
-	return 0;
+	return 0;*/
 
 	access_gc_at_ctor = GC::make<access_gc_at_ctor_t>();
 	access_gc_at_ctor->p = access_gc_at_ctor;
@@ -855,6 +848,34 @@ int main() try
 		}
 	}
 
+	std::cerr << "\n-------- ctors --------\n";
+	{
+		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
+		GC::ptr<gc_self_ptr> gcsp = GC::make<gc_self_ptr>();
+
+		sp->p = std::make_unique<decltype(sp)>(sp);
+		gcsp->p = std::make_unique<decltype(gcsp)>(gcsp);
+	}
+	std::cerr << "-------- collect 1 --------\n";
+	GC::collect();
+	std::cerr << "-------- collect 2 - SHOULD BE EMPTY --------\n";
+	GC::collect();
+	std::cerr << "-------- end --------\n\n";
+
+	std::cerr << "------ SHOULD BE SELF-CONTAINED ------\n";
+	{
+		GC::ptr<alert_t> holder;
+
+		{
+			auto arr = GC::make<alert_t[]>(2);
+			holder = arr.alias(0);
+		}
+		std::cerr << "destroyed array - element dtors should follow:\n";
+	}
+	std::cerr << "----------------- end ----------------\n\n";
+
+	GC::strategy(GC::strategies::timed);
+
 	// -----------------------------------------------------------------------------------------------------
 
 	static_assert(GC::has_trivial_router<int>::value, "trivial assumption failure");
@@ -1011,21 +1032,6 @@ int main() try
 
 	// -----------------------------------------------------------------------------------------------------
 
-	std::cerr << "\n-------- ctors --------\n";
-	{
-		GC::ptr<self_ptr> sp = GC::make<self_ptr>();
-		GC::ptr<gc_self_ptr> gcsp = GC::make<gc_self_ptr>();
-
-		sp->p = std::make_unique<decltype(sp)>(sp);
-		gcsp->p = std::make_unique<decltype(gcsp)>(gcsp);
-	}
-	std::cerr << "-------- collect 1 --------\n";
-	GC::collect();
-	std::cerr << "-------- collect 2 - SHOULD BE EMPTY --------\n";
-	GC::collect();
-	std::cerr << "-------- end --------\n\n";
-
-
 	#if DRAGAZO_GARBAGE_COLLECT_EXTRA_UND_CHECKS
 	{
 		GC::ptr<void> sink; // sink location to avoid invoking nodiscard
@@ -1074,18 +1080,6 @@ int main() try
 	assert(arr_ptr_new != nullptr);
 
 	GC::collect();
-
-	std::cerr << "------ SHOULD BE SELF-CONTAINED ------\n";
-	{
-		GC::ptr<alert_t> holder;
-
-		{
-			auto arr = GC::make<alert_t[]>(2);
-			holder = arr.alias(0);
-		}
-		std::cerr << "destroyed array - element dtors should follow:\n";
-	}
-	std::cerr << "----------------- end ----------------\n\n";
 
 	{ // -- array-form GC::ptr tests -- //
 
@@ -1329,7 +1323,7 @@ int main() try
 		static_assert(std::is_same<const volatile float, std::variant_alternative_t<1, const volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
 		static_assert(std::is_same<const volatile SymbolTable, std::variant_alternative_t<2, const volatile GC::variant<int, float, SymbolTable>>>::value, "variant alternative error");
 
-		__gc_variant<std::mutex, int, float, void*> mgf;
+		_gc_variant<std::mutex, int, float, void*> mgf;
 		std::hash<decltype(mgf)> variant_hasher;
 		variant_hasher(mgf);
 
@@ -1703,9 +1697,9 @@ int main() try
 		
 		GC::thread threads[4];
 
-		//for (auto &i : threads) i = GC::thread(GC::primary_disjunction, []()
-		//for (auto &i : threads) i = GC::thread(GC::inherit_disjunction, []()
-		for (auto &i : threads) i = GC::thread(GC::new_disjunction, []()
+		//for (auto &thread : threads) thread = GC::thread(GC::primary_disjunction, []()
+		//for (auto &thread : threads) thread = GC::thread(GC::inherit_disjunction, []()
+		for (auto &thread : threads) thread = GC::thread(GC::new_disjunction, []()
 		{
 			try
 			{
@@ -1742,7 +1736,8 @@ int main() try
 		TIMER_END(milliseconds, "interference test");
 	}
 
-	TIMER_END(milliseconds, "all tests");
+	const auto full_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - full_start).count();
+	std::cerr << "full alapsed time: " << full_elapsed << " ms\n";
 
 	return 0;
 }

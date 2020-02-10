@@ -72,7 +72,7 @@
 // the default type of lockable to use in wrappers.
 // i suggest you use some form of recursive mutex - otherwise e.g. a wrapped container's element type could collect under a lock and deadlock.
 // if you want some other type for a specific object, you should use the available template utilities instead of changing this globally.
-typedef std::recursive_mutex __gc_default_wrapper_lockable_t;
+typedef std::recursive_mutex _gc_default_wrapper_lockable_t;
 
 // -------------------------------- //
 
@@ -81,46 +81,46 @@ typedef std::recursive_mutex __gc_default_wrapper_lockable_t;
 // -------------------------------- //
 
 // don't use these directly - use their aliases in the GC class.
-// e.g. don't use __gc_vector, use GC::vector.
+// e.g. don't use _gc_vector, use GC::vector.
 
 template<typename T, typename Deleter, typename Lockable>
-class __gc_unique_ptr;
+class _gc_unique_ptr;
 
 template<typename T, typename Allocator, typename Lockable>
-class __gc_vector;
+class _gc_vector;
 template<typename T, typename Allocator, typename Lockable>
-class __gc_deque;
+class _gc_deque;
 
 template<typename T, typename Allocator, typename Lockable>
-class __gc_forward_list;
+class _gc_forward_list;
 template<typename T, typename Allocator, typename Lockable>
-class __gc_list;
+class _gc_list;
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-class __gc_set;
+class _gc_set;
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-class __gc_multiset;
+class _gc_multiset;
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-class __gc_map;
+class _gc_map;
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-class __gc_multimap;
+class _gc_multimap;
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_set;
+class _gc_unordered_set;
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_multiset;
+class _gc_unordered_multiset;
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_map;
+class _gc_unordered_map;
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_multimap;
+class _gc_unordered_multimap;
 
 template<typename Lockable, typename ...Types>
-class __gc_variant;
+class _gc_variant;
 
 template<typename T, typename Lockable>
-class __gc_optional;
+class _gc_optional;
 
 // ------------------------ //
 
@@ -236,14 +236,14 @@ public: // -- router intrinsics -- //
 		// given a router type, creates an overload set that, when passed nullptr, resolves to a single function.
 		// said function's return type denotes the proper value.
 		template<typename R>
-		static std::false_type __returns_router_is_trivial(void*);
+		static std::false_type _returns_router_is_trivial(void*);
 
 		template<typename R, std::enable_if_t<R::is_trivial, int> = 0>
-		static std::true_type __returns_router_is_trivial(std::nullptr_t);
+		static std::true_type _returns_router_is_trivial(std::nullptr_t);
 
 	public: // -- public stuff -- //
 
-		static constexpr bool value = decltype(__returns_router_is_trivial<router<std::remove_cv_t<std::remove_reference_t<T>>>>(nullptr))::value;
+		static constexpr bool value = decltype(_returns_router_is_trivial<router<std::remove_cv_t<std::remove_reference_t<T>>>>(nullptr))::value;
 	};
 
 	// gets if all Types... are defined as trivial (i.e. this is true iff all the types are non-gc types).
@@ -264,7 +264,7 @@ public: // -- user-level routing utilities -- //
 		GC::router<std::remove_cv_t<T>>::route(obj, func);
 	}
 	template<typename T, typename F, std::enable_if_t<has_trivial_router<T>::value && is_router_function_object<F>::value, int> = 0>
-	static void route(const T &obj, F func) {}
+	static void route(const T&, F) {}
 
 	// recursively routes to each object in an iteration range - should only be used inside router functions
 	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<!has_trivial_router<typename std::iterator_traits<IterBegin>::value_type>::value && is_router_function_object<F>::value, int> = 0>
@@ -273,7 +273,7 @@ public: // -- user-level routing utilities -- //
 		for (; begin != end; ++begin) GC::route(*begin, func);
 	}
 	template<typename IterBegin, typename IterEnd, typename F, std::enable_if_t<has_trivial_router<typename std::iterator_traits<IterBegin>::value_type>::value && is_router_function_object<F>::value, int> = 0>
-	static void route_range(IterBegin begin, IterEnd end, F func) {}
+	static void route_range(IterBegin, IterEnd, F) {}
 
 public: // -- exception types -- //
 
@@ -445,16 +445,16 @@ private: // -- base router function -- //
 	// the base type for all router functions.
 	// this class should not be used directly.
 	// it is undefined behavior to delete this type polymorphically.
-	struct __base_router_fn
+	struct _base_router_fn
 	{
 	protected: // -- contents hidden for security -- //
 
 		void(*const func)(const smart_handle&); // raw function pointer to call
 
-		__base_router_fn(void(*_func)(const smart_handle&)) : func(_func) {}
-		__base_router_fn(std::nullptr_t) = delete;
+		_base_router_fn(void(*_func)(const smart_handle&)) : func(_func) {}
+		_base_router_fn(std::nullptr_t) = delete;
 
-		~__base_router_fn() = default;
+		~_base_router_fn() = default;
 
 		void operator()(const smart_handle &arg) { func(arg); }
 		void operator()(smart_handle&&) = delete; // for safety - ensures we can't call with an rvalue
@@ -463,9 +463,9 @@ private: // -- base router function -- //
 public: // -- specific router function type definitions -- //
 
 	// type used for a normal router event
-	struct router_fn : __base_router_fn { using __base_router_fn::__base_router_fn; friend class GC; };
+	struct router_fn : _base_router_fn { using _base_router_fn::_base_router_fn; friend class GC; };
 	// type used for mutable router event
-	struct mutable_router_fn : __base_router_fn { using __base_router_fn::__base_router_fn; friend class GC; };
+	struct mutable_router_fn : _base_router_fn { using _base_router_fn::_base_router_fn; friend class GC; };
 
 private: // -- extent extensions -- //
 
@@ -910,7 +910,7 @@ public: // -- stdlib misc router specializations -- //
 				route<I + 1>(tuple, func);
 			}
 			template<std::size_t I = 0, std::enable_if_t<(I >= sizeof...(Types)), int> = 0>
-			static void route(const std::tuple<Types...> &tuple, F func) {}
+			static void route(const std::tuple<Types...>&, F) {}
 		};
 
 		template<typename F>
@@ -1113,7 +1113,7 @@ private: // -- std adapter internal container access functions -- //
 
 	// given a std adapter type (stack, queue, priority_queue), gets the underlying container (by reference)
 	template<typename Adapter>
-	static const auto &__get_adapter_container(const Adapter &adapter)
+	static const auto &_get_adapter_container(const Adapter &adapter)
 	{
 		// we need access to Adapter's protected data, so create a derived type
 		struct HaxAdapter : Adapter
@@ -1121,10 +1121,10 @@ private: // -- std adapter internal container access functions -- //
 			// given a std adapter type (stack, queue, priority_queue), gets the underlying container (by reference)
 			// this construction implicitly performs a static_cast on &HaxAdapter::c to convert it into &Adapter::c.
 			// this is safe because HaxAdapter doesn't define anything on its own, so if c exists, it came from Adapter.
-			static const auto &__get_adapter_container(const Adapter &adapter) { return adapter.*&HaxAdapter::c; }
+			static const auto &_get_adapter_container(const Adapter &adapter) { return adapter.*&HaxAdapter::c; }
 		};
 		
-		return HaxAdapter::__get_adapter_container(adapter);
+		return HaxAdapter::_get_adapter_container(adapter);
 	}
 
 public: // -- std adapter routers -- //
@@ -1136,7 +1136,7 @@ public: // -- std adapter routers -- //
 
 		template<typename F> static void route(const std::stack<T, Container> &stack, F func)
 		{
-			const Container &container = __get_adapter_container(stack);
+			const Container &container = _get_adapter_container(stack);
 			GC::route(container, func);
 		}
 	};
@@ -1148,7 +1148,7 @@ public: // -- std adapter routers -- //
 
 		template<typename F> static void route(const std::queue<T, Container> &queue, F func)
 		{
-			const Container &container = __get_adapter_container(queue);
+			const Container &container = _get_adapter_container(queue);
 			GC::route(container, func);
 		}
 	};
@@ -1160,7 +1160,7 @@ public: // -- std adapter routers -- //
 
 		template<typename F> static void route(const std::priority_queue<T, Container, Compare> &pqueue, F func)
 		{
-			const Container &container = __get_adapter_container(pqueue);
+			const Container &container = _get_adapter_container(pqueue);
 			GC::route(container, func);
 		}
 	};
@@ -1587,7 +1587,7 @@ public: // -- auto collection utilities -- //
 public: // -- wrapper traits -- //
 
 	// the default lockable type to use for wrappers
-	typedef __gc_default_wrapper_lockable_t default_lockable_t;
+	typedef _gc_default_wrapper_lockable_t default_lockable_t;
 
 	// given a type T, gets its wrapper traits, including the unwrapped and wrapped type equivalents.
 	// the wrapped type must be gc-ready with a properly-mutexed router function.
@@ -2038,19 +2038,19 @@ private: // -- gc disjoint module -- //
 	private: // -- private interface (unsafe) -- //
 		
 		// marks handle as a root - internal_mutex should be locked
-		void __schedule_handle_root(const smart_handle &handle);
+		void _schedule_handle_root(const smart_handle &handle);
 		// unmarks handle as a root - internal_mutex should be locked
-		void __schedule_handle_unroot(const smart_handle &handle);
+		void _schedule_handle_unroot(const smart_handle &handle);
 
 		// the underlying function for all handle repoint actions.
 		// handles the logic of managing the repoint cache for repointing handle to target.
 		// DOES NOT HANDLE REFERENCE COUNT LOGIC - DO THAT ON YOUR OWN.
-		void __raw_schedule_handle_repoint(smart_handle &handle, info *target);
+		void _raw_schedule_handle_repoint(smart_handle &handle, info *target);
 
 		// gets the current target info object of new_value.
 		// otherwise returns the current repoint target if it's in the repoint database.
 		// otherwise returns the current pointed-to value of value.
-		info *__get_current_target(const smart_handle &handle);
+		info *_get_current_target(const smart_handle &handle);
 
 		// performs the reference count decrement logic on target (allowed to be null).
 		// internal_lock is the (already-owned) lock on internal_mutex that was taken previously.
@@ -2059,7 +2059,7 @@ private: // -- gc disjoint module -- //
 		// otherwise does nothing (aside from the reference count decrement).
 		// handles all deletion logic internally.
 		// THIS MUST BE THE LAST THING YOU DO UNDER INTERNAL_MUTEX LOCK.
-		void __MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
+		void _MUST_BE_LAST_ref_count_dec(info *target, std::unique_lock<std::mutex> internal_lock);
 
 	public: // -- factory accessors -- //
 
@@ -2115,6 +2115,7 @@ private: // -- gc disjoint module -- //
 	private: // -- ctor / dtor / asgn -- //
 
 		disjoint_module_container() = default;
+		~disjoint_module_container();
 
 		disjoint_module_container(const disjoint_module_container&) = delete;
 		disjoint_module_container &operator=(const disjoint_module_container&) = delete;
@@ -2133,7 +2134,7 @@ private: // -- gc disjoint module -- //
 		// THIS MUST ONLY BE INVOKED BY THE BACKGROUND COLLECTOR!!
 		// this is because the internals of this function will repoint the local disjunction handle all over the place and leave it severed.
 		// if collect is true, performs a collection on each stored disjunction, otherwise only culls dangling handles.
-		void BACKGROUND_COLLECTOR_ONLY___collect(bool collect);
+		void BACKGROUND_COLLECTOR_ONLY_collect(bool collect);
 	};
 
 	// data object used by shared/weak disjoint handles - entirely externally-managed
@@ -2201,7 +2202,7 @@ private: // -- gc disjoint module -- //
 	{
 	private: // -- data -- //
 
-		disjoint_module *__module; // the pre-cached module pointer - at all times __module and data are both null or __module == data->get()
+		disjoint_module *_module; // the pre-cached module pointer - at all times _module and data are both null or _module == data->get()
 		handle_data *data; // the module allocation block - stores all the ref count info and the actual module itself
 
 		friend class weak_disjoint_handle;
@@ -2264,12 +2265,12 @@ private: // -- gc disjoint module -- //
 	public: // -- module access -- //
 
 		// returns true iff this owning handle aliases a disjunction
-		explicit operator bool() const noexcept { return __module != nullptr; }
+		explicit operator bool() const noexcept { return _module != nullptr; }
 		// returns true iff this owning handle does not alias a disjunction
-		bool operator!() const noexcept { return __module == nullptr; }
+		bool operator!() const noexcept { return _module == nullptr; }
 
 		// gets the aliased disjunction - if this handle does not alias a disjunction returns null
-		disjoint_module *get() const noexcept { return __module; }
+		disjoint_module *get() const noexcept { return _module; }
 
 		disjoint_module *operator->() const noexcept { return get(); }
 		disjoint_module &operator*() const { return *get(); }
@@ -2326,8 +2327,8 @@ private: // -- gc disjoint module -- //
 		bool expired() const noexcept;
 	};
 
-	friend struct __gc_static_guard_t;
-	friend struct __gc_thread_local_guard_t;
+	friend struct _gc_static_guard_t;
+	friend struct _gc_thread_local_guard_t;
 	
 private: // -- (automatic) background collection -- //
 
@@ -2499,7 +2500,7 @@ std::basic_ostream<U, V> &operator<<(std::basic_ostream<U, V> &ostr, const GC::p
 // ------------------------- //
 
 template<typename T, typename Deleter, typename Lockable>
-class __gc_unique_ptr
+class _gc_unique_ptr
 {
 private: // -- data -- //
 
@@ -2509,7 +2510,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_unique_ptr>;
+	friend struct GC::router<_gc_unique_ptr>;
 
 private: // -- data accessors -- //
 
@@ -2533,56 +2534,56 @@ public: // -- types -- //
 
 public: // -- ctor / dtor -- //
 
-	constexpr __gc_unique_ptr() noexcept
+	constexpr _gc_unique_ptr() noexcept
 	{
 		new (buffer) wrapped_t();
 	}
-	constexpr __gc_unique_ptr(std::nullptr_t) noexcept
+	constexpr _gc_unique_ptr(std::nullptr_t) noexcept
 	{
 		new (buffer) wrapped_t(nullptr);
 	}
 
-	explicit __gc_unique_ptr(pointer p) noexcept
+	explicit _gc_unique_ptr(pointer p) noexcept
 	{
 		new (buffer) wrapped_t(p);
 	}
 
 	template<typename D>
-	__gc_unique_ptr(pointer p, D &&d)
+	_gc_unique_ptr(pointer p, D &&d)
 	{
 		new (buffer) wrapped_t(p, std::forward<D>(d)); // covers both deleter constructor forms
 	}
 
-	__gc_unique_ptr(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	_gc_unique_ptr(_gc_unique_ptr &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_unique_ptr(wrapped_t &&other) noexcept
+	_gc_unique_ptr(wrapped_t &&other) noexcept
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
 	template<typename U, typename E, typename L>
-	__gc_unique_ptr(__gc_unique_ptr<U, E, L> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	_gc_unique_ptr(_gc_unique_ptr<U, E, L> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	template<typename U, typename E>
-	__gc_unique_ptr(std::unique_ptr<U, E> &&other) noexcept
+	_gc_unique_ptr(std::unique_ptr<U, E> &&other) noexcept
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	~__gc_unique_ptr()
+	~_gc_unique_ptr()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_unique_ptr &operator=(__gc_unique_ptr &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	_gc_unique_ptr &operator=(_gc_unique_ptr &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		if (this != &other)
 		{
@@ -2591,29 +2592,29 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_unique_ptr &operator=(wrapped_t &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	_gc_unique_ptr &operator=(wrapped_t &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	template<typename U, typename E, typename L, std::enable_if_t<!std::is_same<__gc_unique_ptr, __gc_unique_ptr<U, E, L>>::value, int> = 0>
-	__gc_unique_ptr &operator=(__gc_unique_ptr<U, E, L> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	template<typename U, typename E, typename L, std::enable_if_t<!std::is_same<_gc_unique_ptr, _gc_unique_ptr<U, E, L>>::value, int> = 0>
+	_gc_unique_ptr &operator=(_gc_unique_ptr<U, E, L> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::scoped_lock locks(this->mutex, other.mutex);
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	template<typename U, typename E, std::enable_if_t<!std::is_same<wrapped_t, std::unique_ptr<U, E>>::value, int> = 0>
-	__gc_unique_ptr &operator=(std::unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	_gc_unique_ptr &operator=(std::unique_ptr<U, E> &&other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_unique_ptr &operator=(std::nullptr_t) noexcept(noexcept(std::declval<Lockable>().lock()))
+	_gc_unique_ptr &operator=(std::nullptr_t) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = nullptr;
@@ -2648,7 +2649,7 @@ public: // -- management -- //
 		wrapped().reset(nullptr);
 	}
 
-	void swap(__gc_unique_ptr &other) noexcept(noexcept(std::declval<Lockable>().lock()))
+	void swap(_gc_unique_ptr &other) noexcept(noexcept(std::declval<Lockable>().lock()))
 	{
 		if (this != &other)
 		{
@@ -2662,9 +2663,9 @@ public: // -- management -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_unique_ptr &a, __gc_unique_ptr &b) { a.swap(b); }
-	friend void swap(__gc_unique_ptr &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_unique_ptr &b) { b.swap(a); }
+	friend void swap(_gc_unique_ptr &a, _gc_unique_ptr &b) { a.swap(b); }
+	friend void swap(_gc_unique_ptr &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_unique_ptr &b) { b.swap(a); }
 
 public: // -- obj access -- //
 
@@ -2682,68 +2683,68 @@ public: // -- obj access -- //
 	decltype(auto) operator[](std::size_t i) const { return wrapped()[i]; }
 };
 template<typename T, typename Deleter, typename Lockable>
-struct GC::router<__gc_unique_ptr<T, Deleter, Lockable>>
+struct GC::router<_gc_unique_ptr<T, Deleter, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
 
 	template<typename F>
-	static void route(const __gc_unique_ptr<T, Deleter, Lockable> &obj, F func)
+	static void route(const _gc_unique_ptr<T, Deleter, Lockable> &obj, F func)
 	{
 		std::lock_guard lock(obj.mutex);
 		GC::route(obj.wrapped(), func);
 	}
 };
 
-// -- __gc_unique_ptr cmp -- //
+// -- _gc_unique_ptr cmp -- //
 
 template<typename T1, typename D1, typename L1, typename T2, typename D2, typename L2>
-bool operator==(const __gc_unique_ptr<T1, D1, L1> &a, const __gc_unique_ptr<T2, D2, L2> &b) { return a.get() == b.get(); }
+bool operator==(const _gc_unique_ptr<T1, D1, L1> &a, const _gc_unique_ptr<T2, D2, L2> &b) { return a.get() == b.get(); }
 template<typename T1, typename D1, typename L1, typename T2, typename D2, typename L2>
-bool operator!=(const __gc_unique_ptr<T1, D1, L1> &a, const __gc_unique_ptr<T2, D2, L2> &b) { return a.get() != b.get(); }
+bool operator!=(const _gc_unique_ptr<T1, D1, L1> &a, const _gc_unique_ptr<T2, D2, L2> &b) { return a.get() != b.get(); }
 template<typename T1, typename D1, typename L1, typename T2, typename D2, typename L2>
-bool operator<(const __gc_unique_ptr<T1, D1, L1> &a, const __gc_unique_ptr<T2, D2, L2> &b) { return a.get() < b.get(); }
+bool operator<(const _gc_unique_ptr<T1, D1, L1> &a, const _gc_unique_ptr<T2, D2, L2> &b) { return a.get() < b.get(); }
 template<typename T1, typename D1, typename L1, typename T2, typename D2, typename L2>
-bool operator<=(const __gc_unique_ptr<T1, D1, L1> &a, const __gc_unique_ptr<T2, D2, L2> &b) { return a.get() <= b.get(); }
+bool operator<=(const _gc_unique_ptr<T1, D1, L1> &a, const _gc_unique_ptr<T2, D2, L2> &b) { return a.get() <= b.get(); }
 template<typename T1, typename D1, typename L1, typename T2, typename D2, typename L2>
-bool operator>(const __gc_unique_ptr<T1, D1, L1> &a, const __gc_unique_ptr<T2, D2, L2> &b) { return a.get() > b.get(); }
+bool operator>(const _gc_unique_ptr<T1, D1, L1> &a, const _gc_unique_ptr<T2, D2, L2> &b) { return a.get() > b.get(); }
 template<typename T1, typename D1, typename L1, typename T2, typename D2, typename L2>
-bool operator>=(const __gc_unique_ptr<T1, D1, L1> &a, const __gc_unique_ptr<T2, D2, L2> &b) { return a.get() >= b.get(); }
+bool operator>=(const _gc_unique_ptr<T1, D1, L1> &a, const _gc_unique_ptr<T2, D2, L2> &b) { return a.get() >= b.get(); }
 
 template<typename T, typename D, typename L>
-bool operator==(const __gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() == nullptr; }
+bool operator==(const _gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() == nullptr; }
 template<typename T, typename D, typename L>
-bool operator==(std::nullptr_t, const __gc_unique_ptr<T, D, L> &x) { return nullptr == x.get(); }
+bool operator==(std::nullptr_t, const _gc_unique_ptr<T, D, L> &x) { return nullptr == x.get(); }
 
 template<typename T, typename D, typename L>
-bool operator!=(const __gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() != nullptr; }
+bool operator!=(const _gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() != nullptr; }
 template<typename T, typename D, typename L>
-bool operator!=(std::nullptr_t, const __gc_unique_ptr<T, D, L> &x) { return nullptr != x.get(); }
+bool operator!=(std::nullptr_t, const _gc_unique_ptr<T, D, L> &x) { return nullptr != x.get(); }
 
 template<typename T, typename D, typename L>
-bool operator<(const __gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() < nullptr; }
+bool operator<(const _gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() < nullptr; }
 template<typename T, typename D, typename L>
-bool operator<(std::nullptr_t, const __gc_unique_ptr<T, D, L> &x) { return nullptr < x.get(); }
+bool operator<(std::nullptr_t, const _gc_unique_ptr<T, D, L> &x) { return nullptr < x.get(); }
 
 template<typename T, typename D, typename L>
-bool operator<=(const __gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() <= nullptr; }
+bool operator<=(const _gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() <= nullptr; }
 template<typename T, typename D, typename L>
-bool operator<=(std::nullptr_t, const __gc_unique_ptr<T, D, L> &x) { return nullptr <= x.get(); }
+bool operator<=(std::nullptr_t, const _gc_unique_ptr<T, D, L> &x) { return nullptr <= x.get(); }
 
 template<typename T, typename D, typename L>
-bool operator>(const __gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() > nullptr; }
+bool operator>(const _gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() > nullptr; }
 template<typename T, typename D, typename L>
-bool operator>(std::nullptr_t, const __gc_unique_ptr<T, D, L> &x) { return nullptr > x.get(); }
+bool operator>(std::nullptr_t, const _gc_unique_ptr<T, D, L> &x) { return nullptr > x.get(); }
 
 template<typename T, typename D, typename L>
-bool operator>=(const __gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() >= nullptr; }
+bool operator>=(const _gc_unique_ptr<T, D, L> &x, std::nullptr_t) { return x.get() >= nullptr; }
 template<typename T, typename D, typename L>
-bool operator>=(std::nullptr_t, const __gc_unique_ptr<T, D, L> &x) { return nullptr >= x.get(); }
+bool operator>=(std::nullptr_t, const _gc_unique_ptr<T, D, L> &x) { return nullptr >= x.get(); }
 
 // --------------------------------------------------------------
 
 template<typename T, typename Allocator, typename Lockable>
-class __gc_vector
+class _gc_vector
 {
 private: // -- data -- //
 
@@ -2753,7 +2754,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_vector>;
+	friend struct GC::router<_gc_vector>;
 
 private: // -- data accessors -- //
 
@@ -2789,95 +2790,95 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_vector()
+	_gc_vector()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_vector(const Allocator &alloc)
+	explicit _gc_vector(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
-	__gc_vector(size_type count, const T& value, const Allocator &alloc = Allocator())
+	_gc_vector(size_type count, const T& value, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, value, alloc);
 	}
 
-	explicit __gc_vector(size_type count, const Allocator &alloc = Allocator())
+	explicit _gc_vector(size_type count, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_vector(InputIt first, InputIt last, const Allocator &alloc = Allocator())
+	_gc_vector(InputIt first, InputIt last, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_vector(const __gc_vector &other)
+	_gc_vector(const _gc_vector &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_vector(const wrapped_t &other)
+	_gc_vector(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_vector(const __gc_vector &other, const Allocator &alloc)
+	_gc_vector(const _gc_vector &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_vector(const wrapped_t &other, const Allocator &alloc)
+	_gc_vector(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_vector(__gc_vector &&other)
+	_gc_vector(_gc_vector &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_vector(wrapped_t &&other)
+	_gc_vector(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_vector(__gc_vector &&other, const Allocator &alloc)
+	_gc_vector(_gc_vector &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_vector(wrapped_t &&other, const Allocator &alloc)
+	_gc_vector(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_vector(std::initializer_list<T> init, const Allocator &alloc = Allocator())
+	_gc_vector(std::initializer_list<T> init, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_vector()
+	~_gc_vector()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_vector &operator=(const __gc_vector &other)
+	_gc_vector &operator=(const _gc_vector &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_vector &operator=(const wrapped_t &other)
+	_gc_vector &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_vector &operator=(__gc_vector &&other)
+	_gc_vector &operator=(_gc_vector &&other)
 	{
 		if (this != &other)
 		{
@@ -2886,14 +2887,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_vector &operator=(wrapped_t &&other)
+	_gc_vector &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_vector &operator=(std::initializer_list<T> ilist)
+	_gc_vector &operator=(std::initializer_list<T> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -3020,7 +3021,7 @@ public: // -- insert / erase -- //
 	iterator emplace(const_iterator pos, Args &&...args)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().emplace(std::forward<Args>(args)...);
+		return wrapped().emplace(pos, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
@@ -3075,7 +3076,7 @@ public: // -- resize -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_vector &other)
+	void swap(_gc_vector &other)
 	{
 		if (this != &other)
 		{
@@ -3089,27 +3090,27 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_vector &a, __gc_vector &b) { a.swap(b); }
-	friend void swap(__gc_vector &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_vector &b) { b.swap(a); }
+	friend void swap(_gc_vector &a, _gc_vector &b) { a.swap(b); }
+	friend void swap(_gc_vector &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_vector &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_vector &a, const __gc_vector &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_vector &a, const __gc_vector &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_vector &a, const __gc_vector &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_vector &a, const __gc_vector &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_vector &a, const __gc_vector &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_vector &a, const __gc_vector &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_vector &a, const _gc_vector &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_vector &a, const _gc_vector &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_vector &a, const _gc_vector &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_vector &a, const _gc_vector &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_vector &a, const _gc_vector &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_vector &a, const _gc_vector &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename T, typename Allocator, typename Lockable>
-struct GC::router<__gc_vector<T, Allocator, Lockable>>
+struct GC::router<_gc_vector<T, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
 
 	template<typename F>
-	static void route(const __gc_vector<T, Allocator, Lockable> &vec, F func)
+	static void route(const _gc_vector<T, Allocator, Lockable> &vec, F func)
 	{
 		std::lock_guard lock(vec.mutex);
 		GC::route(vec.wrapped(), func);
@@ -3117,7 +3118,7 @@ struct GC::router<__gc_vector<T, Allocator, Lockable>>
 };
 
 template<typename T, typename Allocator, typename Lockable>
-class __gc_deque
+class _gc_deque
 {
 private: // -- data -- //
 
@@ -3127,7 +3128,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // the router synchronizer
 
-	friend struct GC::router<__gc_deque>;
+	friend struct GC::router<_gc_deque>;
 
 private: // -- data accessors -- //
 
@@ -3163,95 +3164,95 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_deque()
+	_gc_deque()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_deque(const Allocator &alloc)
+	explicit _gc_deque(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
-	__gc_deque(size_type count, const T &value, const Allocator &alloc = Allocator())
+	_gc_deque(size_type count, const T &value, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, value, alloc);
 	}
 
-	explicit __gc_deque(size_type count, const Allocator &alloc = Allocator())
+	explicit _gc_deque(size_type count, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_deque(InputIt first, InputIt last, const Allocator &alloc = Allocator())
+	_gc_deque(InputIt first, InputIt last, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_deque(const __gc_deque &other)
+	_gc_deque(const _gc_deque &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_deque(const wrapped_t &other)
+	_gc_deque(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_deque(const __gc_deque &other, const Allocator &alloc)
+	_gc_deque(const _gc_deque &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_deque(const wrapped_t &other, const Allocator &alloc)
+	_gc_deque(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_deque(__gc_deque &&other)
+	_gc_deque(_gc_deque &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_deque(wrapped_t &&other)
+	_gc_deque(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_deque(__gc_deque &&other, const Allocator &alloc)
+	_gc_deque(_gc_deque &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_deque(wrapped_t &&other, const Allocator &alloc)
+	_gc_deque(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_deque(std::initializer_list<T> init, const Allocator &alloc = Allocator())
+	_gc_deque(std::initializer_list<T> init, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_deque()
+	~_gc_deque()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_deque &operator=(const __gc_deque &other)
+	_gc_deque &operator=(const _gc_deque &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_deque &operator=(const wrapped_t &other)
+	_gc_deque &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_deque &operator=(__gc_deque &&other)
+	_gc_deque &operator=(_gc_deque &&other)
 	{
 		if (this != &other)
 		{
@@ -3260,14 +3261,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_deque &operator=(wrapped_t &&other)
+	_gc_deque &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_deque &operator=(std::initializer_list<T> ilist)
+	_gc_deque &operator=(std::initializer_list<T> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -3391,7 +3392,7 @@ public: // -- insert / erase -- //
 	iterator emplace(const_iterator pos, Args &&...args)
 	{
 		std::lock_guard lock(this->mutex);
-		return wrapped().emplace(std::forward<Args>(args)...);
+		return wrapped().emplace(pos, std::forward<Args>(args)...);
 	}
 
 	iterator erase(const_iterator pos)
@@ -3470,7 +3471,7 @@ public: // -- resize -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_deque &other)
+	void swap(_gc_deque &other)
 	{
 		if (this != &other)
 		{
@@ -3484,27 +3485,27 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_deque &a, __gc_deque &b) { a.swap(b); }
-	friend void swap(__gc_deque &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_deque &b) { b.swap(a); }
+	friend void swap(_gc_deque &a, _gc_deque &b) { a.swap(b); }
+	friend void swap(_gc_deque &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_deque &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_deque &a, const __gc_deque &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_deque &a, const __gc_deque &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_deque &a, const __gc_deque &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_deque &a, const __gc_deque &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_deque &a, const __gc_deque &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_deque &a, const __gc_deque &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_deque &a, const _gc_deque &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_deque &a, const _gc_deque &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_deque &a, const _gc_deque &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_deque &a, const _gc_deque &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_deque &a, const _gc_deque &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_deque &a, const _gc_deque &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename T, typename Allocator, typename Lockable>
-struct GC::router<__gc_deque<T, Allocator, Lockable>>
+struct GC::router<_gc_deque<T, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
 
 	template<typename F>
-	static void route(const __gc_deque<T, Allocator, Lockable> &vec, F func)
+	static void route(const _gc_deque<T, Allocator, Lockable> &vec, F func)
 	{
 		std::lock_guard lock(vec.mutex);
 		GC::route(vec.wrapped(), func);
@@ -3512,7 +3513,7 @@ struct GC::router<__gc_deque<T, Allocator, Lockable>>
 };
 
 template<typename T, typename Allocator, typename Lockable>
-class __gc_forward_list
+class _gc_forward_list
 {
 private: // -- data -- //
 
@@ -3522,7 +3523,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_forward_list>;
+	friend struct GC::router<_gc_forward_list>;
 
 private: // -- data accessors -- //
 
@@ -3555,95 +3556,95 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_forward_list()
+	_gc_forward_list()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_forward_list(const Allocator &alloc)
+	explicit _gc_forward_list(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
-	__gc_forward_list(size_type count, const T &value, const Allocator &alloc = Allocator())
+	_gc_forward_list(size_type count, const T &value, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, value, alloc);
 	}
 
-	explicit __gc_forward_list(size_type count, const Allocator &alloc = Allocator())
+	explicit _gc_forward_list(size_type count, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_forward_list(InputIt first, InputIt last, const Allocator &alloc = Allocator())
+	_gc_forward_list(InputIt first, InputIt last, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_forward_list(const __gc_forward_list &other)
+	_gc_forward_list(const _gc_forward_list &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_forward_list(const wrapped_t &other)
+	_gc_forward_list(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_forward_list(const __gc_forward_list &other, const Allocator &alloc)
+	_gc_forward_list(const _gc_forward_list &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_forward_list(const wrapped_t &other, const Allocator &alloc)
+	_gc_forward_list(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_forward_list(__gc_forward_list &&other)
+	_gc_forward_list(_gc_forward_list &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_forward_list(wrapped_t &&other)
+	_gc_forward_list(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_forward_list(__gc_forward_list &&other, const Allocator &alloc)
+	_gc_forward_list(_gc_forward_list &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_forward_list(wrapped_t &&other, const Allocator &alloc)
+	_gc_forward_list(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_forward_list(std::initializer_list<T> init, const Allocator &alloc = Allocator())
+	_gc_forward_list(std::initializer_list<T> init, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_forward_list()
+	~_gc_forward_list()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_forward_list &operator=(const __gc_forward_list &other)
+	_gc_forward_list &operator=(const _gc_forward_list &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_forward_list &operator=(const wrapped_t &other)
+	_gc_forward_list &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_forward_list &operator=(__gc_forward_list &&other)
+	_gc_forward_list &operator=(_gc_forward_list &&other)
 	{
 		if (this != &other)
 		{
@@ -3652,14 +3653,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_forward_list &operator=(wrapped_t &&other)
+	_gc_forward_list &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_forward_list &operator=(std::initializer_list<T> ilist)
+	_gc_forward_list &operator=(std::initializer_list<T> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -3811,7 +3812,7 @@ public: // -- resize -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_forward_list &other)
+	void swap(_gc_forward_list &other)
 	{
 		if (this != &other)
 		{
@@ -3825,22 +3826,22 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_forward_list &a, __gc_forward_list &b) { a.swap(b); }
-	friend void swap(__gc_forward_list &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_forward_list &b) { b.swap(a); }
+	friend void swap(_gc_forward_list &a, _gc_forward_list &b) { a.swap(b); }
+	friend void swap(_gc_forward_list &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_forward_list &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_forward_list &a, const __gc_forward_list &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_forward_list &a, const __gc_forward_list &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_forward_list &a, const __gc_forward_list &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_forward_list &a, const __gc_forward_list &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_forward_list &a, const __gc_forward_list &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_forward_list &a, const __gc_forward_list &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_forward_list &a, const _gc_forward_list &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_forward_list &a, const _gc_forward_list &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_forward_list &a, const _gc_forward_list &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_forward_list &a, const _gc_forward_list &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_forward_list &a, const _gc_forward_list &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_forward_list &a, const _gc_forward_list &b) { return a.wrapped() >= b.wrapped(); }
 
 public: // -- merge -- //
 
-	void merge(__gc_forward_list &other)
+	void merge(_gc_forward_list &other)
 	{
 		if (this != &other)
 		{
@@ -3848,7 +3849,7 @@ public: // -- merge -- //
 			wrapped().merge(other.wrapped());
 		}
 	}
-	void merge(__gc_forward_list &&other)
+	void merge(_gc_forward_list &&other)
 	{
 		if (this != &other)
 		{
@@ -3858,7 +3859,7 @@ public: // -- merge -- //
 	}
 
 	template<typename Compare>
-	void merge(__gc_forward_list &other, Compare comp)
+	void merge(_gc_forward_list &other, Compare comp)
 	{
 		if (this != &other)
 		{
@@ -3867,7 +3868,7 @@ public: // -- merge -- //
 		}
 	}
 	template<typename Compare>
-	void merge(__gc_forward_list &&other, Compare comp)
+	void merge(_gc_forward_list &&other, Compare comp)
 	{
 		if (this != &other)
 		{
@@ -3904,7 +3905,7 @@ public: // -- merge -- //
 
 public: // -- splice -- //
 
-	void splice_after(const_iterator pos, __gc_forward_list &other)
+	void splice_after(const_iterator pos, _gc_forward_list &other)
 	{
 		if (this != &other)
 		{
@@ -3912,7 +3913,7 @@ public: // -- splice -- //
 			wrapped().splice_after(pos, other.wrapped());
 		}
 	}
-	void splice_after(const_iterator pos, __gc_forward_list &&other)
+	void splice_after(const_iterator pos, _gc_forward_list &&other)
 	{
 		if (this != &other)
 		{
@@ -3921,7 +3922,7 @@ public: // -- splice -- //
 		}
 	}
 
-	void splice_after(const_iterator pos, __gc_forward_list &other, const_iterator it)
+	void splice_after(const_iterator pos, _gc_forward_list &other, const_iterator it)
 	{
 		if (this != &other)
 		{
@@ -3929,7 +3930,7 @@ public: // -- splice -- //
 			wrapped().splice_after(pos, other.wrapped(), it);
 		}
 	}
-	void splice_after(const_iterator pos, __gc_forward_list &&other, const_iterator it)
+	void splice_after(const_iterator pos, _gc_forward_list &&other, const_iterator it)
 	{
 		if (this != &other)
 		{
@@ -3938,7 +3939,7 @@ public: // -- splice -- //
 		}
 	}
 
-	void splice_after(const_iterator pos, __gc_forward_list &other, const_iterator first, const_iterator last)
+	void splice_after(const_iterator pos, _gc_forward_list &other, const_iterator first, const_iterator last)
 	{
 		if (this != &other)
 		{
@@ -3946,7 +3947,7 @@ public: // -- splice -- //
 			wrapped().splice_after(pos, other.wrapped(), first, last);
 		}
 	}
-	void splice_after(const_iterator pos, __gc_forward_list &&other, const_iterator first, const_iterator last)
+	void splice_after(const_iterator pos, _gc_forward_list &&other, const_iterator first, const_iterator last)
 	{
 		if (this != &other)
 		{
@@ -4038,13 +4039,13 @@ public: // -- ordering -- //
 	}
 };
 template<typename T, typename Allocator, typename Lockable>
-struct GC::router<__gc_forward_list<T, Allocator, Lockable>>
+struct GC::router<_gc_forward_list<T, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
 
 	template<typename F>
-	static void route(const __gc_forward_list<T, Allocator, Lockable> &list, F func)
+	static void route(const _gc_forward_list<T, Allocator, Lockable> &list, F func)
 	{
 		std::lock_guard lock(list.mutex);
 		GC::route(list.wrapped(), func);
@@ -4052,7 +4053,7 @@ struct GC::router<__gc_forward_list<T, Allocator, Lockable>>
 };
 
 template<typename T, typename Allocator, typename Lockable>
-class __gc_list
+class _gc_list
 {
 private: // -- data -- //
 
@@ -4062,7 +4063,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_list>;
+	friend struct GC::router<_gc_list>;
 
 private: // -- data accessors -- //
 
@@ -4098,95 +4099,95 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_list()
+	_gc_list()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_list(const Allocator &alloc)
+	explicit _gc_list(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
-	__gc_list(size_type count, const T &value = T(), const Allocator &alloc = Allocator())
+	_gc_list(size_type count, const T &value = T(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, value, alloc);
 	}
 
-	explicit __gc_list(size_type count, const Allocator &alloc = Allocator())
+	explicit _gc_list(size_type count, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_list(InputIt first, InputIt last, const Allocator &alloc = Allocator())
+	_gc_list(InputIt first, InputIt last, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_list(const __gc_list &other)
+	_gc_list(const _gc_list &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_list(const wrapped_t &other)
+	_gc_list(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_list(const __gc_list &other, const Allocator &alloc)
+	_gc_list(const _gc_list &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_list(const wrapped_t &other, const Allocator &alloc)
+	_gc_list(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_list(__gc_list &&other)
+	_gc_list(_gc_list &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_list(wrapped_t &&other)
+	_gc_list(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_list(__gc_list &&other, const Allocator &alloc)
+	_gc_list(_gc_list &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_list(wrapped_t &&other, const Allocator &alloc)
+	_gc_list(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_list(std::initializer_list<T> init, const Allocator &alloc = Allocator())
+	_gc_list(std::initializer_list<T> init, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_list()
+	~_gc_list()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_list &operator=(const __gc_list &other)
+	_gc_list &operator=(const _gc_list &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_list &operator=(const wrapped_t &other)
+	_gc_list &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_list &operator=(__gc_list &&other)
+	_gc_list &operator=(_gc_list &&other)
 	{
 		if (this != &other)
 		{
@@ -4195,14 +4196,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_list &operator=(wrapped_t &&other)
+	_gc_list &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_list &operator=(std::initializer_list<T> ilist)
+	_gc_list &operator=(std::initializer_list<T> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -4386,7 +4387,7 @@ public: // -- resize -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_list &other)
+	void swap(_gc_list &other)
 	{
 		if (this != &other)
 		{
@@ -4400,22 +4401,22 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_list &a, __gc_list &b) { a.swap(b); }
-	friend void swap(__gc_list &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_list &b) { b.swap(a); }
+	friend void swap(_gc_list &a, _gc_list &b) { a.swap(b); }
+	friend void swap(_gc_list &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_list &b) { b.swap(a); }
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_list &a, const __gc_list &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_list &a, const __gc_list &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_list &a, const __gc_list &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_list &a, const __gc_list &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_list &a, const __gc_list &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_list &a, const __gc_list &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_list &a, const _gc_list &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_list &a, const _gc_list &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_list &a, const _gc_list &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_list &a, const _gc_list &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_list &a, const _gc_list &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_list &a, const _gc_list &b) { return a.wrapped() >= b.wrapped(); }
 
 public: // -- merge -- //
 
-	void merge(__gc_list &other)
+	void merge(_gc_list &other)
 	{
 		if (this != &other)
 		{
@@ -4423,7 +4424,7 @@ public: // -- merge -- //
 			wrapped().merge(other.wrapped());
 		}
 	}
-	void merge(__gc_list &&other)
+	void merge(_gc_list &&other)
 	{
 		if (this != &other)
 		{
@@ -4433,7 +4434,7 @@ public: // -- merge -- //
 	}
 
 	template<typename Compare>
-	void merge(__gc_list &other, Compare comp)
+	void merge(_gc_list &other, Compare comp)
 	{
 		if (this != &other)
 		{
@@ -4442,7 +4443,7 @@ public: // -- merge -- //
 		}
 	}
 	template<typename Compare>
-	void merge(__gc_list &&other, Compare comp)
+	void merge(_gc_list &&other, Compare comp)
 	{
 		if (this != &other)
 		{
@@ -4479,7 +4480,7 @@ public: // -- merge -- //
 
 public: // -- splice -- //
 
-	void splice_after(const_iterator pos, __gc_list &other)
+	void splice_after(const_iterator pos, _gc_list &other)
 	{
 		if (this != &other)
 		{
@@ -4487,7 +4488,7 @@ public: // -- splice -- //
 			wrapped().splice_after(pos, other.wrapped());
 		}
 	}
-	void splice_after(const_iterator pos, __gc_list &&other)
+	void splice_after(const_iterator pos, _gc_list &&other)
 	{
 		if (this != &other)
 		{
@@ -4496,7 +4497,7 @@ public: // -- splice -- //
 		}
 	}
 
-	void splice_after(const_iterator pos, __gc_list &other, const_iterator it)
+	void splice_after(const_iterator pos, _gc_list &other, const_iterator it)
 	{
 		if (this != &other)
 		{
@@ -4504,7 +4505,7 @@ public: // -- splice -- //
 			wrapped().splice_after(pos, other.wrapped(), it);
 		}
 	}
-	void splice_after(const_iterator pos, __gc_list &&other, const_iterator it)
+	void splice_after(const_iterator pos, _gc_list &&other, const_iterator it)
 	{
 		if (this != &other)
 		{
@@ -4513,7 +4514,7 @@ public: // -- splice -- //
 		}
 	}
 
-	void splice_after(const_iterator pos, __gc_list &other, const_iterator first, const_iterator last)
+	void splice_after(const_iterator pos, _gc_list &other, const_iterator first, const_iterator last)
 	{
 		if (this != &other)
 		{
@@ -4521,7 +4522,7 @@ public: // -- splice -- //
 			wrapped().splice_after(pos, other.wrapped(), first, last);
 		}
 	}
-	void splice_after(const_iterator pos, __gc_list &&other, const_iterator first, const_iterator last)
+	void splice_after(const_iterator pos, _gc_list &&other, const_iterator first, const_iterator last)
 	{
 		if (this != &other)
 		{
@@ -4613,13 +4614,13 @@ public: // -- ordering -- //
 	}
 };
 template<typename T, typename Allocator, typename Lockable>
-struct GC::router<__gc_list<T, Allocator, Lockable>>
+struct GC::router<_gc_list<T, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
 
 	template<typename F>
-	static void route(const __gc_list<T, Allocator, Lockable> &list, F func)
+	static void route(const _gc_list<T, Allocator, Lockable> &list, F func)
 	{
 		std::lock_guard lock(list.mutex);
 		GC::route(list.wrapped(), func);
@@ -4627,7 +4628,7 @@ struct GC::router<__gc_list<T, Allocator, Lockable>>
 };
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-class __gc_set
+class _gc_set
 {
 private: // -- data -- //
 
@@ -4637,7 +4638,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_set>;
+	friend struct GC::router<_gc_set>;
 
 private: // -- data accessors -- //
 
@@ -4681,98 +4682,98 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_set()
+	_gc_set()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_set(const Compare &comp, const Allocator &alloc = Allocator())
+	explicit _gc_set(const Compare &comp, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(comp, alloc);
 	}
-	explicit __gc_set(const Allocator &alloc)
+	explicit _gc_set(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_set(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_set(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, comp, alloc);
 	}
 	template<typename InputIt>
-	__gc_set(InputIt first, InputIt last, const Allocator &alloc)
+	_gc_set(InputIt first, InputIt last, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_set(const __gc_set &other)
+	_gc_set(const _gc_set &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_set(const wrapped_t &other)
+	_gc_set(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_set(const __gc_set &other, const Allocator &alloc)
+	_gc_set(const _gc_set &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_set(const wrapped_t &other, const Allocator &alloc)
+	_gc_set(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_set(__gc_set &&other)
+	_gc_set(_gc_set &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_set(wrapped_t &&other)
+	_gc_set(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_set(__gc_set &&other, const Allocator &alloc)
+	_gc_set(_gc_set &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_set(wrapped_t &&other, const Allocator &alloc)
+	_gc_set(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_set(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_set(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, comp, alloc);
 	}
-	__gc_set(std::initializer_list<value_type> init, const Allocator &alloc)
+	_gc_set(std::initializer_list<value_type> init, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_set()
+	~_gc_set()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_set &operator=(const __gc_set &other)
+	_gc_set &operator=(const _gc_set &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_set &operator=(const wrapped_t &other)
+	_gc_set &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_set &operator=(__gc_set &&other)
+	_gc_set &operator=(_gc_set &&other)
 	{
 		if (this != &other)
 		{
@@ -4781,14 +4782,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_set &operator=(wrapped_t &&other)
+	_gc_set &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_set &operator=(std::initializer_list<value_type> ilist)
+	_gc_set &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -4910,7 +4911,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_set &other)
+	void swap(_gc_set &other)
 	{
 		if (this != &other)
 		{
@@ -4924,9 +4925,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_set &a, __gc_set &b) { a.swap(b); }
-	friend void swap(__gc_set &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_set &b) { b.swap(a); }
+	friend void swap(_gc_set &a, _gc_set &b) { a.swap(b); }
+	friend void swap(_gc_set &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_set &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -4992,21 +4993,21 @@ public: // -- cmp types -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_set &a, const __gc_set &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_set &a, const __gc_set &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_set &a, const __gc_set &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_set &a, const __gc_set &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_set &a, const __gc_set &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_set &a, const __gc_set &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_set &a, const _gc_set &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_set &a, const _gc_set &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_set &a, const _gc_set &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_set &a, const _gc_set &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_set &a, const _gc_set &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_set &a, const _gc_set &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-struct GC::router<__gc_set<Key, Compare, Allocator, Lockable>>
+struct GC::router<_gc_set<Key, Compare, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<Key>::value;
 
 	template<typename F>
-	static void route(const __gc_set<Key, Compare, Allocator, Lockable> &set, F func)
+	static void route(const _gc_set<Key, Compare, Allocator, Lockable> &set, F func)
 	{
 		std::lock_guard lock(set.mutex);
 		GC::route(set.wrapped(), func);
@@ -5014,7 +5015,7 @@ struct GC::router<__gc_set<Key, Compare, Allocator, Lockable>>
 };
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-class __gc_multiset
+class _gc_multiset
 {
 private: // -- data -- //
 
@@ -5024,7 +5025,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_multiset>;
+	friend struct GC::router<_gc_multiset>;
 
 private: // -- data accessors -- //
 
@@ -5067,98 +5068,98 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_multiset()
+	_gc_multiset()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_multiset(const Compare &comp, const Allocator &alloc = Allocator())
+	explicit _gc_multiset(const Compare &comp, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(comp, alloc);
 	}
-	explicit __gc_multiset(const Allocator &alloc)
+	explicit _gc_multiset(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_multiset(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_multiset(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, comp, alloc);
 	}
 	template<typename InputIt>
-	__gc_multiset(InputIt first, InputIt last, const Allocator &alloc)
+	_gc_multiset(InputIt first, InputIt last, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_multiset(const __gc_multiset &other)
+	_gc_multiset(const _gc_multiset &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_multiset(const wrapped_t &other)
+	_gc_multiset(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_multiset(const __gc_multiset &other, const Allocator &alloc)
+	_gc_multiset(const _gc_multiset &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_multiset(const wrapped_t &other, const Allocator &alloc)
+	_gc_multiset(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_multiset(__gc_multiset &&other)
+	_gc_multiset(_gc_multiset &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_multiset(wrapped_t &&other)
+	_gc_multiset(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_multiset(__gc_multiset &&other, const Allocator &alloc)
+	_gc_multiset(_gc_multiset &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_multiset(wrapped_t &&other, const Allocator &alloc)
+	_gc_multiset(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_multiset(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_multiset(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, comp, alloc);
 	}
-	__gc_multiset(std::initializer_list<value_type> init, const Allocator &alloc)
+	_gc_multiset(std::initializer_list<value_type> init, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_multiset()
+	~_gc_multiset()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_multiset &operator=(const __gc_multiset &other)
+	_gc_multiset &operator=(const _gc_multiset &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_multiset &operator=(const wrapped_t &other)
+	_gc_multiset &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_multiset &operator=(__gc_multiset &&other)
+	_gc_multiset &operator=(_gc_multiset &&other)
 	{
 		if (this != &other)
 		{
@@ -5167,14 +5168,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_multiset &operator=(wrapped_t &&other)
+	_gc_multiset &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_multiset &operator=(std::initializer_list<value_type> ilist)
+	_gc_multiset &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -5296,7 +5297,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_multiset &other)
+	void swap(_gc_multiset &other)
 	{
 		if (this != &other)
 		{
@@ -5310,9 +5311,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_multiset &a, __gc_multiset &b) { a.swap(b); }
-	friend void swap(__gc_multiset &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_multiset &b) { b.swap(a); }
+	friend void swap(_gc_multiset &a, _gc_multiset &b) { a.swap(b); }
+	friend void swap(_gc_multiset &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_multiset &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -5378,21 +5379,21 @@ public: // -- cmp types -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_multiset &a, const __gc_multiset &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_multiset &a, const __gc_multiset &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_multiset &a, const __gc_multiset &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_multiset &a, const __gc_multiset &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_multiset &a, const __gc_multiset &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_multiset &a, const __gc_multiset &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_multiset &a, const _gc_multiset &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_multiset &a, const _gc_multiset &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_multiset &a, const _gc_multiset &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_multiset &a, const _gc_multiset &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_multiset &a, const _gc_multiset &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_multiset &a, const _gc_multiset &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-struct GC::router<__gc_multiset<Key, Compare, Allocator, Lockable>>
+struct GC::router<_gc_multiset<Key, Compare, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<Key>::value;
 
 	template<typename F>
-	static void route(const __gc_multiset<Key, Compare, Allocator, Lockable> &set, F func)
+	static void route(const _gc_multiset<Key, Compare, Allocator, Lockable> &set, F func)
 	{
 		std::lock_guard lock(set.mutex);
 		GC::route(set.wrapped(), func);
@@ -5400,7 +5401,7 @@ struct GC::router<__gc_multiset<Key, Compare, Allocator, Lockable>>
 };
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-class __gc_map
+class _gc_map
 {
 private: // -- data -- //
 
@@ -5410,7 +5411,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_map>;
+	friend struct GC::router<_gc_map>;
 
 private: // -- data accessors -- //
 
@@ -5453,102 +5454,102 @@ public: // -- typedefs -- //
 	typedef typename wrapped_t::node_type node_type;
 	typedef typename wrapped_t::insert_return_type insert_return_type;
 
-	typedef typename wrapped_t::value_compare value_compare; // alias __gc_map's nested value_compare class
+	typedef typename wrapped_t::value_compare value_compare; // alias _gc_map's nested value_compare class
 
 public: // -- ctor / dtor -- //
 
-	__gc_map()
+	_gc_map()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_map(const Compare &comp, const Allocator &alloc = Allocator())
+	explicit _gc_map(const Compare &comp, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(comp, alloc);
 	}
-	explicit __gc_map(const Allocator &alloc)
+	explicit _gc_map(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_map(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_map(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, comp, alloc);
 	}
 	template<typename InputIt>
-	__gc_map(InputIt first, InputIt last, const Allocator &alloc)
+	_gc_map(InputIt first, InputIt last, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_map(const __gc_map &other)
+	_gc_map(const _gc_map &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_map(const wrapped_t &other)
+	_gc_map(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_map(const __gc_map &other, const Allocator &alloc)
+	_gc_map(const _gc_map &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_map(const wrapped_t &other, const Allocator &alloc)
+	_gc_map(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_map(__gc_map &&other)
+	_gc_map(_gc_map &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_map(wrapped_t &&other)
+	_gc_map(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_map(__gc_map &&other, const Allocator &alloc)
+	_gc_map(_gc_map &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_map(wrapped_t &&other, const Allocator &alloc)
+	_gc_map(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_map(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_map(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, comp, alloc);
 	}
-	__gc_map(std::initializer_list<value_type> init, const Allocator &alloc)
+	_gc_map(std::initializer_list<value_type> init, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_map()
+	~_gc_map()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_map &operator=(const __gc_map &other)
+	_gc_map &operator=(const _gc_map &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_map &operator=(const wrapped_t &other)
+	_gc_map &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_map &operator=(__gc_map &&other)
+	_gc_map &operator=(_gc_map &&other)
 	{
 		if (this != &other)
 		{
@@ -5557,14 +5558,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_map &operator=(wrapped_t &&other)
+	_gc_map &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_map &operator=(std::initializer_list<value_type> ilist)
+	_gc_map &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -5768,7 +5769,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_map &other)
+	void swap(_gc_map &other)
 	{
 		if (this != &other)
 		{
@@ -5782,9 +5783,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_map &a, __gc_map &b) { a.swap(b); }
-	friend void swap(__gc_map &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_map &b) { b.swap(a); }
+	friend void swap(_gc_map &a, _gc_map &b) { a.swap(b); }
+	friend void swap(_gc_map &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_map &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -5850,21 +5851,21 @@ public: // -- cmp types -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_map &a, const __gc_map &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_map &a, const __gc_map &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_map &a, const __gc_map &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_map &a, const __gc_map &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_map &a, const __gc_map &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_map &a, const __gc_map &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_map &a, const _gc_map &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_map &a, const _gc_map &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_map &a, const _gc_map &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_map &a, const _gc_map &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_map &a, const _gc_map &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_map &a, const _gc_map &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-struct GC::router<__gc_map<Key, T, Compare, Allocator, Lockable>>
+struct GC::router<_gc_map<Key, T, Compare, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::all_have_trivial_routers<Key, T>::value;
 
 	template<typename F>
-	static void route(const __gc_map<Key, T, Compare, Allocator, Lockable> &map, F func)
+	static void route(const _gc_map<Key, T, Compare, Allocator, Lockable> &map, F func)
 	{
 		std::lock_guard lock(map.mutex);
 		GC::route(map.wrapped(), func);
@@ -5872,7 +5873,7 @@ struct GC::router<__gc_map<Key, T, Compare, Allocator, Lockable>>
 };
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-class __gc_multimap
+class _gc_multimap
 {
 private: // -- data -- //
 
@@ -5882,7 +5883,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_multimap>;
+	friend struct GC::router<_gc_multimap>;
 
 private: // -- data accessors -- //
 
@@ -5924,102 +5925,102 @@ public: // -- typedefs -- //
 
 	typedef typename wrapped_t::node_type node_type;
 
-	typedef typename wrapped_t::value_compare value_compare; // alias __gc_multimap's nested value_compare class
+	typedef typename wrapped_t::value_compare value_compare; // alias _gc_multimap's nested value_compare class
 
 public: // -- ctor / dtor -- //
 
-	__gc_multimap()
+	_gc_multimap()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_multimap(const Compare &comp, const Allocator &alloc = Allocator())
+	explicit _gc_multimap(const Compare &comp, const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(comp, alloc);
 	}
-	explicit __gc_multimap(const Allocator &alloc)
+	explicit _gc_multimap(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_multimap(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_multimap(InputIt first, InputIt last, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, comp, alloc);
 	}
 	template<typename InputIt>
-	__gc_multimap(InputIt first, InputIt last, const Allocator &alloc)
+	_gc_multimap(InputIt first, InputIt last, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, alloc);
 	}
 
-	__gc_multimap(const __gc_multimap &other)
+	_gc_multimap(const _gc_multimap &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_multimap(const wrapped_t &other)
+	_gc_multimap(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_multimap(const __gc_multimap &other, const Allocator &alloc)
+	_gc_multimap(const _gc_multimap &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_multimap(const wrapped_t &other, const Allocator &alloc)
+	_gc_multimap(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_multimap(__gc_multimap &&other)
+	_gc_multimap(_gc_multimap &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_multimap(wrapped_t &&other)
+	_gc_multimap(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_multimap(__gc_multimap &&other, const Allocator &alloc)
+	_gc_multimap(_gc_multimap &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_multimap(wrapped_t &&other, const Allocator &alloc)
+	_gc_multimap(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_multimap(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
+	_gc_multimap(std::initializer_list<value_type> init, const Compare &comp = Compare(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, comp, alloc);
 	}
-	__gc_multimap(std::initializer_list<value_type> init, const Allocator &alloc)
+	_gc_multimap(std::initializer_list<value_type> init, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, alloc);
 	}
 
-	~__gc_multimap()
+	~_gc_multimap()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_multimap &operator=(const __gc_multimap &other)
+	_gc_multimap &operator=(const _gc_multimap &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_multimap &operator=(const wrapped_t &other)
+	_gc_multimap &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_multimap &operator=(__gc_multimap &&other)
+	_gc_multimap &operator=(_gc_multimap &&other)
 	{
 		if (this != &other)
 		{
@@ -6028,14 +6029,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_multimap &operator=(wrapped_t &&other)
+	_gc_multimap &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_multimap &operator=(std::initializer_list<value_type> ilist)
+	_gc_multimap &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -6171,7 +6172,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_multimap &other)
+	void swap(_gc_multimap &other)
 	{
 		if (this != &other)
 		{
@@ -6185,9 +6186,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_multimap &a, __gc_multimap &b) { a.swap(b); }
-	friend void swap(__gc_multimap &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_multimap &b) { b.swap(a); }
+	friend void swap(_gc_multimap &a, _gc_multimap &b) { a.swap(b); }
+	friend void swap(_gc_multimap &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_multimap &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -6253,21 +6254,21 @@ public: // -- cmp types -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_multimap &a, const __gc_multimap &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_multimap &a, const __gc_multimap &b) { return a.wrapped() != b.wrapped(); }
-	friend bool operator<(const __gc_multimap &a, const __gc_multimap &b) { return a.wrapped() < b.wrapped(); }
-	friend bool operator<=(const __gc_multimap &a, const __gc_multimap &b) { return a.wrapped() <= b.wrapped(); }
-	friend bool operator>(const __gc_multimap &a, const __gc_multimap &b) { return a.wrapped() > b.wrapped(); }
-	friend bool operator>=(const __gc_multimap &a, const __gc_multimap &b) { return a.wrapped() >= b.wrapped(); }
+	friend bool operator==(const _gc_multimap &a, const _gc_multimap &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_multimap &a, const _gc_multimap &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator<(const _gc_multimap &a, const _gc_multimap &b) { return a.wrapped() < b.wrapped(); }
+	friend bool operator<=(const _gc_multimap &a, const _gc_multimap &b) { return a.wrapped() <= b.wrapped(); }
+	friend bool operator>(const _gc_multimap &a, const _gc_multimap &b) { return a.wrapped() > b.wrapped(); }
+	friend bool operator>=(const _gc_multimap &a, const _gc_multimap &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-struct GC::router<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
+struct GC::router<_gc_multimap<Key, T, Compare, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::all_have_trivial_routers<Key, T>::value;
 
 	template<typename F>
-	static void route(const __gc_multimap<Key, T, Compare, Allocator, Lockable> &map, F func)
+	static void route(const _gc_multimap<Key, T, Compare, Allocator, Lockable> &map, F func)
 	{
 		std::lock_guard lock(map.mutex);
 		GC::route(map.wrapped(), func);
@@ -6275,7 +6276,7 @@ struct GC::router<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
 };
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_set
+class _gc_unordered_set
 {
 private: // -- data -- //
 
@@ -6285,7 +6286,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_unordered_set>;
+	friend struct GC::router<_gc_unordered_set>;
 
 private: // -- data accessors -- //
 
@@ -6329,129 +6330,129 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_unordered_set()
+	_gc_unordered_set()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_unordered_set(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	explicit _gc_unordered_set(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_set(size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_set(size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, alloc);
 	}
-	__gc_unordered_set(size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_set(size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, hash, alloc);
 	}
 
-	explicit __gc_unordered_set(const Allocator &alloc)
+	explicit _gc_unordered_set(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_set(InputIt first, InputIt last)
+	_gc_unordered_set(InputIt first, InputIt last)
 	{
 		new (buffer) wrapped_t(first, last);
 	}
 	template<typename InputIt>
-	__gc_unordered_set(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_set(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, equal, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_set(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_set(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_set(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_set(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, alloc);
 	}
 
-	__gc_unordered_set(const __gc_unordered_set &other)
+	_gc_unordered_set(const _gc_unordered_set &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_unordered_set(const wrapped_t &other)
+	_gc_unordered_set(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_unordered_set(const __gc_unordered_set &other, const Allocator &alloc)
+	_gc_unordered_set(const _gc_unordered_set &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_unordered_set(const wrapped_t &other, const Allocator &alloc)
+	_gc_unordered_set(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_unordered_set(__gc_unordered_set &&other)
+	_gc_unordered_set(_gc_unordered_set &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_unordered_set(wrapped_t &&other)
+	_gc_unordered_set(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_unordered_set(__gc_unordered_set &&other, const Allocator &alloc)
+	_gc_unordered_set(_gc_unordered_set &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_unordered_set(wrapped_t &&other, const Allocator &alloc)
+	_gc_unordered_set(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_unordered_set(std::initializer_list<value_type> init)
+	_gc_unordered_set(std::initializer_list<value_type> init)
 	{
 		new (buffer) wrapped_t(init);
 	}
-	__gc_unordered_set(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_set(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_set(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_set(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, alloc);
 	}
-	__gc_unordered_set(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_set(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, alloc);
 	}
 
-	~__gc_unordered_set()
+	~_gc_unordered_set()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_unordered_set &operator=(const __gc_unordered_set &other)
+	_gc_unordered_set &operator=(const _gc_unordered_set &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_unordered_set &operator=(const wrapped_t &other)
+	_gc_unordered_set &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_unordered_set &operator=(__gc_unordered_set &&other)
+	_gc_unordered_set &operator=(_gc_unordered_set &&other)
 	{
 		if (this != &other)
 		{
@@ -6460,14 +6461,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_unordered_set &operator=(wrapped_t &&other)
+	_gc_unordered_set &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_unordered_set &operator=(std::initializer_list<value_type> ilist)
+	_gc_unordered_set &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -6581,7 +6582,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_unordered_set &other)
+	void swap(_gc_unordered_set &other)
 	{
 		if (this != &other)
 		{
@@ -6595,9 +6596,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_unordered_set &a, __gc_unordered_set &b) { a.swap(b); }
-	friend void swap(__gc_unordered_set &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_unordered_set &b) { b.swap(a); }
+	friend void swap(_gc_unordered_set &a, _gc_unordered_set &b) { a.swap(b); }
+	friend void swap(_gc_unordered_set &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_unordered_set &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -6667,16 +6668,16 @@ public: // -- hash policy -- //
 		wrapped().max_load_factor(ml);
 	}
 
-	void rehash(size_type count)
+	void rehash(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().rehash(count);
+		wrapped().rehash(cnt);
 	}
 
-	void reserve(size_type count)
+	void reserve(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().reserve(count);
+		wrapped().reserve(cnt);
 	}
 
 public: // -- observers -- //
@@ -6686,17 +6687,17 @@ public: // -- observers -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_unordered_set &a, const __gc_unordered_set &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_unordered_set &a, const __gc_unordered_set &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator==(const _gc_unordered_set &a, const _gc_unordered_set &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_unordered_set &a, const _gc_unordered_set &b) { return a.wrapped() != b.wrapped(); }
 };
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::router<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::router<_gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<Key>::value;
 
 	template<typename F>
-	static void route(const __gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable> &set, F func)
+	static void route(const _gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable> &set, F func)
 	{
 		std::lock_guard lock(set.mutex);
 		GC::route(set.wrapped(), func);
@@ -6704,7 +6705,7 @@ struct GC::router<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
 };
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_multiset
+class _gc_unordered_multiset
 {
 private: // -- data -- //
 
@@ -6714,7 +6715,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_unordered_multiset>;
+	friend struct GC::router<_gc_unordered_multiset>;
 
 private: // -- data accessors -- //
 
@@ -6757,129 +6758,129 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_unordered_multiset()
+	_gc_unordered_multiset()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_unordered_multiset(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	explicit _gc_unordered_multiset(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_multiset(size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_multiset(size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, alloc);
 	}
-	__gc_unordered_multiset(size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_multiset(size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, hash, alloc);
 	}
 
-	explicit __gc_unordered_multiset(const Allocator &alloc)
+	explicit _gc_unordered_multiset(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_multiset(InputIt first, InputIt last)
+	_gc_unordered_multiset(InputIt first, InputIt last)
 	{
 		new (buffer) wrapped_t(first, last);
 	}
 	template<typename InputIt>
-	__gc_unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, equal, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_multiset(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, alloc);
 	}
 
-	__gc_unordered_multiset(const __gc_unordered_multiset &other)
+	_gc_unordered_multiset(const _gc_unordered_multiset &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_unordered_multiset(const wrapped_t &other)
+	_gc_unordered_multiset(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_unordered_multiset(const __gc_unordered_multiset &other, const Allocator &alloc)
+	_gc_unordered_multiset(const _gc_unordered_multiset &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_unordered_multiset(const wrapped_t &other, const Allocator &alloc)
+	_gc_unordered_multiset(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_unordered_multiset(__gc_unordered_multiset &&other)
+	_gc_unordered_multiset(_gc_unordered_multiset &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_unordered_multiset(wrapped_t &&other)
+	_gc_unordered_multiset(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_unordered_multiset(__gc_unordered_multiset &&other, const Allocator &alloc)
+	_gc_unordered_multiset(_gc_unordered_multiset &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_unordered_multiset(wrapped_t &&other, const Allocator &alloc)
+	_gc_unordered_multiset(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_unordered_multiset(std::initializer_list<value_type> init)
+	_gc_unordered_multiset(std::initializer_list<value_type> init)
 	{
 		new (buffer) wrapped_t(init);
 	}
-	__gc_unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, alloc);
 	}
-	__gc_unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_multiset(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, alloc);
 	}
 
-	~__gc_unordered_multiset()
+	~_gc_unordered_multiset()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- asgn -- //
 
-	__gc_unordered_multiset &operator=(const __gc_unordered_multiset &other)
+	_gc_unordered_multiset &operator=(const _gc_unordered_multiset &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_unordered_multiset &operator=(const wrapped_t &other)
+	_gc_unordered_multiset &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_unordered_multiset &operator=(__gc_unordered_multiset &&other)
+	_gc_unordered_multiset &operator=(_gc_unordered_multiset &&other)
 	{
 		if (this != &other)
 		{
@@ -6888,14 +6889,14 @@ public: // -- asgn -- //
 		}
 		return *this;
 	}
-	__gc_unordered_multiset &operator=(wrapped_t &&other)
+	_gc_unordered_multiset &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_unordered_multiset &operator=(std::initializer_list<value_type> ilist)
+	_gc_unordered_multiset &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -7009,7 +7010,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_unordered_multiset &other)
+	void swap(_gc_unordered_multiset &other)
 	{
 		if (this != &other)
 		{
@@ -7023,9 +7024,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_unordered_multiset &a, __gc_unordered_multiset &b) { a.swap(b); }
-	friend void swap(__gc_unordered_multiset &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_unordered_multiset &b) { b.swap(a); }
+	friend void swap(_gc_unordered_multiset &a, _gc_unordered_multiset &b) { a.swap(b); }
+	friend void swap(_gc_unordered_multiset &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_unordered_multiset &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -7095,16 +7096,16 @@ public: // -- hash policy -- //
 		wrapped().max_load_factor(ml);
 	}
 
-	void rehash(size_type count)
+	void rehash(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().rehash(count);
+		wrapped().rehash(cnt);
 	}
 
-	void reserve(size_type count)
+	void reserve(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().reserve(count);
+		wrapped().reserve(cnt);
 	}
 
 public: // -- observers -- //
@@ -7114,17 +7115,17 @@ public: // -- observers -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_unordered_multiset &a, const __gc_unordered_multiset &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_unordered_multiset &a, const __gc_unordered_multiset &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator==(const _gc_unordered_multiset &a, const _gc_unordered_multiset &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_unordered_multiset &a, const _gc_unordered_multiset &b) { return a.wrapped() != b.wrapped(); }
 };
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::router<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::router<_gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::has_trivial_router<Key>::value;
 
 	template<typename F>
-	static void route(const __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable> &set, F func)
+	static void route(const _gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable> &set, F func)
 	{
 		std::lock_guard lock(set.mutex);
 		GC::route(set.wrapped(), func);
@@ -7132,7 +7133,7 @@ struct GC::router<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockab
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_map
+class _gc_unordered_map
 {
 private: // -- data -- //
 
@@ -7142,7 +7143,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_unordered_map>;
+	friend struct GC::router<_gc_unordered_map>;
 
 private: // -- data accessors -- //
 
@@ -7188,129 +7189,129 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_unordered_map()
+	_gc_unordered_map()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_unordered_map(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	explicit _gc_unordered_map(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_map(size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_map(size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, alloc);
 	}
-	__gc_unordered_map(size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_map(size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, hash, alloc);
 	}
 
-	explicit __gc_unordered_map(const Allocator &alloc)
+	explicit _gc_unordered_map(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_map(InputIt first, InputIt last)
+	_gc_unordered_map(InputIt first, InputIt last)
 	{
 		new (buffer) wrapped_t(first, last);
 	}
 	template<typename InputIt>
-	__gc_unordered_map(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_map(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, equal, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_map(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_map(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_map(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_map(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, alloc);
 	}
 
-	__gc_unordered_map(const __gc_unordered_map &other)
+	_gc_unordered_map(const _gc_unordered_map &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_unordered_map(const wrapped_t &other)
+	_gc_unordered_map(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_unordered_map(const __gc_unordered_map &other, const Allocator &alloc)
+	_gc_unordered_map(const _gc_unordered_map &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_unordered_map(const wrapped_t &other, const Allocator &alloc)
+	_gc_unordered_map(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_unordered_map(__gc_unordered_map &&other)
+	_gc_unordered_map(_gc_unordered_map &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_unordered_map(wrapped_t &&other)
+	_gc_unordered_map(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_unordered_map(__gc_unordered_map &&other, const Allocator &alloc)
+	_gc_unordered_map(_gc_unordered_map &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_unordered_map(wrapped_t &&other, const Allocator &alloc)
+	_gc_unordered_map(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_unordered_map(std::initializer_list<value_type> init)
+	_gc_unordered_map(std::initializer_list<value_type> init)
 	{
 		new (buffer) wrapped_t(init);
 	}
-	__gc_unordered_map(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_map(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_map(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_map(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, alloc);
 	}
-	__gc_unordered_map(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_map(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, alloc);
 	}
 
-	~__gc_unordered_map()
+	~_gc_unordered_map()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- assign -- //
 
-	__gc_unordered_map &operator=(const __gc_unordered_map &other)
+	_gc_unordered_map &operator=(const _gc_unordered_map &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_unordered_map &operator=(const wrapped_t &other)
+	_gc_unordered_map &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_unordered_map &operator=(__gc_unordered_map &&other)
+	_gc_unordered_map &operator=(_gc_unordered_map &&other)
 	{
 		if (this != &other)
 		{
@@ -7319,14 +7320,14 @@ public: // -- assign -- //
 		}
 		return *this;
 	}
-	__gc_unordered_map &operator=(wrapped_t &&other)
+	_gc_unordered_map &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_unordered_map &operator=(std::initializer_list<value_type> ilist)
+	_gc_unordered_map &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -7507,7 +7508,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_unordered_map &other)
+	void swap(_gc_unordered_map &other)
 	{
 		if (this != &other)
 		{
@@ -7521,9 +7522,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_unordered_map &a, __gc_unordered_map &b) { a.swap(b); }
-	friend void swap(__gc_unordered_map &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_unordered_map &b) { b.swap(a); }
+	friend void swap(_gc_unordered_map &a, _gc_unordered_map &b) { a.swap(b); }
+	friend void swap(_gc_unordered_map &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_unordered_map &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -7609,16 +7610,16 @@ public: // -- hash policy -- //
 		wrapped().max_load_factor(ml);
 	}
 
-	void rehash(size_type count)
+	void rehash(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().rehash(count);
+		wrapped().rehash(cnt);
 	}
 
-	void reserve(size_type count)
+	void reserve(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().reserve(count);
+		wrapped().reserve(cnt);
 	}
 
 public: // -- observers -- //
@@ -7628,17 +7629,17 @@ public: // -- observers -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_unordered_map &a, const __gc_unordered_map &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_unordered_map &a, const __gc_unordered_map &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator==(const _gc_unordered_map &a, const _gc_unordered_map &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_unordered_map &a, const _gc_unordered_map &b) { return a.wrapped() != b.wrapped(); }
 };
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::router<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::router<_gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::all_have_trivial_routers<Key, T>::value;
 
 	template<typename F>
-	static void route(const __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable> &map, F func)
+	static void route(const _gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable> &map, F func)
 	{
 		std::lock_guard lock(map.mutex);
 		GC::route(map.wrapped(), func);
@@ -7646,7 +7647,7 @@ struct GC::router<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-class __gc_unordered_multimap
+class _gc_unordered_multimap
 {
 private: // -- data -- //
 
@@ -7656,7 +7657,7 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_unordered_multimap>;
+	friend struct GC::router<_gc_unordered_multimap>;
 
 private: // -- data accessors -- //
 
@@ -7701,129 +7702,129 @@ public: // -- typedefs -- //
 
 public: // -- ctor / dtor -- //
 
-	__gc_unordered_multimap()
+	_gc_unordered_multimap()
 	{
 		new (buffer) wrapped_t();
 	}
-	explicit __gc_unordered_multimap(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	explicit _gc_unordered_multimap(size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_multimap(size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_multimap(size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, alloc);
 	}
-	__gc_unordered_multimap(size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_multimap(size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(bucket_count, hash, alloc);
 	}
 
-	explicit __gc_unordered_multimap(const Allocator &alloc)
+	explicit _gc_unordered_multimap(const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_multimap(InputIt first, InputIt last)
+	_gc_unordered_multimap(InputIt first, InputIt last)
 	{
 		new (buffer) wrapped_t(first, last);
 	}
 	template<typename InputIt>
-	__gc_unordered_multimap(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_multimap(InputIt first, InputIt last, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, equal, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_multimap(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_multimap(InputIt first, InputIt last, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, alloc);
 	}
 
 	template<typename InputIt>
-	__gc_unordered_multimap(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_multimap(InputIt first, InputIt last, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(first, last, bucket_count, hash, alloc);
 	}
 
-	__gc_unordered_multimap(const __gc_unordered_multimap &other)
+	_gc_unordered_multimap(const _gc_unordered_multimap &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	__gc_unordered_multimap(const wrapped_t &other)
+	_gc_unordered_multimap(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	__gc_unordered_multimap(const __gc_unordered_multimap &other, const Allocator &alloc)
+	_gc_unordered_multimap(const _gc_unordered_multimap &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other.wrapped(), alloc);
 	}
-	__gc_unordered_multimap(const wrapped_t &other, const Allocator &alloc)
+	_gc_unordered_multimap(const wrapped_t &other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(other, alloc);
 	}
 
-	__gc_unordered_multimap(__gc_unordered_multimap &&other)
+	_gc_unordered_multimap(_gc_unordered_multimap &&other)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	__gc_unordered_multimap(wrapped_t &&other)
+	_gc_unordered_multimap(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	__gc_unordered_multimap(__gc_unordered_multimap &&other, const Allocator &alloc)
+	_gc_unordered_multimap(_gc_unordered_multimap &&other, const Allocator &alloc)
 	{
 		std::lock_guard lock(other.mutex);
 		new (buffer) wrapped_t(std::move(other.wrapped()), alloc);
 	}
-	__gc_unordered_multimap(wrapped_t &&other, const Allocator &alloc)
+	_gc_unordered_multimap(wrapped_t &&other, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(std::move(other), alloc);
 	}
 
-	__gc_unordered_multimap(std::initializer_list<value_type> init)
+	_gc_unordered_multimap(std::initializer_list<value_type> init)
 	{
 		new (buffer) wrapped_t(init);
 	}
-	__gc_unordered_multimap(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
+	_gc_unordered_multimap(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash = Hash(), const key_equal &equal = key_equal(), const Allocator &alloc = Allocator())
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, equal, alloc);
 	}
 
-	__gc_unordered_multimap(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
+	_gc_unordered_multimap(std::initializer_list<value_type> init, size_type bucket_count, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, alloc);
 	}
-	__gc_unordered_multimap(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
+	_gc_unordered_multimap(std::initializer_list<value_type> init, size_type bucket_count, const Hash &hash, const Allocator &alloc)
 	{
 		new (buffer) wrapped_t(init, bucket_count, hash, alloc);
 	}
 
-	~__gc_unordered_multimap()
+	~_gc_unordered_multimap()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- assign -- //
 
-	__gc_unordered_multimap &operator=(const __gc_unordered_multimap &other)
+	_gc_unordered_multimap &operator=(const _gc_unordered_multimap &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_unordered_multimap &operator=(const wrapped_t &other)
+	_gc_unordered_multimap &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_unordered_multimap &operator=(__gc_unordered_multimap &&other)
+	_gc_unordered_multimap &operator=(_gc_unordered_multimap &&other)
 	{
 		if (this != &other)
 		{
@@ -7832,14 +7833,14 @@ public: // -- assign -- //
 		}
 		return *this;
 	}
-	__gc_unordered_multimap &operator=(wrapped_t &&other)
+	_gc_unordered_multimap &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	__gc_unordered_multimap &operator=(std::initializer_list<value_type> ilist)
+	_gc_unordered_multimap &operator=(std::initializer_list<value_type> ilist)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = ilist;
@@ -7968,7 +7969,7 @@ public: // -- insert / erase -- //
 
 public: // -- swap -- //
 
-	void swap(__gc_unordered_multimap &other)
+	void swap(_gc_unordered_multimap &other)
 	{
 		if (this != &other)
 		{
@@ -7982,9 +7983,9 @@ public: // -- swap -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_unordered_multimap &a, __gc_unordered_multimap &b) { a.swap(b); }
-	friend void swap(__gc_unordered_multimap &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_unordered_multimap &b) { b.swap(a); }
+	friend void swap(_gc_unordered_multimap &a, _gc_unordered_multimap &b) { a.swap(b); }
+	friend void swap(_gc_unordered_multimap &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_unordered_multimap &b) { b.swap(a); }
 
 public: // -- extract -- //
 
@@ -8054,16 +8055,16 @@ public: // -- hash policy -- //
 		wrapped().max_load_factor(ml);
 	}
 
-	void rehash(size_type count)
+	void rehash(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().rehash(count);
+		wrapped().rehash(cnt);
 	}
 
-	void reserve(size_type count)
+	void reserve(size_type cnt)
 	{
 		std::lock_guard lock(this->mutex);
-		wrapped().reserve(count);
+		wrapped().reserve(cnt);
 	}
 
 public: // -- observers -- //
@@ -8073,17 +8074,17 @@ public: // -- observers -- //
 
 public: // -- cmp -- //
 
-	friend bool operator==(const __gc_unordered_multimap &a, const __gc_unordered_multimap &b) { return a.wrapped() == b.wrapped(); }
-	friend bool operator!=(const __gc_unordered_multimap &a, const __gc_unordered_multimap &b) { return a.wrapped() != b.wrapped(); }
+	friend bool operator==(const _gc_unordered_multimap &a, const _gc_unordered_multimap &b) { return a.wrapped() == b.wrapped(); }
+	friend bool operator!=(const _gc_unordered_multimap &a, const _gc_unordered_multimap &b) { return a.wrapped() != b.wrapped(); }
 };
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::router<_gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable>>
 {
 	// a container's router is trivial if its contents are trivial
 	static constexpr bool is_trivial = GC::all_have_trivial_routers<Key, T>::value;
 
 	template<typename F>
-	static void route(const __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable> &map, F func)
+	static void route(const _gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable> &map, F func)
 	{
 		std::lock_guard lock(map.mutex);
 		GC::route(map.wrapped(), func);
@@ -8092,23 +8093,23 @@ struct GC::router<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Loc
 
 // -------------------------------------------------------------------------
 
-// checks if T is a valid type for value forwarding ctor/asgn for __gc_variant type objects.
+// checks if T is a valid type for value forwarding ctor/asgn for _gc_variant type objects.
 // the type checked should already be passed through std::decay.
 template<typename T>
-struct __gc_variant_valid_forward_type : std::true_type {};
+struct _gc_variant_valid_forward_type : std::true_type {};
 
 template<typename Lockable, typename ...Types>
-struct __gc_variant_valid_forward_type<__gc_variant<Lockable, Types...>> : std::false_type {};
+struct _gc_variant_valid_forward_type<_gc_variant<Lockable, Types...>> : std::false_type {};
 template<typename ...Types>
-struct __gc_variant_valid_forward_type<std::variant<Types...>> : std::false_type {};
+struct _gc_variant_valid_forward_type<std::variant<Types...>> : std::false_type {};
 
 template<typename T>
-struct __gc_variant_valid_forward_type<std::in_place_type_t<T>> : std::false_type {};
+struct _gc_variant_valid_forward_type<std::in_place_type_t<T>> : std::false_type {};
 template<std::size_t I>
-struct __gc_variant_valid_forward_type<std::in_place_index_t<I>> : std::false_type {};
+struct _gc_variant_valid_forward_type<std::in_place_index_t<I>> : std::false_type {};
 
 template<typename Lockable, typename ...Types>
-class __gc_variant
+class _gc_variant
 {
 private: // -- data -- //
 
@@ -8118,9 +8119,9 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_variant>;
+	friend struct GC::router<_gc_variant>;
 	
-	friend struct std::hash<__gc_variant>;
+	friend struct std::hash<_gc_variant>;
 
 private: // -- data accessors -- //
 
@@ -8136,78 +8137,78 @@ public: // -- wrapped obj access -- //
 
 public: // -- ctor / dtor -- //
 	
-	constexpr __gc_variant()
+	constexpr _gc_variant()
 	{
 		new (buffer) wrapped_t();
 	}
 
-	constexpr __gc_variant(const __gc_variant &other)
+	constexpr _gc_variant(const _gc_variant &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	constexpr __gc_variant(const wrapped_t &other)
+	constexpr _gc_variant(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	constexpr __gc_variant(__gc_variant &&other)
+	constexpr _gc_variant(_gc_variant &&other)
 	{
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	constexpr __gc_variant(wrapped_t &&other)
+	constexpr _gc_variant(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
-	template<typename T, std::enable_if_t<__gc_variant_valid_forward_type<std::decay_t<T>>::value, int> = 0>
-	constexpr __gc_variant(T &&t)
+	template<typename T, std::enable_if_t<_gc_variant_valid_forward_type<std::decay_t<T>>::value, int> = 0>
+	constexpr _gc_variant(T &&t)
 	{
 		new (buffer) wrapped_t(std::forward<T>(t));
 	}
 
 	template<typename T, typename ...Args>
-	constexpr explicit __gc_variant(std::in_place_type_t<T>, Args &&...args)
+	constexpr explicit _gc_variant(std::in_place_type_t<T>, Args &&...args)
 	{
 		new (buffer) wrapped_t(std::in_place_type<T>, std::forward<Args>(args)...);
 	}
 	template<typename T, typename U, typename ...Args>
-	constexpr explicit __gc_variant(std::in_place_type_t<T>, std::initializer_list<U> il, Args &&...args)
+	constexpr explicit _gc_variant(std::in_place_type_t<T>, std::initializer_list<U> il, Args &&...args)
 	{
 		new (buffer) wrapped_t(std::in_place_type<T>, il, std::forward<Args>(args)...);
 	}
 
 	template<std::size_t I, typename ...Args>
-	constexpr explicit __gc_variant(std::in_place_index_t<I>, Args &&...args)
+	constexpr explicit _gc_variant(std::in_place_index_t<I>, Args &&...args)
 	{
 		new (buffer) wrapped_t(std::in_place_index<I>, std::forward<Args>(args)...);
 	}
 	template<std::size_t I, typename U, typename ...Args>
-	constexpr explicit __gc_variant(std::in_place_index_t<I>, std::initializer_list<U> il, Args &&...args)
+	constexpr explicit _gc_variant(std::in_place_index_t<I>, std::initializer_list<U> il, Args &&...args)
 	{
 		new (buffer) wrapped_t(std::in_place_index<I>, il, std::forward<Args>(args)...);
 	}
 
-	~__gc_variant()
+	~_gc_variant()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- assign -- //
 
-	__gc_variant &operator=(const __gc_variant &other)
+	_gc_variant &operator=(const _gc_variant &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	__gc_variant &operator=(const wrapped_t &other)
+	_gc_variant &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	__gc_variant &operator=(__gc_variant &&other)
+	_gc_variant &operator=(_gc_variant &&other)
 	{
 		if (this != &other)
 		{
@@ -8216,15 +8217,15 @@ public: // -- assign -- //
 		}
 		return *this;
 	}
-	__gc_variant &operator=(wrapped_t &&other)
+	_gc_variant &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
 		return *this;
 	}
 
-	template<typename T, std::enable_if_t<!std::is_same<std::decay_t<T>, __gc_variant>::value, int> = 0>
-	__gc_variant &operator=(T &&t)
+	template<typename T, std::enable_if_t<!std::is_same<std::decay_t<T>, _gc_variant>::value, int> = 0>
+	_gc_variant &operator=(T &&t)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::forward<T>(t);
@@ -8264,7 +8265,7 @@ public: // -- modifiers -- //
 		return wrapped().template emplace<I>(il, std::forward<Args>(args)...);
 	}
 
-	void swap(__gc_variant &other)
+	void swap(_gc_variant &other)
 	{
 		if (this != &other)
 		{
@@ -8278,9 +8279,9 @@ public: // -- modifiers -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_variant &a, __gc_variant &b) { a.swap(b); }
-	friend void swap(__gc_variant &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_variant &b) { b.swap(a); }
+	friend void swap(_gc_variant &a, _gc_variant &b) { a.swap(b); }
+	friend void swap(_gc_variant &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_variant &b) { b.swap(a); }
 
 public: // -- helpers -- //
 
@@ -8322,21 +8323,21 @@ public: // -- helpers -- //
 
 public: // -- comparison -- //
 
-	friend constexpr bool operator==(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() == b.wrapped(); }
-	friend constexpr bool operator!=(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() != b.wrapped(); }
-	friend constexpr bool operator<(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() < b.wrapped(); }
-	friend constexpr bool operator<=(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() <= b.wrapped(); }
-	friend constexpr bool operator>(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() > b.wrapped(); }
-	friend constexpr bool operator>=(const __gc_variant &a, const __gc_variant &b) { return a.wrapped() >= b.wrapped(); }
+	friend constexpr bool operator==(const _gc_variant &a, const _gc_variant &b) { return a.wrapped() == b.wrapped(); }
+	friend constexpr bool operator!=(const _gc_variant &a, const _gc_variant &b) { return a.wrapped() != b.wrapped(); }
+	friend constexpr bool operator<(const _gc_variant &a, const _gc_variant &b) { return a.wrapped() < b.wrapped(); }
+	friend constexpr bool operator<=(const _gc_variant &a, const _gc_variant &b) { return a.wrapped() <= b.wrapped(); }
+	friend constexpr bool operator>(const _gc_variant &a, const _gc_variant &b) { return a.wrapped() > b.wrapped(); }
+	friend constexpr bool operator>=(const _gc_variant &a, const _gc_variant &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename Lockable, typename ...Types>
-struct GC::router<__gc_variant<Lockable, Types...>>
+struct GC::router<_gc_variant<Lockable, Types...>>
 {
 	// if all the variant options are trivial, the variant is always trivial
 	static constexpr bool is_trivial = GC::all_have_trivial_routers<Types...>::value;
 
 	template<typename F>
-	static void route(const __gc_variant<Lockable, Types...> &var, F func)
+	static void route(const _gc_variant<Lockable, Types...> &var, F func)
 	{
 		std::lock_guard lock(var.mutex);
 		GC::route(var.wrapped(), func);
@@ -8346,51 +8347,51 @@ struct GC::router<__gc_variant<Lockable, Types...>>
 namespace std
 {
 	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.template get<I>(); }
+	constexpr decltype(auto) get(_gc_variant<Lockable, Types...> &var) { return var.template get<I>(); }
 	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.template get<I>(); }
+	constexpr decltype(auto) get(const _gc_variant<Lockable, Types...> &var) { return var.template get<I>(); }
 	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).template get<I>(); }
+	constexpr decltype(auto) get(_gc_variant<Lockable, Types...> &&var) { return std::move(var).template get<I>(); }
 
 	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &var) { return var.template get<T>(); }
+	constexpr decltype(auto) get(_gc_variant<Lockable, Types...> &var) { return var.template get<T>(); }
 	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(const __gc_variant<Lockable, Types...> &var) { return var.template get<T>(); }
+	constexpr decltype(auto) get(const _gc_variant<Lockable, Types...> &var) { return var.template get<T>(); }
 	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get(__gc_variant<Lockable, Types...> &&var) { return std::move(var).template get<T>(); }
+	constexpr decltype(auto) get(_gc_variant<Lockable, Types...> &&var) { return std::move(var).template get<T>(); }
 
 	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<I>() : nullptr; }
+	constexpr decltype(auto) get_if(_gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<I>() : nullptr; }
 	template<std::size_t I, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<I>() : nullptr; }
+	constexpr decltype(auto) get_if(const _gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<I>() : nullptr; }
 
 	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(__gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<T>() : nullptr; }
+	constexpr decltype(auto) get_if(_gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<T>() : nullptr; }
 	template<typename T, typename Lockable, typename ...Types>
-	constexpr decltype(auto) get_if(const __gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<T>() : nullptr; }
+	constexpr decltype(auto) get_if(const _gc_variant<Lockable, Types...> *pvar) noexcept { return pvar ? pvar->template get_if<T>() : nullptr; }
 
 	template<typename T, typename Lockable, typename ...Types>
-	constexpr bool holds_alternative(const __gc_variant<Lockable, Types...> &var) noexcept { return var.template holds_alternative<T>(); }
+	constexpr bool holds_alternative(const _gc_variant<Lockable, Types...> &var) noexcept { return var.template holds_alternative<T>(); }
 }
 
 template<typename Lockable, typename ...Types>
-struct std::variant_size<__gc_variant<Lockable, Types...>> : std::variant_size<std::variant<Types...>> {};
+struct std::variant_size<_gc_variant<Lockable, Types...>> : std::variant_size<std::variant<Types...>> {};
 
 template<std::size_t I, typename Lockable, typename ...Types>
-struct std::variant_alternative<I, __gc_variant<Lockable, Types...>> : std::variant_alternative<I, std::variant<Types...>> {};
+struct std::variant_alternative<I, _gc_variant<Lockable, Types...>> : std::variant_alternative<I, std::variant<Types...>> {};
 
 // hash function for gc variant
 template<typename Lockable, typename ...Types>
-struct std::hash<__gc_variant<Lockable, Types...>>
+struct std::hash<_gc_variant<Lockable, Types...>>
 {
 	std::hash<std::variant<Types...>> hasher; // the hasher may be non-trivial, so store it
-	std::size_t operator()(const __gc_variant<Lockable, Types...> &var) const { return hasher(var.wrapped()); }
+	std::size_t operator()(const _gc_variant<Lockable, Types...> &var) const { return hasher(var.wrapped()); }
 };
 
 // ------------------------------------------------------------------------------------
 
 template<typename T, typename Lockable>
-class __gc_optional
+class _gc_optional
 {
 private: // -- data -- //
 
@@ -8400,9 +8401,9 @@ private: // -- data -- //
 
 	mutable Lockable mutex; // router synchronizer
 
-	friend struct GC::router<__gc_optional>;
+	friend struct GC::router<_gc_optional>;
 
-	friend struct std::hash<__gc_optional>;
+	friend struct std::hash<_gc_optional>;
 
 private: // -- data accessors -- //
 
@@ -8422,127 +8423,127 @@ public: // -- types -- //
 
 public: // -- ctor / dtor -- //
 
-	constexpr __gc_optional() noexcept
+	constexpr _gc_optional() noexcept
 	{
 		new (buffer) wrapped_t();
 	}
-	constexpr __gc_optional(std::nullopt_t) noexcept
+	constexpr _gc_optional(std::nullopt_t) noexcept
 	{
 		new (buffer) wrapped_t(std::nullopt);
 	}
 
-	constexpr __gc_optional(const __gc_optional &other)
+	constexpr _gc_optional(const _gc_optional &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
-	constexpr __gc_optional(const wrapped_t &other)
+	constexpr _gc_optional(const wrapped_t &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
-	constexpr __gc_optional(__gc_optional &&other)
+	constexpr _gc_optional(_gc_optional &&other)
 	{
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
-	constexpr __gc_optional(wrapped_t &&other)
+	constexpr _gc_optional(wrapped_t &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
 	template<typename U, typename ULockable, std::enable_if_t<std::is_convertible<const U&, T>::value, int> = 0>
-	__gc_optional(const __gc_optional<U, ULockable> &other)
+	_gc_optional(const _gc_optional<U, ULockable> &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
 	template<typename U, std::enable_if_t<std::is_convertible<const U&, T>::value, int> = 0>
-	__gc_optional(const std::optional<U> &other)
+	_gc_optional(const std::optional<U> &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
 	template<typename U, typename ULockable, std::enable_if_t<!std::is_convertible<const U&, T>::value, int> = 0>
-	explicit __gc_optional(const __gc_optional<U, ULockable> &other)
+	explicit _gc_optional(const _gc_optional<U, ULockable> &other)
 	{
 		new (buffer) wrapped_t(other.wrapped());
 	}
 	template<typename U, std::enable_if_t<!std::is_convertible<const U&, T>::value, int> = 0>
-	explicit __gc_optional(const std::optional<U> &other)
+	explicit _gc_optional(const std::optional<U> &other)
 	{
 		new (buffer) wrapped_t(other);
 	}
 
 	template<typename U, typename ULockable, std::enable_if_t<std::is_convertible<U&&, T>::value, int> = 0>
-	__gc_optional(__gc_optional<U, ULockable> &&other)
+	_gc_optional(_gc_optional<U, ULockable> &&other)
 	{
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	template<typename U, std::enable_if_t<std::is_convertible<U&&, T>::value, int> = 0>
-	__gc_optional(std::optional<U> &&other)
+	_gc_optional(std::optional<U> &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
 	template<typename U, typename ULockable, std::enable_if_t<!std::is_convertible<U&&, T>::value, int> = 0>
-	explicit __gc_optional(__gc_optional<U, ULockable> &&other)
+	explicit _gc_optional(_gc_optional<U, ULockable> &&other)
 	{
 		new (buffer) wrapped_t(std::move(other.wrapped()));
 	}
 	template<typename U, std::enable_if_t<!std::is_convertible<U&&, T>::value, int> = 0>
-	explicit __gc_optional(std::optional<U> &&other)
+	explicit _gc_optional(std::optional<U> &&other)
 	{
 		new (buffer) wrapped_t(std::move(other));
 	}
 
 	template<typename ...Args>
-	constexpr explicit __gc_optional(std::in_place_t, Args &&...args)
+	constexpr explicit _gc_optional(std::in_place_t, Args &&...args)
 	{
 		new (buffer) wrapped_t(std::in_place, std::forward<Args>(args)...);
 	}
 	template<typename U, typename ...Args>
-	constexpr explicit __gc_optional(std::in_place_t, std::initializer_list<U> il, Args &&...args)
+	constexpr explicit _gc_optional(std::in_place_t, std::initializer_list<U> il, Args &&...args)
 	{
 		new (buffer) wrapped_t(std::in_place, il, std::forward<Args>(args)...);
 	}
 
 	template<typename U = value_type, std::enable_if_t<std::is_convertible<U&&, T>::value, int> = 0>
-	constexpr __gc_optional(U &&value)
+	constexpr _gc_optional(U &&value)
 	{
 		new (buffer) wrapped_t(std::forward<U>(value));
 	}
 	template<typename U = value_type, std::enable_if_t<!std::is_convertible<U&&, T>::value, int> = 0>
-	constexpr explicit __gc_optional(U &&value)
+	constexpr explicit _gc_optional(U &&value)
 	{
 		new (buffer) wrapped_t(std::forward<U>(value));
 	}
 
-	~__gc_optional()
+	~_gc_optional()
 	{
 		wrapped().~wrapped_t();
 	}
 
 public: // -- assign -- //
 
-	__gc_optional &operator=(std::nullopt_t)
+	_gc_optional &operator=(std::nullopt_t)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::nullopt;
 		return *this;
 	}
 
-	constexpr __gc_optional &operator=(const __gc_optional &other)
+	constexpr _gc_optional &operator=(const _gc_optional &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
-	constexpr __gc_optional &operator=(const wrapped_t &other)
+	constexpr _gc_optional &operator=(const wrapped_t &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	constexpr __gc_optional &operator=(__gc_optional &&other)
+	constexpr _gc_optional &operator=(_gc_optional &&other)
 	{
 		if (this != &other)
 		{
@@ -8551,7 +8552,7 @@ public: // -- assign -- //
 		}
 		return *this;
 	}
-	constexpr __gc_optional &operator=(wrapped_t &&other)
+	constexpr _gc_optional &operator=(wrapped_t &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
@@ -8559,37 +8560,37 @@ public: // -- assign -- //
 	}
 
 	template<typename U = T>
-	__gc_optional &operator=(U &&value)
+	_gc_optional &operator=(U &&value)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::forward<U>(value);
 		return *this;
 	}
 
-	template<typename U, typename ULockable, std::enable_if_t<!std::is_same<__gc_optional, __gc_optional<U, ULockable>>::value, int> = 0>
-	__gc_optional &operator=(const __gc_optional<U, ULockable> &other)
+	template<typename U, typename ULockable, std::enable_if_t<!std::is_same<_gc_optional, _gc_optional<U, ULockable>>::value, int> = 0>
+	_gc_optional &operator=(const _gc_optional<U, ULockable> &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other.wrapped();
 		return *this;
 	}
 	template<typename U, std::enable_if_t<!std::is_same<wrapped_t, std::optional<U>>::value, int> = 0>
-	__gc_optional &operator=(const std::optional<U> &other)
+	_gc_optional &operator=(const std::optional<U> &other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = other;
 		return *this;
 	}
 
-	template<typename U, typename ULockable, std::enable_if_t<!std::is_same<__gc_optional, __gc_optional<U, ULockable>>::value, int> = 0>
-	__gc_optional &operator=(__gc_optional<U, ULockable> &&other)
+	template<typename U, typename ULockable, std::enable_if_t<!std::is_same<_gc_optional, _gc_optional<U, ULockable>>::value, int> = 0>
+	_gc_optional &operator=(_gc_optional<U, ULockable> &&other)
 	{
 		std::scoped_lock locks(this->mutex, other.mutex);
 		wrapped() = std::move(other.wrapped());
 		return *this;
 	}
 	template<typename U, std::enable_if_t<!std::is_same<wrapped_t, std::optional<U>>::value, int> = 0>
-	__gc_optional &operator=(std::optional<U> &&other)
+	_gc_optional &operator=(std::optional<U> &&other)
 	{
 		std::lock_guard lock(this->mutex);
 		wrapped() = std::move(other);
@@ -8641,7 +8642,7 @@ public: // -- observers -- //
 
 public: // -- modifiers -- //
 
-	void swap(__gc_optional &other)
+	void swap(_gc_optional &other)
 	{
 		if (this != &other)
 		{
@@ -8655,9 +8656,9 @@ public: // -- modifiers -- //
 		wrapped().swap(other);
 	}
 
-	friend void swap(__gc_optional &a, __gc_optional &b) { a.swap(b); }
-	friend void swap(__gc_optional &a, wrapped_t &b) { a.swap(b); }
-	friend void swap(wrapped_t &a, __gc_optional &b) { b.swap(a); }
+	friend void swap(_gc_optional &a, _gc_optional &b) { a.swap(b); }
+	friend void swap(_gc_optional &a, wrapped_t &b) { a.swap(b); }
+	friend void swap(wrapped_t &a, _gc_optional &b) { b.swap(a); }
 
 	void reset()
 	{
@@ -8680,21 +8681,21 @@ public: // -- modifiers -- //
 
 public: // -- comparison -- //
 
-	friend constexpr bool operator==(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() == b.wrapped(); }
-	friend constexpr bool operator!=(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() != b.wrapped(); }
-	friend constexpr bool operator<(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() < b.wrapped(); }
-	friend constexpr bool operator<=(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() <= b.wrapped(); }
-	friend constexpr bool operator>(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() > b.wrapped(); }
-	friend constexpr bool operator>=(const __gc_optional &a, const __gc_optional &b) { return a.wrapped() >= b.wrapped(); }
+	friend constexpr bool operator==(const _gc_optional &a, const _gc_optional &b) { return a.wrapped() == b.wrapped(); }
+	friend constexpr bool operator!=(const _gc_optional &a, const _gc_optional &b) { return a.wrapped() != b.wrapped(); }
+	friend constexpr bool operator<(const _gc_optional &a, const _gc_optional &b) { return a.wrapped() < b.wrapped(); }
+	friend constexpr bool operator<=(const _gc_optional &a, const _gc_optional &b) { return a.wrapped() <= b.wrapped(); }
+	friend constexpr bool operator>(const _gc_optional &a, const _gc_optional &b) { return a.wrapped() > b.wrapped(); }
+	friend constexpr bool operator>=(const _gc_optional &a, const _gc_optional &b) { return a.wrapped() >= b.wrapped(); }
 };
 template<typename T, typename Lockable>
-struct GC::router<__gc_optional<T, Lockable>>
+struct GC::router<_gc_optional<T, Lockable>>
 {
 	// if the optional type is trivial, so is this
 	static constexpr bool is_trivial = GC::has_trivial_router<T>::value;
 
 	template<typename F>
-	static void route(const __gc_optional<T, Lockable> &var, F func)
+	static void route(const _gc_optional<T, Lockable> &var, F func)
 	{
 		std::lock_guard lock(var.mutex);
 		GC::route(var.wrapped(), func);
@@ -8702,10 +8703,10 @@ struct GC::router<__gc_optional<T, Lockable>>
 };
 
 template<typename T, typename Lockable>
-struct std::hash<__gc_optional<T, Lockable>>
+struct std::hash<_gc_optional<T, Lockable>>
 {
 	std::hash<std::optional<T>> hasher; // the hasher may be non-trivial, so store it
-	std::size_t operator()(const __gc_optional<T, Lockable> &var) const { return hasher(var.wrapped()); }
+	std::size_t operator()(const _gc_optional<T, Lockable> &var) const { return hasher(var.wrapped()); }
 };
 
 // ------------------------ //
@@ -8715,12 +8716,12 @@ struct std::hash<__gc_optional<T, Lockable>>
 // ------------------------ //
 
 template<typename T, typename Deleter, typename Lockable>
-struct GC::wrapper_traits<__gc_unique_ptr<T, Deleter, Lockable>>
+struct GC::wrapper_traits<_gc_unique_ptr<T, Deleter, Lockable>>
 {
 	using unwrapped_type = std::unique_ptr<T, Deleter>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unique_ptr<T, Deleter, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unique_ptr<T, Deleter, _Lockable>>;
 };
 template<typename T, typename Deleter>
 struct GC::wrapper_traits<std::unique_ptr<T, Deleter>>
@@ -8728,16 +8729,16 @@ struct GC::wrapper_traits<std::unique_ptr<T, Deleter>>
 	using unwrapped_type = std::unique_ptr<T, Deleter>;
 	
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unique_ptr<T, Deleter, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unique_ptr<T, Deleter, _Lockable>>;
 };
 
 template<typename T, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_vector<T, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_vector<T, Allocator, Lockable>>
 {
 	using unwrapped_type = std::vector<T, Allocator>;
 	
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_vector<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_vector<T, Allocator, _Lockable>>;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::vector<T, Allocator>>
@@ -8745,16 +8746,16 @@ struct GC::wrapper_traits<std::vector<T, Allocator>>
 	using unwrapped_type = std::vector<T, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_vector<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_vector<T, Allocator, _Lockable>>;
 };
 
 template<typename T, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_deque<T, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_deque<T, Allocator, Lockable>>
 {
 	using unwrapped_type = std::deque<T, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_deque<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_deque<T, Allocator, _Lockable>>;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::deque<T, Allocator>>
@@ -8762,16 +8763,16 @@ struct GC::wrapper_traits<std::deque<T, Allocator>>
 	using unwrapped_type = std::deque<T, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_deque<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_deque<T, Allocator, _Lockable>>;
 };
 
 template<typename T, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_forward_list<T, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_forward_list<T, Allocator, Lockable>>
 {
 	using unwrapped_type = std::forward_list<T, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_forward_list<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_forward_list<T, Allocator, _Lockable>>;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::forward_list<T, Allocator>>
@@ -8779,16 +8780,16 @@ struct GC::wrapper_traits<std::forward_list<T, Allocator>>
 	using unwrapped_type = std::forward_list<T, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_forward_list<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_forward_list<T, Allocator, _Lockable>>;
 };
 
 template<typename T, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_list<T, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_list<T, Allocator, Lockable>>
 {
 	using unwrapped_type = std::list<T, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_list<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_list<T, Allocator, _Lockable>>;
 };
 template<typename T, typename Allocator>
 struct GC::wrapper_traits<std::list<T, Allocator>>
@@ -8796,16 +8797,16 @@ struct GC::wrapper_traits<std::list<T, Allocator>>
 	using unwrapped_type = std::list<T, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_list<T, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_list<T, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_set<Key, Compare, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_set<Key, Compare, Allocator, Lockable>>
 {
 	using unwrapped_type = std::set<Key, Compare, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_set<Key, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_set<Key, Compare, Allocator, _Lockable>>;
 };
 template<typename Key, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::set<Key, Compare, Allocator>>
@@ -8813,16 +8814,16 @@ struct GC::wrapper_traits<std::set<Key, Compare, Allocator>>
 	using unwrapped_type = std::set<Key, Compare, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_set<Key, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_set<Key, Compare, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename Compare, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_multiset<Key, Compare, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_multiset<Key, Compare, Allocator, Lockable>>
 {
 	using unwrapped_type = std::multiset<Key, Compare, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multiset<Key, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_multiset<Key, Compare, Allocator, _Lockable>>;
 };
 template<typename Key, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::multiset<Key, Compare, Allocator>>
@@ -8830,16 +8831,16 @@ struct GC::wrapper_traits<std::multiset<Key, Compare, Allocator>>
 	using unwrapped_type = std::multiset<Key, Compare, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multiset<Key, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_multiset<Key, Compare, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_map<Key, T, Compare, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_map<Key, T, Compare, Allocator, Lockable>>
 {
 	using unwrapped_type = std::map<Key, T, Compare, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_map<Key, T, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_map<Key, T, Compare, Allocator, _Lockable>>;
 };
 template<typename Key, typename T, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::map<Key, T, Compare, Allocator>>
@@ -8847,16 +8848,16 @@ struct GC::wrapper_traits<std::map<Key, T, Compare, Allocator>>
 	using unwrapped_type = std::map<Key, T, Compare, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_map<Key, T, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_map<Key, T, Compare, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename T, typename Compare, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_multimap<Key, T, Compare, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_multimap<Key, T, Compare, Allocator, Lockable>>
 {
 	using unwrapped_type = std::multimap<Key, T, Compare, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multimap<Key, T, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_multimap<Key, T, Compare, Allocator, _Lockable>>;
 };
 template<typename Key, typename T, typename Compare, typename Allocator>
 struct GC::wrapper_traits<std::multimap<Key, T, Compare, Allocator>>
@@ -8864,16 +8865,16 @@ struct GC::wrapper_traits<std::multimap<Key, T, Compare, Allocator>>
 	using unwrapped_type = std::multimap<Key, T, Compare, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_multimap<Key, T, Compare, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_multimap<Key, T, Compare, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_unordered_set<Key, Hash, KeyEqual, Allocator, Lockable>>
 {
 	using unwrapped_type = std::unordered_set<Key, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_set<Key, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_set<Key, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
@@ -8881,16 +8882,16 @@ struct GC::wrapper_traits<std::unordered_set<Key, Hash, KeyEqual, Allocator>>
 	using unwrapped_type = std::unordered_set<Key, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_set<Key, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_set<Key, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, Lockable>>
 {
 	using unwrapped_type = std::unordered_multiset<Key, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 template<typename Key, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_multiset<Key, Hash, KeyEqual, Allocator>>
@@ -8898,16 +8899,16 @@ struct GC::wrapper_traits<std::unordered_multiset<Key, Hash, KeyEqual, Allocator
 	using unwrapped_type = std::unordered_multiset<Key, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_multiset<Key, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, Lockable>>
 {
 	using unwrapped_type = std::unordered_map<Key, T, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
@@ -8915,16 +8916,16 @@ struct GC::wrapper_traits<std::unordered_map<Key, T, Hash, KeyEqual, Allocator>>
 	using unwrapped_type = std::unordered_map<Key, T, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_map<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator, typename Lockable>
-struct GC::wrapper_traits<__gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable>>
+struct GC::wrapper_traits<_gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, Lockable>>
 {
 	using unwrapped_type = std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 template<typename Key, typename T, typename Hash, typename KeyEqual, typename Allocator>
 struct GC::wrapper_traits<std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>>
@@ -8932,16 +8933,16 @@ struct GC::wrapper_traits<std::unordered_multimap<Key, T, Hash, KeyEqual, Alloca
 	using unwrapped_type = std::unordered_multimap<Key, T, Hash, KeyEqual, Allocator>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_unordered_multimap<Key, T, Hash, KeyEqual, Allocator, _Lockable>>;
 };
 
 template<typename Lockable, typename ...Types>
-struct GC::wrapper_traits<__gc_variant<Lockable, Types...>>
+struct GC::wrapper_traits<_gc_variant<Lockable, Types...>>
 {
 	using unwrapped_type = std::variant<Types...>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_variant<_Lockable, Types...>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_variant<_Lockable, Types...>>;
 };
 template<typename ...Types>
 struct GC::wrapper_traits<std::variant<Types...>>
@@ -8949,16 +8950,16 @@ struct GC::wrapper_traits<std::variant<Types...>>
 	using unwrapped_type = std::variant<Types...>;
 
 	template<typename _Lockable = GC::default_lockable_t>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_variant<_Lockable, Types...>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_variant<_Lockable, Types...>>;
 };
 
 template<typename T, typename Lockable>
-struct GC::wrapper_traits<__gc_optional<T, Lockable>>
+struct GC::wrapper_traits<_gc_optional<T, Lockable>>
 {
 	using unwrapped_type = std::optional<T>;
 
 	template<typename _Lockable = Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_optional<T, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_optional<T, _Lockable>>;
 };
 template<typename T>
 struct GC::wrapper_traits<std::optional<T>>
@@ -8966,7 +8967,7 @@ struct GC::wrapper_traits<std::optional<T>>
 	using unwrapped_type = std::optional<T>;
 
 	template<typename _Lockable>
-	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, __gc_optional<T, _Lockable>>;
+	using wrapped_type = std::conditional_t<GC::has_trivial_router<unwrapped_type>::value, unwrapped_type, _gc_optional<T, _Lockable>>;
 };
 
 // ------------------ //
@@ -8975,20 +8976,20 @@ struct GC::wrapper_traits<std::optional<T>>
 
 // ------------------ //
 
-static struct __gc_static_guard_t
+static struct _gc_static_guard_t
 {
-	__gc_static_guard_t()
+	_gc_static_guard_t()
 	{
 		GC::disjoint_module::primary_handle(); // first create the primary handle (which creates the module container)
 		GC::background_collector_controller::get(); // then create the background controller (must be initialized after module container so that it's destroyed before it)
 	}
-} __gc_static_guard;
-static thread_local struct __gc_thread_local_guard_t
+} _gc_static_guard;
+static thread_local struct _gc_thread_local_guard_t
 {
-	__gc_thread_local_guard_t()
+	_gc_thread_local_guard_t()
 	{
 		GC::disjoint_module::local_handle(); // create the local handle - required for nearly every global operation in cpp-gc
 	}
-} __gc_thread_local_guard;
+} _gc_thread_local_guard;
 
 #endif

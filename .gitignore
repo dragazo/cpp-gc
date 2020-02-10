@@ -2,6 +2,7 @@
 
 *.exe
 *.patch
+.vscode/
 
 # Created by https://www.gitignore.io/api/linux,windows,notepadpp,visualstudio
 # Edit at https://www.gitignore.io/?templates=linux,windows,notepadpp,visualstudio

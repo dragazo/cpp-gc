@@ -1,14 +1,14 @@
 test-opt:
-	g++ -o test.exe -Wall -std=c++17 -pthread *.cpp -O4
+	g++ -o test.exe -Wall -Wextra -Wpedantic -Wshadow -std=c++17 -pthread *.cpp -O4
 
 test:
-	g++ -o test.exe -Wall -std=c++17 -pthread *.cpp -Og
+	g++ -o test.exe -Wall -Wextra -Wpedantic -Wshadow -std=c++17 -pthread *.cpp -Og
 
 sanitize-opt:
-	clang++ -o test.exe -Wall -std=c++17 -pthread *.cpp -O3 -fsanitize=undefined -fsanitize=address
+	clang++ -o test.exe -Wall -Wextra -Wpedantic -Wshadow -std=c++17 -pthread *.cpp -O3 -fsanitize=undefined -fsanitize=address
 
 sanitize:
-	clang++ -o test.exe -Wall -std=c++17 -pthread *.cpp -Og -fsanitize=undefined -fsanitize=address
+	clang++ -o test.exe -Wall -Wextra -Wpedantic -Wshadow -std=c++17 -pthread *.cpp -Og -fsanitize=undefined -fsanitize=address
 
 clean:
 	rm -rf *.o
